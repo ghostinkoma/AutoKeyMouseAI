@@ -46,17 +46,27 @@ Get-PnpDevice -Class Ports -PresentOnly | Select-Object FriendlyName, Status
 ## 2. ファームウェアを書き込む
 
 ```powershell
-py -m pip install -U platformio
+py -3.12 -m pip install -U platformio                 # PlatformIO は Python 3.10 以上が必要
 cd D:\hobby\AutoKeyMouseAI\firmware
-py -m platformio run -t upload --upload-port COM5      # COM5 は上で確認した番号に
-py -m platformio device monitor -p COM5 -b 115200      # ログ確認 (Ctrl+C で終了)
+# チップと Flash 容量の確認 (モニタは閉じておく)
+py -3.12 -m platformio pkg exec -p tool-esptoolpy -- esptool.py --port COM18 flash_id
+# 書き込み (-e は基板に合わせる: esp32 / esp32_4mb / esp32s3)
+py -3.12 -m platformio run -e esp32 -t upload --upload-port COM18
+py -3.12 -m platformio device monitor -p COM18 -b 115200   # ログ確認 (Ctrl+C で終了)
 ```
+
+| `-e` | 基板 |
+|---|---|
+| `esp32` (既定) | 無印 ESP32 / Flash 16MB (LilyGO T-Display 16MB など) |
+| `esp32_4mb` | 無印 ESP32 / Flash 4MB |
+| `esp32s3` | ESP32-S3 / Flash 16MB |
 
 * 初回は ESP32 用のツールチェーンを自動ダウンロードするので数分かかる
 * USB-C が 2 つある基板は **COM** 側を使う
+* 書き込み中はシリアルモニタを閉じておく (COM ポートを奪い合って失敗する)
 * 書き込みに失敗する場合は BOOT ボタンを押したまま RST を押してから再実行
 
-### ステータス LED (オンボード RGB, GPIO48)
+### ステータス LED (ESP32-S3 基板のオンボード RGB, GPIO48。無印 ESP32 では無効)
 
 | 表示 | 状態 |
 |---|---|

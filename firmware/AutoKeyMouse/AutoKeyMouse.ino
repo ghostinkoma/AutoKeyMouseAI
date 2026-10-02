@@ -17,6 +17,7 @@ namespace {
 QueueHandle_t gLines;  // シリアルから受けた 1 行 (String*)
 
 void led(uint8_t r, uint8_t g, uint8_t b) {
+  if (STATUS_LED_PIN < 0) return;
   const uint16_t k = STATUS_LED_BRIGHTNESS;
   rgbLedWrite(STATUS_LED_PIN, r * k / 255, g * k / 255, b * k / 255);
 }

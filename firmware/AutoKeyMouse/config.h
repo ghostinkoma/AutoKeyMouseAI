@@ -9,9 +9,14 @@
 #define AP_PASS "akm12345"                  // 8文字以上
 // SoftAP の固定 IP は 192.168.4.1
 
-// ---- ステータス LED (DevKitC-1 互換基板のオンボード WS2812) -----------------
-// 基板によっては GPIO38 の場合がある。LED が光らなければ変更する。
-#define STATUS_LED_PIN        48
+// ---- ステータス LED (オンボード WS2812) ------------------------------------
+// ESP32-S3 DevKitC-1 互換基板は GPIO48 (基板によっては 38)。
+// 無印 ESP32 の基板 (LilyGO T-Display など) は RGB LED が無いので -1 (無効)。
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#define STATUS_LED_PIN 48
+#else
+#define STATUS_LED_PIN -1
+#endif
 #define STATUS_LED_BRIGHTNESS 16            // 0-255
 
 // ---- マクロ実行 -----------------------------------------------------------
