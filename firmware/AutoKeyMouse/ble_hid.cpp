@@ -102,6 +102,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     // 7.5ms - 15ms 間隔を要求 (最終的な値はホストが決める)
     server->updateConnParams(info.getConnHandle(), 6, 12, 0, 200);
     Serial.printf("[BLE] connected: %s\n", info.getAddress().toString().c_str());
+    // ホスト任せにせず、こちらから暗号化 (ペアリング / ボンド復元) を要求する
+    NimBLEDevice::startSecurity(info.getConnHandle());
   }
 
   void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int reason) override {
@@ -115,6 +117,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     gSecured = info.isEncrypted();
     Serial.printf("[BLE] auth complete: encrypted=%d bonded=%d\n",
                   info.isEncrypted(), info.isBonded());
+    if (!info.isEncrypted()) {
+      Serial.println("[BLE] 暗号化に失敗。PC 側で AutoKeyMouse を削除してからペアリングし直してください");
+    }
   }
 };
 

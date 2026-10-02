@@ -69,7 +69,7 @@ function setts(){api('/settings?delay='+$('delay').value+'&layout='+$('layout').
 function wifi(){api('/wifi',{ssid:$('ssid').value,pass:$('pass').value})}
 let first=true;
 async function poll(){try{const s=await (await fetch('/status')).json();
- $('ble').textContent=s.ble?'接続済み':'未接続';$('ble').className=s.ble?'ok':'ng';
+ $('ble').textContent=s.ble?'接続済み':(s.blePeers>0?'接続中 (ペアリング未完了)':'未接続');$('ble').className=s.ble?'ok':'ng';
  $('wifi').textContent=s.wifi?s.ssid+' / '+s.ip:'未接続 (AP '+s.apIp+')';$('wifi').className=s.wifi?'ok':'ng';
  $('cur').textContent=s.busy?s.current:'待機中';$('last').textContent=s.last;
  if(first){$('delay').value=s.delay;$('layout').value=s.layout;$('ssid').value=s.ssid;first=false}
