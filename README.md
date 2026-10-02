@@ -66,6 +66,23 @@ py -3.12 -m platformio device monitor -p COM18 -b 115200   # ログ確認 (Ctrl+
 * 書き込み中はシリアルモニタを閉じておく (COM ポートを奪い合って失敗する)
 * 書き込みに失敗する場合は BOOT ボタンを押したまま RST を押してから再実行
 
+### 書き込みが壊れる場合 (CH9102 搭載基板など)
+
+`MD5 of file does not match` / `Failed to leave compressed flash mode` /
+`Possible serial noise or corruption` が出る、または起動ログに `No bootable app partitions` が
+繰り返し出る場合は、esptool の補助プログラム (stub) を使わず、ESP32 内蔵の書き込み機能で書く:
+
+```powershell
+py -3.12 -m pip install -U esptool
+cd D:\hobby\AutoKeyMouseAI\firmware
+py -3.12 -m platformio run -e esp32
+$b = ".pio\build\esp32"
+$app0 = (Get-ChildItem "$env:USERPROFILE\.platformio\packages" -Recurse -Filter boot_app0.bin | Select-Object -First 1).FullName
+py -3.12 -m esptool --chip esp32 --port COM18 --baud 115200 --no-stub erase-flash
+py -3.12 -m esptool --chip esp32 --port COM18 --baud 115200 --no-stub write-flash 0x1000 $b\bootloader.bin 0x8000 $b\partitions.bin 0xe000 $app0 0x10000 $b\firmware.bin
+py -3.12 -m esptool --chip esp32 --port COM18 --baud 115200 --no-stub verify-flash 0x10000 $b\firmware.bin
+```
+
 ### ステータス LED (ESP32-S3 基板のオンボード RGB, GPIO48。無印 ESP32 では無効)
 
 | 表示 | 状態 |
