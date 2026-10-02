@@ -16,8 +16,75 @@ namespace {
 WebServer gServer(80);
 Preferences gPrefs;
 String gSsid, gPass;
-uint32_t gLastReconnect = 0;
-bool gWasConnected = false;
+uint32_t gLastAttempt = 0;     // 最後に WiFi.begin した時刻
+uint32_t gLastUp = 0;          // 最後に STA が接続していた時刻
+uint32_t gUpSince = 0;         // 今回の STA 接続が始まった時刻 (0 = 未接続)
+bool gApOn = false;
+volatile bool gGotIp = false;
+
+// 他タスク (シリアルの対話設定) からの変更要求。loop() 側で適用する
+SemaphoreHandle_t gReqLock;
+bool gReqPending = false;
+String gReqSsid, gReqPass;
+
+constexpr uint32_t kApFallbackMs = 30000;  // STA がこの時間つながらなければ AP を出す
+constexpr uint32_t kRetryMs = 30000;       // STA 再接続の間隔
+constexpr uint32_t kApOffDelayMs = 10000;  // STA 接続後、AP を止めるまでの猶予
+
+void startAp() {
+  if (gApOn) return;
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
+                    IPAddress(255, 255, 255, 0));
+  WiFi.softAP(AP_SSID, AP_PASS);
+  gApOn = true;
+  Serial.printf("[WIFI] SoftAP ON  ssid=%s pass=%s  http://%s/\n", AP_SSID, AP_PASS,
+                WiFi.softAPIP().toString().c_str());
+}
+
+void stopAp() {
+  if (!gApOn) return;
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  gApOn = false;
+  Serial.println("[WIFI] SoftAP OFF (STA connected)");
+}
+
+void connectSta() {
+  if (gSsid.isEmpty()) return;
+  gLastAttempt = millis();
+  Serial.printf("[WIFI] connecting to \"%s\" ...\n", gSsid.c_str());
+  WiFi.begin(gSsid.c_str(), gPass.c_str());
+}
+
+void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.printf("[WIFI] associated (ch %d), waiting for DHCP...\n",
+                    info.wifi_sta_connected.channel);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      gGotIp = true;
+      Serial.printf("[WIFI] got IP %s  gw %s  rssi %d dBm\n", WiFi.localIP().toString().c_str(),
+                    WiFi.gatewayIP().toString().c_str(), WiFi.RSSI());
+      Serial.printf("[WIFI] Web UI: http://%s/  (http://autokeymouse.local/)\n",
+                    WiFi.localIP().toString().c_str());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
+      wifi_err_reason_t r = (wifi_err_reason_t)info.wifi_sta_disconnected.reason;
+      if (gGotIp || millis() - gLastAttempt < 60000) {
+        Serial.printf("[WIFI] disconnected: reason %d (%s)\n", r, WiFi.disconnectReasonName(r));
+      }
+      gGotIp = false;
+      break;
+    }
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+      Serial.println("[WIFI] a client joined the SoftAP");
+      break;
+    default:
+      break;
+  }
+}
 
 String jsonEscape(const String& s) {
   String o;
@@ -43,12 +110,20 @@ String jsonEscape(const String& s) {
   return o;
 }
 
+void logRequest(int code) {
+  if (gServer.uri() == "/status") return;  // Web UI が毎秒呼ぶので出さない
+  Serial.printf("[HTTP] %s %s -> %d\n", gServer.method() == HTTP_GET ? "GET" : "POST",
+                gServer.uri().c_str(), code);
+}
+
 void sendText(int code, const String& msg) {
+  logRequest(code);
   gServer.sendHeader("Access-Control-Allow-Origin", "*");
   gServer.send(code, "text/plain; charset=utf-8", msg + "\n");
 }
 
 void sendJson(const String& json) {
+  logRequest(200);
   gServer.sendHeader("Access-Control-Allow-Origin", "*");
   gServer.sendHeader("Cache-Control", "no-store");
   gServer.send(200, "application/json", json);
@@ -68,7 +143,10 @@ int httpCode(macro::Result r) {
 
 // ---------------------------------------------------------------- handlers --
 
-void handleRoot() { gServer.send_P(200, "text/html; charset=utf-8", kIndexHtml); }
+void handleRoot() {
+  logRequest(200);
+  gServer.send_P(200, "text/html; charset=utf-8", kIndexHtml);
+}
 
 // GET /macro?id=N[&repeat=R]  R=0 で停止まで繰り返し
 void handleMacro() {
@@ -113,7 +191,7 @@ void handleStatus() {
   j += ",\"wifi\":" + String(staConnected() ? "true" : "false");
   j += ",\"ssid\":\"" + jsonEscape(gSsid) + "\"";
   j += ",\"ip\":\"" + staIp() + "\"";
-  j += ",\"apIp\":\"" + WiFi.softAPIP().toString() + "\"";
+  j += ",\"apIp\":\"" + (gApOn ? WiFi.softAPIP().toString() : String("")) + "\"";
   j += ",\"busy\":" + String(macro::busy() ? "true" : "false");
   j += ",\"current\":\"" + jsonEscape(macro::currentLabel()) + "\"";
   j += ",\"last\":\"" + jsonEscape(macro::lastResult()) + "\"";
@@ -176,36 +254,36 @@ void handleSettings() {
 
 // POST /wifi  ssid, pass  → NVS に保存して接続し直す
 void handleWifi() {
-  gSsid = gServer.arg("ssid");
-  gPass = gServer.arg("pass");
-  gPrefs.putString("ssid", gSsid);
-  gPrefs.putString("pass", gPass);
-  sendText(200, gSsid.isEmpty() ? "STA disabled" : "connecting to " + gSsid);
+  String ssid = gServer.arg("ssid");
+  sendText(200, ssid.isEmpty() ? "STA disabled" : "connecting to " + ssid);
   delay(100);
-  WiFi.disconnect();
-  if (!gSsid.isEmpty()) WiFi.begin(gSsid.c_str(), gPass.c_str());
-  gLastReconnect = millis();
+  setCredentials(ssid, gServer.arg("pass"));
 }
 
 void handleNotFound() { sendText(404, "not found"); }
 
 }  // namespace
 
+void applyCredentials(const String& ssid, const String& pass);
+
 void begin() {
+  gReqLock = xSemaphoreCreateMutex();
   gPrefs.begin("wifi", false);
   gSsid = gPrefs.getString("ssid", "");
   gPass = gPrefs.getString("pass", "");
 
   WiFi.persistent(false);
-  WiFi.mode(WIFI_AP_STA);
+  WiFi.onEvent(onWifiEvent);
   // 注意: BLE と併用するため WiFi.setSleep(false) にはしないこと。
   // Wi-Fi/BT コイグジスタンスはモデムスリープ有効が前提 (無効にすると起動時に abort する)。
-  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
-                    IPAddress(255, 255, 255, 0));
-  WiFi.softAP(AP_SSID, AP_PASS);
   WiFi.setAutoReconnect(true);
-  if (!gSsid.isEmpty()) WiFi.begin(gSsid.c_str(), gPass.c_str());
-  Serial.printf("[NET] SoftAP %s @ %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+  if (gSsid.isEmpty()) {
+    Serial.println("[WIFI] no Wi-Fi configured. Type 'wifi' + Enter in the serial monitor to set it up.");
+    startAp();
+  } else {
+    WiFi.mode(WIFI_STA);
+    connectSta();
+  }
 
   if (MDNS.begin("autokeymouse")) MDNS.addService("http", "tcp", 80);
 
@@ -225,19 +303,65 @@ void begin() {
 void loop() {
   gServer.handleClient();
 
-  bool up = staConnected();
-  if (up != gWasConnected) {
-    gWasConnected = up;
-    if (up) Serial.printf("[NET] STA connected: %s  http://%s/\n", gSsid.c_str(), staIp().c_str());
-    else Serial.println("[NET] STA disconnected");
+  if (gReqPending) {
+    xSemaphoreTake(gReqLock, portMAX_DELAY);
+    String ssid = gReqSsid, pass = gReqPass;
+    gReqPending = false;
+    xSemaphoreGive(gReqLock);
+    applyCredentials(ssid, pass);
   }
-  // オートリコネクト (setAutoReconnect が効かなかった場合の保険)
-  if (!up && !gSsid.isEmpty() && millis() - gLastReconnect > 15000) {
-    gLastReconnect = millis();
-    WiFi.disconnect();
-    WiFi.begin(gSsid.c_str(), gPass.c_str());
+
+  uint32_t now = millis();
+  bool up = staConnected();
+  if (up) {
+    gLastUp = now;
+    if (!gUpSince) gUpSince = now;
+    // STA でつながったら AP は不要 (同じ無線で AP を出し続けるとチャネルが固定されて不安定になる)
+    if (gApOn && now - gUpSince > kApOffDelayMs) stopAp();
+    return;
+  }
+  gUpSince = 0;
+  if (gSsid.isEmpty()) {
+    startAp();
+    return;
+  }
+  // STA がしばらくつながらなければ AP を出して設定できるようにする
+  if (!gApOn && now - gLastUp > kApFallbackMs && now - gLastAttempt > kApFallbackMs / 2) {
+    Serial.println("[WIFI] STA not connected, enabling SoftAP as fallback");
+    startAp();
+  }
+  // オートリコネクトの保険
+  if (now - gLastAttempt > kRetryMs) connectSta();
+}
+
+void applyCredentials(const String& ssid, const String& pass) {
+  gSsid = ssid;
+  gPass = pass;
+  gPrefs.putString("ssid", gSsid);
+  gPrefs.putString("pass", gPass);
+  Serial.printf("[WIFI] saved ssid=\"%s\" (pass %u chars)\n", gSsid.c_str(), (unsigned)gPass.length());
+  WiFi.disconnect();
+  gLastUp = millis();  // ここから AP フォールバックの時間を数える
+  if (gSsid.isEmpty()) {
+    startAp();
+  } else {
+    if (!gApOn) WiFi.mode(WIFI_STA);
+    connectSta();
   }
 }
+
+void setCredentials(const String& ssid, const String& pass) {
+  xSemaphoreTake(gReqLock, portMAX_DELAY);
+  gReqSsid = ssid;
+  gReqPass = pass;
+  gReqPending = true;
+  xSemaphoreGive(gReqLock);
+}
+
+String ssid() { return gSsid; }
+bool apActive() { return gApOn; }
+String apIp() { return gApOn ? WiFi.softAPIP().toString() : String(""); }
+bool staConfigured() { return !gSsid.isEmpty(); }
 
 bool staConnected() { return WiFi.status() == WL_CONNECTED; }
 String staIp() { return staConnected() ? WiFi.localIP().toString() : String(""); }

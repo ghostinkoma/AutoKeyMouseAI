@@ -118,7 +118,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     Serial.printf("[BLE] auth complete: encrypted=%d bonded=%d\n",
                   info.isEncrypted(), info.isBonded());
     if (!info.isEncrypted()) {
-      Serial.println("[BLE] 暗号化に失敗。PC 側で AutoKeyMouse を削除してからペアリングし直してください");
+      Serial.println("[BLE] encryption failed. Remove AutoKeyMouse in Windows Bluetooth settings and pair again.");
     }
   }
 };

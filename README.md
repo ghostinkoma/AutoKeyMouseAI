@@ -100,11 +100,41 @@ Windows の「設定 → Bluetooth とデバイス → デバイスの追加 →
 **AutoKeyMouse** を選ぶ。キーボード+マウスとして認識される。
 (PC に Bluetooth が無い場合は BLE 対応の USB ドングルが必要)
 
-## 4. Web UI / API
+## 4. Wi-Fi 設定と Web UI / API
 
-* ESP32 の SoftAP `AutoKeyMouse` (パスワード `akm12345`) に接続して `http://192.168.4.1/`
-* Web UI の「設定」で自宅の Wi-Fi を登録すると、以後は `http://autokeymouse.local/`
-  または割り当てられた IP でアクセスできる (SoftAP も併用)
+### 家の Wi-Fi (PC と同じネットワーク) につなぐ
+
+シリアルモニタから対話形式で設定する:
+
+```powershell
+py -3.12 -m platformio device monitor -p COM18 -b 115200
+```
+
+```
+wifi                       ← 入力して Enter
+=== Wi-Fi setup ===
+  1) MyHome-2G   -48 dBm  ch6  WPA2
+  2) ...
+SSID ? (number or name, empty = cancel): 1
+Password ? (for "MyHome-2G", empty = open network): ********
+[WIFI] got IP 192.168.1.23 ...
+[WIFI] OK  IP = 192.168.1.23   Web UI: http://192.168.1.23/
+```
+
+* ESP32 は **2.4GHz のみ**。5GHz の SSID は選ばない
+* 設定は NVS に保存され、次回から自動で接続する
+* 取得した IP は T-Display の液晶にも表示される
+* その他のシリアルコマンドは `help` で一覧表示
+
+### SoftAP (設定用)
+
+Wi-Fi 未設定のとき、または STA が 30 秒つながらないときだけ SoftAP `AutoKeyMouse`
+(パスワード `akm12345`, `http://192.168.4.1/`) を出す。STA でつながると SoftAP は止まる。
+
+### シリアルのデバッグ出力
+
+`[WIFI]` 接続・切断理由・取得 IP / `[BLE]` 接続・ペアリング / `[HTTP]` リクエスト /
+`[MACRO]` 実行結果 が出力される。
 
 | エンドポイント | 説明 |
 |---|---|
@@ -120,7 +150,7 @@ Windows の「設定 → Bluetooth とデバイス → デバイスの追加 →
 `/run` は完了まで応答しないため、その間は Web サーバが他の要求を受け付けない。
 長いマクロは `/macro` (非同期) を使う。
 
-USB シリアル (115200bps) からも `run <script>` / `macro <id> [repeat]` / `stop` / `status`
+USB シリアル (115200bps) からも `run <script>` / `macro <id> [repeat]` / `stop` / `status` / `wifi`
 で同じ操作ができる (ボットの既定はこちら。Wi-Fi より遅延が小さく、`stop` は実行中でも割り込める)。
 
 ### マクロ書式

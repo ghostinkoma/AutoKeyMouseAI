@@ -19,6 +19,22 @@
 #endif
 #define STATUS_LED_BRIGHTNESS 16            // 0-255
 
+// ---- TFT (LilyGO T-Display: ST7789 135x240) ---------------------------------
+// 無印 ESP32 は T-Display 前提で有効。液晶の無い基板では 0 にする。
+#ifndef HAS_TFT
+#if defined(CONFIG_IDF_TARGET_ESP32)
+#define HAS_TFT 1
+#else
+#define HAS_TFT 0
+#endif
+#endif
+#define TFT_PIN_MOSI 19
+#define TFT_PIN_SCLK 18
+#define TFT_PIN_CS   5
+#define TFT_PIN_DC   16
+#define TFT_PIN_RST  23
+#define TFT_PIN_BL   4
+
 // ---- マクロ実行 -----------------------------------------------------------
 #define MACRO_SLOTS            10
 #define DEFAULT_EVENT_DELAY_MS 10           // HID イベント間の待ち (取りこぼし防止)

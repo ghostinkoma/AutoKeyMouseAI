@@ -7,14 +7,108 @@
 //       macro <id> [repeat]
 //       stop           実行中のマクロを中断 ("STOPPED" を返す)
 //       status
+//       wifi           対話形式で Wi-Fi (SSID / パスワード) を設定して接続
+//       wifi clear     Wi-Fi 設定を消す (SoftAP のみになる)
+//       help
+#include <WiFi.h>
+
 #include "ble_hid.h"
 #include "config.h"
+#include "display.h"
 #include "macro.h"
 #include "net.h"
 
 namespace {
 
 QueueHandle_t gLines;  // シリアルから受けた 1 行 (String*)
+
+// 対話入力中のエコーバック (モニタは打った文字を表示しないため)
+enum class Echo : uint8_t { Off, Plain, Masked };
+volatile Echo gEcho = Echo::Off;
+
+// 対話入力: 次の 1 行を待つ。タイムアウトなら false
+bool readLine(String* out, Echo echo, uint32_t timeoutMs) {
+  gEcho = echo;
+  String* item = nullptr;
+  bool ok = xQueueReceive(gLines, &item, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+  gEcho = Echo::Off;
+  if (!ok) {
+    Serial.println("\n[WIFI] timeout, cancelled");
+    return false;
+  }
+  *out = *item;
+  delete item;
+  return true;
+}
+
+const char* authName(wifi_auth_mode_t m) {
+  switch (m) {
+    case WIFI_AUTH_OPEN: return "open";
+    case WIFI_AUTH_WEP: return "WEP";
+    case WIFI_AUTH_WPA_PSK: return "WPA";
+    case WIFI_AUTH_WPA2_PSK: return "WPA2";
+    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA/WPA2";
+    case WIFI_AUTH_WPA3_PSK: return "WPA3";
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3";
+    default: return "?";
+  }
+}
+
+void wifiWizard() {
+  Serial.println("\n=== Wi-Fi setup ===");
+  Serial.println("[WIFI] scanning...");
+  int n = WiFi.scanNetworks();
+  if (n <= 0) Serial.println("[WIFI] no networks found (you can still type the SSID)");
+  for (int i = 0; i < n && i < 20; ++i) {
+    Serial.printf("  %2d) %-32s %4d dBm  ch%-2d %s\n", i + 1, WiFi.SSID(i).c_str(), (int)WiFi.RSSI(i),
+                  (int)WiFi.channel(i), authName(WiFi.encryptionType(i)));
+  }
+  Serial.println("  * ESP32 is 2.4GHz only. Choose a 2.4GHz network (not 5GHz).");
+
+  Serial.print("SSID ? (number or name, empty = cancel): ");
+  String ssid;
+  if (!readLine(&ssid, Echo::Plain, 120000)) return;
+  ssid.trim();
+  if (ssid.isEmpty()) {
+    Serial.println("[WIFI] cancelled");
+    WiFi.scanDelete();
+    return;
+  }
+  long num = ssid.toInt();
+  if (num >= 1 && num <= n && String(num) == ssid) ssid = WiFi.SSID(num - 1);
+  WiFi.scanDelete();
+
+  Serial.printf("Password ? (for \"%s\", empty = open network): ", ssid.c_str());
+  String pass;
+  if (!readLine(&pass, Echo::Masked, 120000)) return;
+
+  net::setCredentials(ssid, pass);
+  Serial.println("[WIFI] connecting (up to 20 s)...");
+  uint32_t start = millis();
+  delay(500);
+  while (!net::staConnected() && millis() - start < 20000) {
+    delay(500);
+    Serial.print('.');
+  }
+  Serial.println();
+  if (net::staConnected()) {
+    Serial.printf("[WIFI] OK  IP = %s   Web UI: http://%s/\n", net::staIp().c_str(),
+                  net::staIp().c_str());
+  } else {
+    Serial.println("[WIFI] not connected yet. Check SSID/password (it keeps retrying in the background).");
+    Serial.println("[WIFI] type 'wifi' to try again.");
+  }
+}
+
+void printHelp() {
+  Serial.println("commands:");
+  Serial.println("  wifi              set up Wi-Fi interactively (SSID / password)");
+  Serial.println("  wifi clear        forget Wi-Fi settings (SoftAP only)");
+  Serial.println("  status            show BLE / Wi-Fi / macro state");
+  Serial.println("  run <script>      run a macro script (e.g. run t:hello;k:enter)");
+  Serial.println("  macro <id> [rep]  run macro slot 1-10 (rep 0 = loop until stop)");
+  Serial.println("  stop              stop the running macro");
+}
 
 void led(uint8_t r, uint8_t g, uint8_t b) {
   if (STATUS_LED_PIN < 0) return;
@@ -59,8 +153,17 @@ void handleLine(String line) {
     macro::Slot s = macro::slot(id);
     reply(macro::start(s.script, repeat, "#" + String(id) + " " + s.name, &err), err);
   } else if (line == "status") {
-    Serial.printf("OK ble=%d busy=%d wifi=%d ip=%s last=%s\n", hid::connected(), macro::busy(),
-                  net::staConnected(), net::staIp().c_str(), macro::lastResult().c_str());
+    Serial.printf("OK ble=%d peers=%u busy=%d wifi=%d ssid=%s ip=%s ap=%s last=%s\n", hid::connected(),
+                  (unsigned)hid::connectedPeers(), macro::busy(), net::staConnected(),
+                  net::ssid().c_str(), net::staIp().c_str(), net::apIp().c_str(),
+                  macro::lastResult().c_str());
+  } else if (line == "wifi") {
+    wifiWizard();
+  } else if (line == "wifi clear") {
+    net::setCredentials("", "");
+    Serial.println("OK Wi-Fi settings cleared");
+  } else if (line == "help" || line == "?") {
+    printHelp();
   } else {
     Serial.println("ERR unknown command");
   }
@@ -73,22 +176,37 @@ void serialRxTask(void*) {
   for (;;) {
     while (Serial.available()) {
       char c = Serial.read();
-      if (c == '\n') {
-        line.trim();
-        if (line == "stop") {
+      Echo echo = gEcho;
+      if (c == '\n' || (c == '\r' && echo != Echo::Off)) {
+        if (echo != Echo::Off) Serial.println();
+        if (c == '\r') {  // CR LF の LF を読み捨てる
+          delay(2);
+          if (Serial.peek() == '\n') Serial.read();
+        }
+        String trimmed = line;
+        trimmed.trim();
+        if (echo == Echo::Off && trimmed == "stop") {
           macro::stop();
           // OK/ERR は実行中の run の応答と区別できないので別の語で返す
           Serial.println("STOPPED");
-        } else if (!line.isEmpty()) {
-          String* item = new String(line);
+        } else if (echo != Echo::Off || !trimmed.isEmpty()) {
+          // 対話入力中は空行 (= キャンセル / パスワード無し) も渡す。パスワードは trim しない
+          String* item = new String(echo == Echo::Masked ? line : trimmed);
           if (xQueueSend(gLines, &item, 0) != pdTRUE) {
             delete item;
             Serial.println("ERR busy");
           }
         }
         line = "";
+      } else if (c == '\b' || c == 0x7F) {
+        if (line.length()) {
+          line.remove(line.length() - 1);
+          if (echo != Echo::Off) Serial.print("\b \b");
+        }
       } else if (c != '\r' && line.length() < 2048) {
         line += c;
+        if (echo == Echo::Plain) Serial.print(c);
+        else if (echo == Echo::Masked) Serial.print('*');
       }
     }
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -113,9 +231,11 @@ void setup() {
   Serial.println("\n[AKM] AutoKeyMouse boot");
   led(0, 0, 255);
 
+  display::begin();
   macro::begin();
   hid::begin(DEVICE_NAME, BLE_MANUFACTURER);
   net::begin();
+  Serial.println("[AKM] type 'help' + Enter for serial commands");
 
   gLines = xQueueCreate(4, sizeof(String*));
   xTaskCreatePinnedToCore(serialRxTask, "serRx", 4096, nullptr, 2, nullptr, 1);
@@ -124,6 +244,7 @@ void setup() {
 
 void loop() {
   net::loop();
+  display::loop();
   updateLed();
   delay(1);
 }
