@@ -157,7 +157,8 @@ void begin(const char* deviceName, const char* manufacturer) {
   server->start();
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  adv->setAppearance(0x03C0);  // HID Generic
+  // Windows 11 の「基本」検出でも一覧に出るよう、外観はキーボードにする
+  adv->setAppearance(0x03C1);  // HID Keyboard
   adv->addServiceUUID(gHid->getHidService()->getUUID());
   adv->setName(deviceName);
   adv->enableScanResponse(true);
