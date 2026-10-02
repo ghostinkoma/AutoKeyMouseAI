@@ -1,0 +1,33 @@
+"""エルフボットを起動する。
+
+    python run_bot.py                   # config.yaml を使って実行
+    python run_bot.py --show            # 認識結果をウィンドウ表示しながら実行
+    python run_bot.py --dry-run --show  # ESP32 に送らず、送る予定のコマンドを表示するだけ
+"""
+from __future__ import annotations
+
+import argparse
+
+from akm.config import PC_DIR, abs_map_from, load_config
+from akm.device import open_device
+from akm.elf_bot import ElfBot
+from akm.screen import GameScreen
+from akm.vision import build_detectors
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--show", action="store_true", help="認識結果を表示する")
+    ap.add_argument("--dry-run", action="store_true", help="HID を送らない")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    screen = GameScreen(cfg["game"]["window_title"])
+    device = open_device(cfg, abs_map_from(cfg), dry_run=args.dry_run)
+    detectors = build_detectors(cfg.get("vision", {}), PC_DIR)
+    ElfBot(cfg, screen, device, detectors, show=args.show).run()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,1 +1,180 @@
 # AutoKeyMouseAI
+
+ESP32-S3 を **BLE キーボード + マウス** として PC につなぎ、Wi-Fi / USB シリアルから
+送ったマクロを実行するデバイス。それに **画面認識 (テンプレートマッチング / YOLO)** を
+組み合わせて、MU Online (Season 6 私鯖) のエルフを自動で狩らせる実験プロジェクト。
+
+> 注意: ゲームの自動操作はほとんどのサーバの規約で禁止されています。アカウント停止に
+> なる可能性を理解したうえで、自己責任で使ってください。
+
+```
+ [ PC (Windows) ] ──────────────────────────────────────────┐
+   pc/run_bot.py                                            │
+   画面キャプチャ → HP/MP・宝石/Zen ラベル検出 → 行動を決める  │
+        │ USB シリアル (COM) または Wi-Fi HTTP                │ BLE HID
+        ▼                                                    │ (キーボード+マウス)
+ [ ESP32-S3 ] firmware/                                      │
+   Web UI / API ─ マクロエンジン ─ BLE HID (NimBLE) ──────────┘
+```
+
+| ディレクトリ | 内容 |
+|---|---|
+| `firmware/` | ESP32-S3 のファームウェア (Arduino-ESP32 3.x / NimBLE-Arduino 2.x / PlatformIO) |
+| `pc/` | Python のボット本体・認識・調整用ツール |
+
+---
+
+## 1. 準備 (Windows / PowerShell)
+
+```powershell
+# Git と Python が無ければ入れる (入れたあとは PowerShell を開き直す)
+winget install --id Git.Git -e
+winget install --id Python.Python.3.12 -e
+
+# ソースを取得 (D:\hobby\AutoKeyMouseAI が無い、または空の場合)
+cd D:\hobby
+git clone https://github.com/ghostinkoma/AutoKeyMouseAI.git
+cd AutoKeyMouseAI
+```
+
+ESP32 が何番の COM ポートか確認:
+
+```powershell
+Get-PnpDevice -Class Ports -PresentOnly | Select-Object FriendlyName, Status
+```
+
+## 2. ファームウェアを書き込む
+
+```powershell
+py -m pip install -U platformio
+cd D:\hobby\AutoKeyMouseAI\firmware
+py -m platformio run -t upload --upload-port COM5      # COM5 は上で確認した番号に
+py -m platformio device monitor -p COM5 -b 115200      # ログ確認 (Ctrl+C で終了)
+```
+
+* 初回は ESP32 用のツールチェーンを自動ダウンロードするので数分かかる
+* USB-C が 2 つある基板は **COM** 側を使う
+* 書き込みに失敗する場合は BOOT ボタンを押したまま RST を押してから再実行
+
+### ステータス LED (オンボード RGB, GPIO48)
+
+| 表示 | 状態 |
+|---|---|
+| 青の点滅 | BLE 未接続 (ペアリング待ち) |
+| 緑の点灯 | BLE 接続済み |
+| 黄 | マクロ実行中 |
+| 赤みが混ざる (紫の点滅 / 黄緑) | Wi-Fi (STA) 未接続 (SoftAP は常に有効) |
+
+光らない基板は `firmware/AutoKeyMouse/config.h` の `STATUS_LED_PIN` を 38 に変更。
+
+## 3. BLE ペアリング
+
+Windows の「設定 → Bluetooth とデバイス → デバイスの追加 → Bluetooth」で
+**AutoKeyMouse** を選ぶ。キーボード+マウスとして認識される。
+(PC に Bluetooth が無い場合は BLE 対応の USB ドングルが必要)
+
+## 4. Web UI / API
+
+* ESP32 の SoftAP `AutoKeyMouse` (パスワード `akm12345`) に接続して `http://192.168.4.1/`
+* Web UI の「設定」で自宅の Wi-Fi を登録すると、以後は `http://autokeymouse.local/`
+  または割り当てられた IP でアクセスできる (SoftAP も併用)
+
+| エンドポイント | 説明 |
+|---|---|
+| `GET /` | Web UI (マクロボタン・編集・設定) |
+| `GET /macro?id=N[&repeat=R]` | マクロ N (1-10) を開始。`repeat=0` で停止まで繰り返し。200 / 400 不正 / 409 実行中 / 503 BLE 未接続 |
+| `GET/POST /run?s=<script>` | スクリプトを実行し、完了してから応答する (PC ボット用) |
+| `GET /stop` | 実行中のマクロを中断 |
+| `GET /status` | JSON (BLE・Wi-Fi・実行状態) |
+| `GET /macros`, `POST /save` | マクロ一覧 / 保存 (NVS に保存されるので電源を切っても残る) |
+| `GET /settings?delay=10&layout=jp` | HID イベント間隔 (5-50ms) / ターゲットのキー配列 |
+| `POST /wifi` | `ssid`, `pass` を NVS に保存して接続 |
+
+`/run` は完了まで応答しないため、その間は Web サーバが他の要求を受け付けない。
+長いマクロは `/macro` (非同期) を使う。
+
+USB シリアル (115200bps) からも `run <script>` / `macro <id> [repeat]` / `stop` / `status`
+で同じ操作ができる (ボットの既定はこちら。Wi-Fi より遅延が小さく、`stop` は実行中でも割り込める)。
+
+### マクロ書式
+
+`;` または改行区切り。`#` で始まる行はコメント。
+
+| コマンド | 意味 |
+|---|---|
+| `k:a` / `k:ctrl+shift+esc` | キーを押して離す (同時押しは `+`) |
+| `kd:shift` / `ku:shift` | 押したまま / 離す |
+| `t:/move lorencia` | 文字列入力 (文字列中の `;` は `\;`) |
+| `m:100,-50` | マウス相対移動 |
+| `a:16384,16384` | マウス絶対移動 (0-32767 で画面全体) |
+| `c:L` / `c:R,2` | クリック (回数指定可) |
+| `bd:R` / `bu:R` | ボタンを押したまま / 離す |
+| `s:-3` | ホイール |
+| `w:500` | 待機 (ms) |
+| `d:20` | このスクリプト内のイベント間隔 (ms) |
+| `ra` | すべてのキー/ボタンを離す |
+
+キー名: `a`-`z`, `0`-`9`, `f1`-`f24`, `enter`, `esc`, `tab`, `space`, `backspace`,
+`home`, `end`, `pageup`, `pagedown`, `insert`, `delete`, `up`/`down`/`left`/`right`,
+`ctrl`, `shift`, `alt`, `win`, JIS 用 `zenkaku`, `henkan`, `muhenkan`, `kana`, `yen`, `ro`,
+または `0x3A` のように HID コードを直接指定。
+
+---
+
+## 5. PC ボット (MU Online S6 / エルフ)
+
+```powershell
+cd D:\hobby\AutoKeyMouseAI\pc
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1      # エラーなら: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+pip install -r requirements.txt
+Copy-Item config.example.yaml config.yaml
+notepad config.yaml               # device.port を COM 番号に、game.window_title を MU のタイトルに
+```
+
+MU は **ウィンドウモード** で起動する (排他フルスクリーンだと画面を取れないことがある)。
+
+### 調整の順番
+
+1. **HID の確認**: `python tools\hid_test.py` (メモ帳に文字が入り、カーソルが円を描けば OK)
+2. **マウス座標の校正**: `python tools\calibrate_mouse.py` → 出力を `config.yaml` の `mouse.abs_map` に貼る
+3. **HP/MP 枠の調整**: `python tools\vision_preview.py` を見ながら `hud.hp.roi` / `hud.mp.roi` を合わせる
+   (赤枠/青枠が HP 球・MP 球に重なり、表示の % が実際と合えば OK)
+4. **宝石・Zen のテンプレート作成**: 地面に宝石/Zen が落ちている状態で
+   `python tools\grab_templates.py` → ラベル文字を囲んで `bless`, `soul`, `zen` などの名前で保存。
+   `vision_preview.py` で黄色い枠が付くことを確認 (付かなければ `threshold` を 0.8 程度に下げる)
+5. **スキル配置** (ゲーム内): 1 = 攻撃スキル (Triple Shot 等), 2 = Greater Defense,
+   3 = Greater Damage, 4 = Heal, Q = HP ポーション, W = MP ポーション
+6. **試運転**: `python run_bot.py --dry-run --show` (送る予定のコマンドを表示するだけ)
+7. **本番**: `python run_bot.py --show`。**F12 で停止**。MU が前面にないときは何もしない
+
+### ボットの動き
+
+1. HP が 0 のまま 3 秒続いたら死亡と判定 → `elf.death.script` (街から `/move` など) を実行
+2. HP が減ったら Heal (自分に右クリック)、さらに減ったら Q / MP が減ったら W
+3. 宝石・Zen のラベルがキャラの近くにあれば攻撃をやめてクリック → 拾えたら元の位置へ戻る
+4. 60 秒ごとに Greater Defense / Greater Damage を自分に掛け直す
+5. 右ボタンを押したまま、モンスターを検出していればその方向、していなければ周囲 8 方向を順に撃つ
+
+### AI 検出 (YOLO) に進む場合
+
+テンプレートマッチングは学習不要ですぐ動くが、モンスターの位置は分からない。
+モンスターも狙いたい場合や、ラベルの取りこぼしが多い場合は YOLO を学習させる。
+
+```powershell
+python tools\vision_preview.py --record 2.0       # 狩り中の画面を dataset\images に 2 秒ごとに保存
+pip install ultralytics label-studio              # ラベル付けツールは好みで (CVAT, Roboflow 等でも可)
+# monster / jewel_bless / zen ... のクラスで枠を付け、YOLO 形式で書き出す
+yolo detect train data=dataset\data.yaml model=yolo11n.pt imgsz=960 epochs=100
+Copy-Item runs\detect\train\weights\best.pt models\mu_s6.pt
+```
+
+`config.yaml` の `vision.yolo.enabled: true` にすると、`monster` クラスを狙って撃ち、
+それ以外のクラスは拾得対象になる (テンプレートと併用可)。
+
+### テスト (実機不要)
+
+```powershell
+pip install pytest
+python -m pytest tests
+```

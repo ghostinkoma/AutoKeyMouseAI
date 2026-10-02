@@ -1,0 +1,97 @@
+# AutoKeyMouse ボット設定 (MU Online Season 6 / エルフ)
+# このファイルを config.yaml にコピーして編集する。
+# ROI (領域) はすべてゲーム画面サイズに対する比率 [x, y, 幅, 高さ]。
+# tools/vision_preview.py で枠を表示しながら合わせる。
+
+device:
+  transport: serial        # serial (COM ポート, 低遅延) | http (Wi-Fi)
+  port: COM5               # デバイスマネージャーで確認
+  host: 192.168.4.1        # http のとき。STA 接続なら ESP32 に割り当てられた IP
+
+mouse:
+  # tools/calibrate_mouse.py の出力を貼り付ける。null ならプライマリモニタ全体で計算
+  abs_map: null
+
+game:
+  window_title: "MU"       # ゲームウィンドウのタイトルの一部
+  require_foreground: true # ゲームが前面にないときは操作しない
+  stop_key_vk: 0x7B        # この PC で F12 を押すと停止 (仮想キーコード)
+
+loop_interval_ms: 50
+
+hud:
+  hp:
+    roi: [0.27, 0.86, 0.07, 0.13]  # 要調整: 左下の赤い HP 球
+    color: red
+    direction: vertical
+  mp:
+    roi: [0.66, 0.86, 0.07, 0.13]  # 要調整: 右下の青い MP 球
+    color: blue
+    direction: vertical
+
+vision:
+  templates:
+    enabled: true
+    # 地面のアイテム名を探す範囲 (下部の UI を除く)
+    search_roi: [0.0, 0.05, 1.0, 0.78]
+    exclude_rois: []
+    # tools/grab_templates.py で切り出した画像を登録する。
+    # 同じアイテムに複数枚登録すると (明るさ違いなど) 取りこぼしが減る
+    targets:
+      - {name: "Jewel of Bless",    files: [templates/bless.png],    threshold: 0.85}
+      - {name: "Jewel of Soul",     files: [templates/soul.png],     threshold: 0.85}
+      - {name: "Jewel of Chaos",    files: [templates/chaos.png],    threshold: 0.85}
+      - {name: "Jewel of Life",     files: [templates/life.png],     threshold: 0.85}
+      - {name: "Jewel of Creation", files: [templates/creation.png], threshold: 0.85}
+      - {name: "Jewel of Guardian", files: [templates/guardian.png], threshold: 0.85}
+      - {name: "Jewel of Harmony",  files: [templates/harmony.png],  threshold: 0.85}
+      - {name: "Zen",               files: [templates/zen.png],      threshold: 0.85}
+  yolo:
+    # 学習済みモデルを用意したら有効にする (README の「AI 検出」参照)
+    enabled: false
+    model: models/mu_s6.pt
+    conf: 0.5
+    class_kinds: {monster: monster}   # 記載のないクラスは item 扱い
+
+elf:
+  character_offset: [0.0, -0.03]   # キャラの位置 (画面中心からのずれ, 画面高さ比)
+
+  attack:
+    skill_key: "1"      # 攻撃スキル (Triple Shot / Multi-Shot など) を 1 に割り当てる
+    directions: 8       # モンスター未検出時に周囲を何方向に撃つか
+    dwell_ms: 600       # 1 方向に撃ち続ける時間
+    radius: 0.18        # 狙う位置の半径 (画面高さ比)
+
+  buffs:
+    keys: ["2", "3"]    # 2 = Greater Defense, 3 = Greater Damage (自分に掛ける)
+    interval_s: 60
+    cast_ms: 700
+
+  heal:                 # エルフの Heal で自己回復。使わないなら null
+    key: "4"
+    hp_below: 0.6
+    cast_ms: 600
+    cooldown_s: 1.5
+
+  potions:
+    hp_key: q
+    hp_below: 0.4
+    mp_key: w
+    mp_below: 0.2
+    cooldown_s: 1.0
+
+  pickup:
+    enabled: true
+    targets: []         # 空なら vision で検出した item すべて (= 上の宝石と Zen)
+    max_distance: 0.35  # キャラからこの距離 (画面高さ比) 以内だけ拾いに行く
+    click_offset: [0.0, 0.6]  # ラベルからクリック位置をずらす (ラベル高さ比, 下が +)
+    walk_timeout_s: 3.0
+    attempts: 2
+    ignore_s: 15        # 拾えなかったアイテムを無視する秒数
+    return_to_anchor: true
+    return_wait_ms: 800
+
+  death:
+    hp_zero_s: 3.0
+    # 街で復活したあとに実行するスクリプト (ESP32 のマクロ書式)
+    script: "w:10000;k:enter;w:300;t:/move lorencia;k:enter;w:5000"

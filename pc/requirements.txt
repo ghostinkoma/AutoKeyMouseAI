@@ -1,0 +1,8 @@
+numpy>=1.24
+opencv-python>=4.8
+mss>=9.0
+pyyaml>=6.0
+requests>=2.31
+pyserial>=3.5
+# AI 物体検出 (YOLO) を使う場合のみ:
+# ultralytics>=8.3
