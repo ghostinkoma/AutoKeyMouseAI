@@ -42,12 +42,28 @@ void line(int y, uint8_t size, uint16_t color, const String& text) {
 
 }  // namespace
 
+void test() {
+  // 赤 → 緑 → 青 の順に全面を塗る (配線・初期化の確認用)
+  const uint16_t colors[] = {ST77XX_RED, ST77XX_GREEN, ST77XX_BLUE};
+  for (uint16_t c : colors) {
+    gTft.fillScreen(c);
+    delay(300);
+  }
+  gShown = "";  // 次の loop() で描き直す
+  Serial.println("[TFT] test pattern drawn (red, green, blue)");
+}
+
 void begin() {
+  Serial.printf("[TFT] ST7789 135x240  MOSI=%d SCLK=%d CS=%d DC=%d RST=%d BL=%d\n", TFT_PIN_MOSI,
+                TFT_PIN_SCLK, TFT_PIN_CS, TFT_PIN_DC, TFT_PIN_RST, TFT_PIN_BL);
   pinMode(TFT_PIN_BL, OUTPUT);
   digitalWrite(TFT_PIN_BL, HIGH);
   SPI.begin(TFT_PIN_SCLK, -1, TFT_PIN_MOSI, TFT_PIN_CS);
-  gTft.init(135, 240);
+  // ST7789 は MODE3 なら CS の有無に関係なく動く (T-Display 公式設定と同じ)
+  gTft.init(135, 240, SPI_MODE3);
+  gTft.setSPISpeed(27000000);
   gTft.setRotation(1);  // 横向き 240x135
+  test();
   gTft.fillScreen(ST77XX_BLACK);
   line(4, 2, ST77XX_CYAN, "AutoKeyMouse");
   line(40, 2, ST77XX_WHITE, "booting...");
@@ -96,9 +112,12 @@ void loop() {
 
 #else
 
+#include <Arduino.h>
+
 namespace display {
 void begin() {}
 void loop() {}
+void test() { Serial.println("[TFT] this build has no TFT (HAS_TFT=0)"); }
 }  // namespace display
 
 #endif

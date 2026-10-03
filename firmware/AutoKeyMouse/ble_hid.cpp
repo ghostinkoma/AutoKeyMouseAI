@@ -1,5 +1,7 @@
 #include "ble_hid.h"
 
+#include "config.h"
+
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
@@ -179,6 +181,22 @@ void clearBonds() {
   Serial.println("[BLE] all bonds deleted. Remove AutoKeyMouse in Windows too, then pair again.");
 }
 uint32_t connectedPeers() { return gPeers; }
+
+bool advertising() { return NimBLEDevice::getAdvertising()->isAdvertising(); }
+
+void loop() {
+  static uint32_t last = 0;
+  if (millis() - last < 30000) return;
+  last = millis();
+  if (gPeers == 0 && !advertising()) {
+    Serial.println("[BLE] advertising had stopped, restarting");
+    NimBLEDevice::startAdvertising();
+  }
+  if (!connected()) {
+    Serial.printf("[BLE] waiting for host: advertising=%d peers=%u bonds=%d (pair \"%s\" from Windows)\n",
+                  advertising(), (unsigned)gPeers, NimBLEDevice::getNumBonds(), DEVICE_NAME);
+  }
+}
 
 void keyDown(uint8_t code) {
   if (code >= 0xE0 && code <= 0xE7) {

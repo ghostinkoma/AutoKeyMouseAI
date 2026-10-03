@@ -24,6 +24,10 @@ void begin(const char* deviceName, const char* manufacturer);
 // ホストと接続済みかつ暗号化 (ペアリング) 済みなら true
 bool connected();
 uint32_t connectedPeers();
+bool advertising();
+
+// loop() から呼ぶ。広告が止まっていたら再開し、未接続なら 30 秒ごとに状態を出す
+void loop();
 
 // 保存しているペアリング情報 (ボンド) をすべて消す
 void clearBonds();

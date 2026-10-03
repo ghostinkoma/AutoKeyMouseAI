@@ -171,6 +171,7 @@ void printHelp() {
   Serial.println("  run <script>      run a macro script (e.g. run t:hello;k:enter)");
   Serial.println("  macro <id> [rep]  run macro slot 1-10 (rep 0 = loop until stop)");
   Serial.println("  stop              stop the running macro");
+  Serial.println("  tft test          fill the display red/green/blue");
   Serial.println("  ble clear         forget BLE pairings (then remove the device in Windows and pair again)");
 }
 
@@ -217,8 +218,8 @@ void handleLine(String line) {
     macro::Slot s = macro::slot(id);
     reply(macro::start(s.script, repeat, "#" + String(id) + " " + s.name, &err), err);
   } else if (line == "status") {
-    Serial.printf("OK uptime=%lus heap=%u ble=%d peers=%u busy=%d wifi=%d ssid=%s ip=%s ap=%s last=%s\n",
-                  (unsigned long)(millis() / 1000), (unsigned)ESP.getFreeHeap(), hid::connected(),
+    Serial.printf("OK uptime=%lus heap=%u ble=%d adv=%d peers=%u busy=%d wifi=%d ssid=%s ip=%s ap=%s last=%s\n",
+                  (unsigned long)(millis() / 1000), (unsigned)ESP.getFreeHeap(), hid::connected(), hid::advertising(),
                   (unsigned)hid::connectedPeers(), macro::busy(), net::staConnected(),
                   net::ssid().c_str(), net::staIp().c_str(), net::apIp().c_str(),
                   macro::lastResult().c_str());
@@ -227,6 +228,8 @@ void handleLine(String line) {
   } else if (line == "wifi clear") {
     net::setCredentials("", "");
     Serial.println("OK Wi-Fi settings cleared");
+  } else if (line == "tft test") {
+    display::test();
   } else if (line == "ble clear") {
     hid::clearBonds();
     Serial.println("OK");
@@ -317,6 +320,7 @@ void setup() {
 
 void loop() {
   net::loop();
+  hid::loop();
   display::loop();
   updateLed();
   delay(1);
