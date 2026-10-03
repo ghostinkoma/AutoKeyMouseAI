@@ -250,7 +250,10 @@ def test_helper_indicator_reads_play_button():
     cfg = yaml.safe_load((PC / "config.example.yaml").read_text(encoding="utf-8"))
     hc = HelperControl(cfg["helper"], Device(Recorder(), AbsMap.for_screen(1920, 1080)), PC)
     tpl = cv2.imread(str(PC / "templates/helper_off.png"))
+    panel = cv2.imread(str(PC / "templates/helper_panel.png"))
     frame = np.zeros((1050, 1680, 3), np.uint8)
-    assert hc.read_state(frame) is True  # ▶ が見えない = 動作中
+    assert hc.read_state(frame) is None  # パネルが無い = 判定しない (ボットの操作から推定)
+    frame[8:25, 116:188] = panel
+    assert hc.read_state(frame) is True  # パネルあり・▶ が見えない = 動作中
     frame[6:32, 276:304] = tpl
     assert hc.read_state(frame) is False  # ▶ が見える = 停止中

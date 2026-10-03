@@ -112,7 +112,8 @@ UINT jpegOut(JDEC* jd, void* bitmap, JRECT* r) {
 }
 
 bool drawJpeg(const uint8_t* data, size_t len) {
-  static uint8_t work[3100];
+  // ROM の tjpgd は作業領域を 4 バイト境界で使うので uint32_t で確保する (ずれていると例外で再起動する)
+  static uint32_t work[3100 / 4];
   JDEC jd;
   JpegSrc src{data, len, 0};
   JRESULT rc = jd_prepare(&jd, jpegIn, work, sizeof(work), &src);

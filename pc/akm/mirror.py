@@ -110,6 +110,13 @@ class Mirror:
             except Exception as e:  # 通信エラーでボットは止めない
                 msg = str(e)
             self.errors += 1
+            if self.fmt == "jpeg" and self.errors >= 2:
+                # JPEG で ESP32 が応答しなくなる (古いファームウェア等) 場合は非圧縮に切り替える
+                print(f"[mirror] JPEG 送信に失敗が続いたので raw (非圧縮) に切り替えます: {msg}")
+                self.fmt = "raw"
+                self.errors = 0
+                time.sleep(2)
+                continue
             if not self._warned:
                 print(f"[mirror] ESP32 への画面送信に失敗: {msg} (ファームウェアを更新してください)")
                 self._warned = True

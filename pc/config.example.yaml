@@ -39,9 +39,10 @@ helper:
   # 左上の MU Helper パネルの ▶ (開始) ボタンが見えていれば停止中、見えなければ動作中と判定する。
   # これで F9 を押したあと本当に再開したかを画面で確認し、だめなら押し直す
   indicator:
-    roi: [0.150, 0.0, 0.045, 0.045]   # 1680x1050 で実測した ▶ ボタンの周辺
+    roi: [0.06, 0.0, 0.14, 0.045]     # 1680x1050 で実測した MU Helper パネル ("MU Helper" の文字と ▶ ボタン)
     on_image: null                    # 動作中の表示の画像があれば指定 (無くても可)
     off_image: templates/helper_off.png  # 停止中の ▶ ボタン
+    panel_image: templates/helper_panel.png  # "MU Helper" の文字。見えないときは判定せずボットの操作から推定
     threshold: 0.8
   verify_attempts: 3       # 再開を画面で確認できなければ押し直す回数
 

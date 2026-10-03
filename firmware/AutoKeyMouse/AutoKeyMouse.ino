@@ -19,6 +19,9 @@
 #include "macro.h"
 #include "net.h"
 
+// loop() で Web サーバと液晶 (JPEG 展開) を動かすのでスタックを広めに取る
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
 namespace {
 
 QueueHandle_t gLines;  // シリアルから受けた 1 行 (String*)

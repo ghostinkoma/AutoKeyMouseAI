@@ -38,6 +38,8 @@ class HelperControl:
         self.ind_thr = float(ind.get("threshold", 0.85))
         self.tpl_on = self._load(base_dir, ind.get("on_image"))  # YAML では on/off が真偽値になるので別名
         self.tpl_off = self._load(base_dir, ind.get("off_image"))
+        # パネル自体 ("MU Helper" の文字) が見えているか。見えなければ判定不能として推定値を使う
+        self.tpl_panel = self._load(base_dir, ind.get("panel_image"))
 
     @staticmethod
     def _load(base: Path, f: str | None) -> np.ndarray | None:
@@ -62,6 +64,8 @@ class HelperControl:
                 return -1.0
             return float(cv2.matchTemplate(area, tpl, cv2.TM_CCOEFF_NORMED).max())
 
+        if self.tpl_panel is not None and score(self.tpl_panel) < self.ind_thr:
+            return None  # パネルが見えない (隠れている / 位置が違う) ので判定しない
         s_on, s_off = score(self.tpl_on), score(self.tpl_off)
         if self.tpl_on is None:
             # 停止中の表示 (▶ ボタン) だけ分かっている場合: 見えていれば停止中、見えなければ動作中
