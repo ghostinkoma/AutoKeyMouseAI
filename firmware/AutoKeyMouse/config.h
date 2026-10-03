@@ -1,5 +1,8 @@
 #pragma once
 
+// CONFIG_IDF_TARGET_* (チップ種別) を判定に使うので、どのファイルから読まれても先に取り込む
+#include <sdkconfig.h>
+
 // ---- デバイス名 -----------------------------------------------------------
 #define DEVICE_NAME      "AutoKeyMouse"     // BLE 表示名 / mDNS 名 (autokeymouse.local)
 #define BLE_MANUFACTURER "ghostinkoma"
