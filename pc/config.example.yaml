@@ -24,32 +24,37 @@ game:
 loop_interval_ms: 50
 
 hud:
+  # 1680x1050 のウィンドウで実測 (Murex S6)。比率なので他のサイズでも概ね合う
   hp:
-    roi: [0.27, 0.86, 0.07, 0.13]  # 要調整: 左下の赤い HP 球
+    roi: [0.274, 0.843, 0.058, 0.100]  # 左下の赤い HP 球の内側
     color: red
     direction: vertical
   mp:
-    roi: [0.66, 0.86, 0.07, 0.13]  # 要調整: 右下の青い MP 球
+    roi: [0.670, 0.846, 0.058, 0.100]  # 右下の青い MP 球の内側
     color: blue
     direction: vertical
 
 vision:
   templates:
     enabled: true
-    # 地面のアイテム名を探す範囲 (下部の UI を除く)
-    search_roi: [0.0, 0.05, 1.0, 0.78]
-    exclude_rois: []
+    # 地面のアイテム名を探す範囲 (上のキルログ・下の UI を除く)
+    search_roi: [0.0, 0.12, 1.0, 0.70]
+    # チャット欄 (左下) は "Zen" などの文字が流れるので除外
+    exclude_rois:
+      - [0.0, 0.74, 0.30, 0.08]
     # tools/grab_templates.py で切り出した画像を登録する。
     # 同じアイテムに複数枚登録すると (明るさ違いなど) 取りこぼしが減る
+    # color: gold を付けると金色の文字だけで照合する (ラベル背景や地面の色に強い)
     targets:
-      - {name: "Jewel of Bless",    files: [templates/bless.png],    threshold: 0.85}
-      - {name: "Jewel of Soul",     files: [templates/soul.png],     threshold: 0.85}
-      - {name: "Jewel of Chaos",    files: [templates/chaos.png],    threshold: 0.85}
-      - {name: "Jewel of Life",     files: [templates/life.png],     threshold: 0.85}
-      - {name: "Jewel of Creation", files: [templates/creation.png], threshold: 0.85}
-      - {name: "Jewel of Guardian", files: [templates/guardian.png], threshold: 0.85}
-      - {name: "Jewel of Harmony",  files: [templates/harmony.png],  threshold: 0.85}
-      - {name: "Zen",               files: [templates/zen.png],      threshold: 0.85}
+      - {name: "Zen",               files: [templates/zen.png],      threshold: 0.8, color: gold}
+      # 宝石は tools/grab_templates.py で切り出してから有効にする (文字色が金色でなければ color を外す)
+      # - {name: "Jewel of Bless",    files: [templates/bless.png],    threshold: 0.8, color: gold}
+      # - {name: "Jewel of Soul",     files: [templates/soul.png],     threshold: 0.8, color: gold}
+      # - {name: "Jewel of Chaos",    files: [templates/chaos.png],    threshold: 0.8, color: gold}
+      # - {name: "Jewel of Life",     files: [templates/life.png],     threshold: 0.8, color: gold}
+      # - {name: "Jewel of Creation", files: [templates/creation.png], threshold: 0.8, color: gold}
+      # - {name: "Jewel of Guardian", files: [templates/guardian.png], threshold: 0.8, color: gold}
+      # - {name: "Jewel of Harmony",  files: [templates/harmony.png],  threshold: 0.8, color: gold}
   yolo:
     # 学習済みモデルを用意したら有効にする (README の「AI 検出」参照)
     enabled: false
@@ -58,7 +63,7 @@ vision:
     class_kinds: {monster: monster}   # 記載のないクラスは item 扱い
 
 elf:
-  character_offset: [0.0, -0.03]   # キャラの位置 (画面中心からのずれ, 画面高さ比)
+  character_offset: [0.0, -0.08]   # キャラの位置 (画面中心からのずれ, 画面高さ比)
 
   attack:
     skill_key: "1"      # 攻撃スキル (Triple Shot / Multi-Shot など) を 1 に割り当てる
@@ -87,8 +92,8 @@ elf:
   pickup:
     enabled: true
     targets: []         # 空なら vision で検出した item すべて (= 上の宝石と Zen)
-    max_distance: 0.35  # キャラからこの距離 (画面高さ比) 以内だけ拾いに行く
-    click_offset: [0.0, 0.6]  # ラベルからクリック位置をずらす (ラベル高さ比, 下が +)
+    max_distance: 0.45  # キャラからこの距離 (画面高さ比) 以内だけ拾いに行く
+    click_offset: [0.0, 3.0]  # ラベルの下にある実物をクリック (ラベル高さ比, 下が +。Zen は約 3 行下に金貨)
     walk_timeout_s: 3.0
     attempts: 2
     ignore_s: 15        # 拾えなかったアイテムを無視する秒数

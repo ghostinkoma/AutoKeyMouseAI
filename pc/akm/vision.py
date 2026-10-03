@@ -19,9 +19,11 @@ import numpy as np
 # HSV (OpenCV: H 0-179) のプリセット。複数レンジは OR
 COLOR_PRESETS: dict[str, list[tuple[tuple[int, int, int], tuple[int, int, int]]]] = {
     "red": [((0, 90, 60), (10, 255, 255)), ((170, 90, 60), (179, 255, 255))],
-    "blue": [((95, 90, 60), (130, 255, 255))],
+    "blue": [((85, 90, 60), (130, 255, 255))],
     "yellow": [((18, 90, 90), (35, 255, 255))],
     "green": [((40, 90, 60), (85, 255, 255))],
+    # 地面のアイテム名ラベルの金色文字 (Zen など。MU S6 / Murex で実測 H≈23 S≈135 V≈195)
+    "gold": [((15, 80, 120), (40, 255, 255))],
 }
 
 
@@ -109,8 +111,11 @@ def nms(dets: list[Detection], iou_thr: float = 0.3) -> list[Detection]:
 class TemplateDetector:
     """テンプレート画像 (tools/grab_templates.py で切り出す) によるラベル検出。
 
-    targets: [{"name": "Jewel of Bless", "files": ["templates/bless.png"],
-               "threshold": 0.85, "kind": "item"}, ...]
+    targets: [{"name": "Zen", "files": ["templates/zen.png"], "threshold": 0.8,
+               "kind": "item", "color": "gold"}, ...]
+
+    color を指定すると、画面とテンプレートの両方をその色の文字だけの白黒画像にしてから照合する。
+    ラベルの半透明の背景や地面の色に左右されにくくなるので、文字ラベルには指定を推奨。
     """
 
     def __init__(
@@ -122,16 +127,25 @@ class TemplateDetector:
     ):
         self.search_roi = search_roi or [0, 0, 1, 1]
         self.exclude_rois = exclude_rois or []
-        self.templates: list[tuple[str, str, float, np.ndarray]] = []
+        # (name, kind, threshold, color or None, template)
+        self.templates: list[tuple[str, str, float, object, np.ndarray]] = []
         base = base_dir or Path.cwd()
         for t in targets:
+            color = t.get("color")
             for f in t["files"]:
                 path = Path(f) if Path(f).is_absolute() else base / f
                 tpl = cv2.imread(str(path), cv2.IMREAD_COLOR)
                 if tpl is None:
                     print(f"[vision] テンプレートが読めません (スキップ): {path}")
                     continue
-                self.templates.append((t["name"], t.get("kind", "item"), float(t.get("threshold", 0.85)), tpl))
+                if color is not None:
+                    tpl = color_mask(tpl, color)
+                    if tpl.std() == 0:
+                        print(f"[vision] {path}: 指定色 {color} の画素がありません (スキップ)")
+                        continue
+                self.templates.append(
+                    (t["name"], t.get("kind", "item"), float(t.get("threshold", 0.85)), color, tpl)
+                )
 
     def detect(self, img: np.ndarray) -> list[Detection]:
         x0, y0, x1, y1 = roi_px(img.shape, self.search_roi)
@@ -140,12 +154,21 @@ class TemplateDetector:
             ex0, ey0, ex1, ey1 = roi_px(img.shape, ex)
             area[max(0, ey0 - y0) : max(0, ey1 - y0), max(0, ex0 - x0) : max(0, ex1 - x0)] = 0
 
+        masks: dict[str, np.ndarray] = {}
         out: list[Detection] = []
-        for name, kind, thr, tpl in self.templates:
+        for name, kind, thr, color, tpl in self.templates:
+            if color is None:
+                hay = area
+            else:
+                key = repr(color)
+                if key not in masks:
+                    masks[key] = color_mask(area, color)
+                hay = masks[key]
             th, tw = tpl.shape[:2]
-            if th > area.shape[0] or tw > area.shape[1]:
+            if th > hay.shape[0] or tw > hay.shape[1]:
                 continue
-            res = cv2.matchTemplate(area, tpl, cv2.TM_CCOEFF_NORMED)
+            res = cv2.matchTemplate(hay, tpl, cv2.TM_CCOEFF_NORMED)
+            res = np.nan_to_num(res, nan=0.0, posinf=0.0, neginf=0.0)
             ys, xs = np.where(res >= thr)
             dets = [Detection(name, kind, int(x + x0), int(y + y0), tw, th, float(res[y, x])) for y, x in zip(ys, xs)]
             out.extend(nms(dets))

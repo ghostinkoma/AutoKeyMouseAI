@@ -180,3 +180,18 @@ def test_relative_mouse_for_unreachable_position():
     assert dev.s_move(2500, 300) == ""  # 右のモニタ: 相対移動で合わせ込む
     assert abs(pos[0] - 2500) <= 2 and abs(pos[1] - 300) <= 2
     assert all(s.startswith("m:") for s in rec.sent)
+
+
+def test_template_detector_gold_mask(tmp_path):
+    # 背景色が違っても金色文字だけで照合できること
+    gold = (40, 175, 205)  # BGR (H≈23 の金色)
+    tpl = np.full((13, 27, 3), (40, 30, 20), np.uint8)
+    cv2.putText(tpl, "Zen", (1, 10), cv2.FONT_HERSHEY_PLAIN, 0.8, gold, 1)
+    cv2.imwrite(str(tmp_path / "zen.png"), tpl)
+    scene = np.full((300, 400, 3), (160, 110, 60), np.uint8)  # 青っぽい雪原
+    label = np.full((13, 27, 3), (90, 70, 50), np.uint8)       # 背景の濃さが違うラベル
+    cv2.putText(label, "Zen", (1, 10), cv2.FONT_HERSHEY_PLAIN, 0.8, gold, 1)
+    scene[200:213, 100:127] = label
+    det = TemplateDetector([{"name": "Zen", "files": ["zen.png"], "threshold": 0.8, "color": "gold"}], base_dir=tmp_path)
+    found = det.detect(scene)
+    assert [(d.x, d.y) for d in found] == [(100, 200)]
