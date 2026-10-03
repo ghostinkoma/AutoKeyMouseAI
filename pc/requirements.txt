@@ -4,5 +4,7 @@ mss>=9.0
 pyyaml>=6.0
 requests>=2.31
 pyserial>=3.5
+# ゲーム画面をウィンドウから直接撮る (Windows Graphics Capture)。仮想デスクトップを切り替えても撮れる
+windows-capture>=1.5; sys_platform == "win32"
 # AI 物体検出 (YOLO) を使う場合のみ:
 # ultralytics>=8.3

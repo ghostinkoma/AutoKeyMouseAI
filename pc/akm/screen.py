@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import sys
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -215,6 +216,74 @@ def capture_window(hwnd: int) -> np.ndarray | None:
         user32.ReleaseDC(hwnd, hdc)
 
 
+def client_offset_in_window(hwnd: int) -> tuple[int, int, int, int]:
+    """Windows Graphics Capture が返すウィンドウ画像の中で、クライアント領域がどこにあるか (x, y, w, h)。"""
+    rc = wintypes.RECT()
+    # DWMWA_EXTENDED_FRAME_BOUNDS = 9: 影を除いた見た目の枠 (WGC の画像はこの範囲)
+    if ctypes.windll.dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), 9, ctypes.byref(rc), ctypes.sizeof(rc)) != 0:
+        user32.GetWindowRect(hwnd, ctypes.byref(rc))
+    c = client_rect(hwnd)
+    return c.left - rc.left, c.top - rc.top, c.width, c.height
+
+
+class WgcCapture:
+    """Windows Graphics Capture (windows-capture パッケージ) でウィンドウを撮り続ける。
+
+    OpenGL / DirectX のゲームでも撮れて、他のウィンドウが重なったり仮想デスクトップを
+    切り替えたりしても撮れる。最新の 1 枚を保持し、latest() で取り出す。
+    """
+
+    def __init__(self, hwnd: int):
+        from windows_capture import WindowsCapture  # 無ければ ImportError
+
+        self.hwnd = hwnd
+        self._lock = threading.Lock()
+        self._frame: np.ndarray | None = None
+        self._t = 0.0
+        self.closed = False
+        kw = dict(cursor_capture=False, window_hwnd=hwnd, minimum_update_interval=50)
+        try:
+            cap = WindowsCapture(draw_border=False, **kw)
+        except Exception:  # 枠の非表示は Windows 11 のみ対応
+            cap = WindowsCapture(**kw)
+
+        @cap.event
+        def on_frame_arrived(frame, control):
+            if self.closed:
+                control.stop()
+                return
+            img = np.ascontiguousarray(frame.frame_buffer[:, :, :3])
+            with self._lock:
+                self._frame = img
+                self._t = time.monotonic()
+
+        @cap.event
+        def on_closed():
+            self.closed = True
+
+        self.control = cap.start_free_threaded()
+
+    def latest(self, max_age_s: float = 3.0) -> np.ndarray | None:
+        """クライアント領域だけを切り出した最新画像。古い / 無ければ None。"""
+        with self._lock:
+            img, t = self._frame, self._t
+        if img is None or time.monotonic() - t > max_age_s:
+            return None
+        x, y, w, h = client_offset_in_window(self.hwnd)
+        if w <= 0 or h <= 0:
+            return None
+        x, y = max(0, x), max(0, y)
+        out = img[y : y + h, x : x + w]
+        return out if out.shape[0] >= h // 2 and out.shape[1] >= w // 2 else img
+
+    def stop(self) -> None:
+        self.closed = True
+        try:
+            self.control.stop()
+        except Exception:
+            pass
+
+
 def is_foreground(hwnd: int) -> bool:
     if not IS_WINDOWS:
         return True
@@ -228,11 +297,16 @@ class GameScreen:
     """
 
     def __init__(self, window_title: str, process: str | None = None, capture: str = "auto"):
-        # capture: auto   = ウィンドウから直接 (PrintWindow)。真っ黒など撮れなければ画面から
-        #          window = ウィンドウから直接だけ / screen = 画面に映っているものを撮る (mss)
-        self.capture = capture
+        # capture: auto   = ウィンドウから直接 (Windows Graphics Capture → PrintWindow)。撮れなければ画面から
+        #          wgc / printwindow = その方式だけ / screen = 画面に映っているものを撮る (mss)
+        self.capture = "printwindow" if capture == "window" else capture
+        self._wgc: WgcCapture | None = None
+        self._wgc_failed = False
+        self._wgc_started = 0.0
+        self._pw_black = 0
+        self._method = ""
+        self._wgc_lock = threading.Lock()
         self._local = threading.local()  # mss はスレッドごとに作る (液晶ミラーが別スレッドで撮る)
-        self._warned_fallback = False
         self.window_title = window_title
         self.process = process
         self.hwnd: int | None = None
@@ -261,21 +335,65 @@ class GameScreen:
         shot = m.grab({"left": r.left, "top": r.top, "width": r.width, "height": r.height})
         return np.ascontiguousarray(np.asarray(shot)[:, :, :3])
 
+    def _grab_wgc(self, hwnd: int) -> np.ndarray | None:
+        with self._wgc_lock:
+            if self._wgc_failed:
+                return None
+            if self._wgc is not None and (self._wgc.hwnd != hwnd or self._wgc.closed):
+                self._wgc.stop()
+                self._wgc = None
+            if self._wgc is None:
+                try:
+                    self._wgc = WgcCapture(hwnd)
+                    self._wgc_started = time.monotonic()
+                except ImportError:
+                    self._wgc_failed = True
+                    print("[screen] windows-capture が無いので Windows Graphics Capture は使いません"
+                          " (pip install windows-capture で入れると仮想デスクトップを切り替えても撮れます)")
+                    return None
+                except Exception as e:
+                    self._wgc_failed = True
+                    print(f"[screen] Windows Graphics Capture を開始できません: {e}")
+                    return None
+            wgc, started = self._wgc, self._wgc_started
+        for _ in range(40):  # 開始直後は最初の 1 枚を待つ (最大 2 秒)
+            img = wgc.latest()
+            if img is not None or time.monotonic() - started > 2.0:
+                return img
+            time.sleep(0.05)
+        return None
+
+    def _use(self, method: str) -> None:
+        if method != self._method:
+            self._method = method
+            names = {"wgc": "Windows Graphics Capture (ウィンドウから直接)",
+                     "printwindow": "PrintWindow (ウィンドウから直接)",
+                     "screen": "画面から (仮想デスクトップを切り替えると別の画面が映ります)"}
+            print(f"[screen] 撮影方式: {names[method]}")
+
     def grab(self) -> np.ndarray:
         """BGR 画像 (H, W, 3) を返す。起動時に固定したウィンドウを撮り続け、閉じられたら探し直す。"""
         if self.hwnd is None or (IS_WINDOWS and not user32.IsWindow(self.hwnd)):
             self.locate()
         hwnd = self.hwnd
         self.rect = client_rect(hwnd)
-        if self.capture in ("auto", "window"):
-            img = capture_window(hwnd)
-            if img is not None and (self.capture == "window" or img.max() > 8):
+        if IS_WINDOWS and self.capture in ("auto", "wgc"):
+            img = self._grab_wgc(hwnd)
+            if img is not None:
+                self._use("wgc")
                 return img
-            if self.capture == "window":
-                raise RuntimeError("ゲーム画面を取得できません (最小化されていませんか)")
-            if not self._warned_fallback:
-                self._warned_fallback = True
-                print("[screen] ウィンドウから直接撮れないので画面から撮ります (仮想デスクトップを切り替えると別の画面が映ります)")
+            if self.capture == "wgc":
+                raise RuntimeError("Windows Graphics Capture でゲーム画面を取得できません (最小化されていませんか)")
+        if self.capture in ("auto", "printwindow") and self._pw_black < 3:
+            img = capture_window(hwnd)
+            if img is not None and (self.capture == "printwindow" or img.max() > 8):
+                self._pw_black = 0
+                self._use("printwindow")
+                return img
+            if self.capture == "printwindow":
+                raise RuntimeError("PrintWindow でゲーム画面を取得できません (最小化されていませんか)")
+            self._pw_black += 1  # このゲームでは真っ黒になる: 3 回続いたら以後は使わない
+        self._use("screen")
         return self._grab_screen(self.rect)
 
     def to_screen(self, x: float, y: float) -> tuple[float, float]:

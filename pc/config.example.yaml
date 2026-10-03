@@ -21,9 +21,9 @@ game:
   # ゲームのプロセス名 (python tools\list_windows.py で確認)。指定するとブラウザのタブ等と取り違えない
   process: null            # 例: main.exe
   # 画面の撮り方
-  #   auto   : ウィンドウから直接撮る (他のウィンドウが重なっても、仮想デスクトップを切り替えても撮れる)。
-  #            撮れない (真っ黒) ときは画面から撮る
-  #   window : ウィンドウから直接だけ / screen : 画面に映っているものを撮る (旧方式)
+  #   auto        : ウィンドウから直接撮る (他のウィンドウが重なっても、仮想デスクトップを切り替えても撮れる)。
+  #                 Windows Graphics Capture (要 pip install windows-capture) → PrintWindow → 画面 の順に試す
+  #   wgc / printwindow : その方式だけ / screen : 画面に映っているものを撮る (旧方式)
   capture: auto
   require_foreground: true # ゲームが前面にないときは操作しない
   # この PC で押すとボット開始 / 停止 (仮想キーコード)。0x21 = PageUp, 0x22 = PageDown
