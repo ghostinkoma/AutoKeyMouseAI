@@ -10,9 +10,9 @@
 // SoftAP の固定 IP は 192.168.4.1
 
 // ---- Wi-Fi 送信出力 --------------------------------------------------------
-// 送信時の電流ピークで電圧が落ちてリセット (ブラウンアウト) する基板向けに控えめにする。
-// 電波が弱いときは WIFI_POWER_15dBm / WIFI_POWER_19_5dBm (最大) に上げる。
-#define WIFI_TX_POWER WIFI_POWER_11dBm
+// 既定は最大 (19.5dBm)。USB 給電だけで送信時にブラウンアウト (reset reason: BROWNOUT)
+// する基板は、バッテリーを付けるか WIFI_POWER_11dBm などに下げる。
+#define WIFI_TX_POWER WIFI_POWER_19_5dBm
 
 // ---- ステータス LED (オンボード WS2812) ------------------------------------
 // ESP32-S3 DevKitC-1 互換基板は GPIO48 (基板によっては 38)。
