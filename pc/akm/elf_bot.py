@@ -287,10 +287,10 @@ class ElfBot:
 
     def run(self) -> None:
         g = self.cfg["game"]
-        stop_vk = int(g.get("stop_key_vk", 0x7B))
+        stop_vk = int(g.get("stop_key_vk", 0x13))
         interval = float(self.cfg.get("loop_interval_ms", 50)) / 1000
         self.screen.locate()
-        print(f"[bot] 開始。ゲーム画面 {self.screen.rect}。F12 (stop_key_vk) で停止")
+        print(f"[bot] 開始。ゲーム画面 {self.screen.rect}。Pause キー (stop_key_vk) で停止")
         from .screen import key_pressed
 
         try:
