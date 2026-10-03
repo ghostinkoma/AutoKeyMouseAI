@@ -28,7 +28,9 @@ game:
 
 helper:
   # MU Helper のオン/オフを切り替えるキー (ゲーム側の割り当てに合わせる)
-  toggle_key: f12
+  # F12 は Windows がデバッガ用に予約しているキーで、ゲームが固まることがあるので使わない
+  # PageUp / PageDown (ボットの開始・停止) とも重ねないこと
+  toggle_key: f9
 
 loop_interval_ms: 50
 
