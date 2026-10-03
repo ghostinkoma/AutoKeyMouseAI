@@ -140,6 +140,69 @@ bool showFrame(const uint8_t* data, size_t len) {
 
 uint32_t framesShown() { return gFrames; }
 
+namespace {
+bool gRawActive = false;
+uint32_t gRawPx = 0;
+int gRawCarry = -1;  // チャンクの境目で 2 バイトが分かれたときの上位バイト
+uint16_t gRawBuf[64];
+uint8_t gRawN = 0;
+
+void rawFlush() {
+  if (gRawN) gTft.writePixels(gRawBuf, gRawN);
+  gRawN = 0;
+}
+}  // namespace
+
+bool rawBegin() {
+  gTft.startWrite();
+  gTft.setAddrWindow(0, 0, FRAME_W, FRAME_H);
+  gRawActive = true;
+  gRawPx = 0;
+  gRawCarry = -1;
+  gRawN = 0;
+  return true;
+}
+
+bool rawWrite(const uint8_t* data, size_t len) {
+  if (!gRawActive) return false;
+  const uint32_t total = (uint32_t)FRAME_W * FRAME_H;
+  for (size_t i = 0; i < len; ++i) {
+    if (gRawCarry < 0) {
+      gRawCarry = data[i];
+      continue;
+    }
+    if (gRawPx >= total) return false;
+    gRawBuf[gRawN++] = (uint16_t)(gRawCarry << 8 | data[i]);
+    gRawCarry = -1;
+    ++gRawPx;
+    if (gRawN == 64) rawFlush();
+  }
+  return true;
+}
+
+bool rawEnd() {
+  if (!gRawActive) return false;
+  rawFlush();
+  gTft.endWrite();
+  gRawActive = false;
+  bool ok = gRawPx == (uint32_t)FRAME_W * FRAME_H && gRawCarry < 0;
+  if (ok) {
+    gLastFrame = millis();
+    gFrameShown = true;
+    ++gFrames;
+  } else {
+    Serial.printf("[TFT] raw frame size mismatch: %lu px\n", (unsigned long)gRawPx);
+  }
+  return ok;
+}
+
+void rawAbort() {
+  if (!gRawActive) return;
+  rawFlush();
+  gTft.endWrite();
+  gRawActive = false;
+}
+
 void loop() {
   if (millis() - gLastCheck < 300) return;
   gLastCheck = millis();
@@ -198,6 +261,10 @@ void begin() {}
 void loop() {}
 bool showFrame(const uint8_t*, size_t) { return false; }
 uint32_t framesShown() { return 0; }
+bool rawBegin() { return false; }
+bool rawWrite(const uint8_t*, size_t) { return false; }
+bool rawEnd() { return false; }
+void rawAbort() {}
 void test() { Serial.println("[TFT] this build has no TFT (HAS_TFT=0)"); }
 }  // namespace display
 

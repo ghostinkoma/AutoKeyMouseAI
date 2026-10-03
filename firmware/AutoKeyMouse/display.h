@@ -16,4 +16,10 @@ constexpr uint16_t FRAME_H = 135;
 bool showFrame(const uint8_t* data, size_t len);  // 液晶が無い / 形式不正なら false
 uint32_t framesShown();
 
+// RGB565 BE を受信しながらそのまま液晶へ流す (64,800 バイトのバッファを確保しなくて済む)
+bool rawBegin();
+bool rawWrite(const uint8_t* data, size_t len);  // 画素数を超えたら false
+bool rawEnd();                                   // ちょうど 240x135 画素なら true
+void rawAbort();
+
 }  // namespace display

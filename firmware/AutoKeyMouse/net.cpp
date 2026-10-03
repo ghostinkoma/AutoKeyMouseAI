@@ -299,38 +299,64 @@ void handleWifi() {
 }
 
 // POST /frame  本文 = JPEG (240x135 以下) または RGB565 BE 240x135 (64800 バイト)
-// PC 側ボットが縮小したゲーム画面を送ってくる
-constexpr size_t kFrameMax = 64800;
-uint8_t* gFrameBuf = nullptr;
+// PC 側ボットが縮小したゲーム画面を送ってくる。
+// 無印 ESP32 は Wi-Fi + BLE でヒープが細切れになり 64KB を一度に確保できないことがあるので、
+// raw は受信しながら液晶へ流し、JPEG は固定の 32KB バッファに受ける。
+constexpr size_t kJpegMax = 32 * 1024;
+uint8_t gJpegBuf[kJpegMax];
 size_t gFrameLen = 0;
-bool gFrameOk = false;
+enum class FrameMode { None, Jpeg, Raw } gFrameMode = FrameMode::None;
+String gFrameErr;
 
 void handleFrameBody() {
   HTTPRaw& raw = gServer.raw();
   if (raw.status == RAW_START) {
-    if (!gFrameBuf) gFrameBuf = (uint8_t*)malloc(kFrameMax);
+    gFrameMode = FrameMode::None;
     gFrameLen = 0;
-    gFrameOk = gFrameBuf != nullptr;
+    gFrameErr = HAS_TFT ? "" : "no display";
   } else if (raw.status == RAW_WRITE) {
-    if (!gFrameOk) return;
-    if (gFrameLen + raw.currentSize > kFrameMax) {
-      gFrameOk = false;
+    if (!gFrameErr.isEmpty() || raw.currentSize == 0) return;
+    if (gFrameMode == FrameMode::None) {
+      bool jpeg = raw.currentSize >= 2 && raw.buf[0] == 0xFF && raw.buf[1] == 0xD8;
+      gFrameMode = jpeg ? FrameMode::Jpeg : FrameMode::Raw;
+      if (!jpeg) display::rawBegin();
+    }
+    if (gFrameMode == FrameMode::Jpeg) {
+      if (gFrameLen + raw.currentSize > kJpegMax) {
+        gFrameErr = "jpeg too large (max 32KB)";
+        return;
+      }
+      memcpy(gJpegBuf + gFrameLen, raw.buf, raw.currentSize);
+    } else if (!display::rawWrite(raw.buf, raw.currentSize)) {
+      display::rawAbort();
+      gFrameErr = "raw frame larger than 240x135";
       return;
     }
-    memcpy(gFrameBuf + gFrameLen, raw.buf, raw.currentSize);
     gFrameLen += raw.currentSize;
   } else if (raw.status == RAW_END) {
-    if (gFrameOk) gFrameOk = display::showFrame(gFrameBuf, gFrameLen);
-  } else {
-    gFrameOk = false;
+    if (!gFrameErr.isEmpty()) return;
+    if (gFrameMode == FrameMode::Jpeg) {
+      if (!display::showFrame(gJpegBuf, gFrameLen)) gFrameErr = "jpeg decode failed (see serial log)";
+    } else if (gFrameMode == FrameMode::Raw) {
+      if (!display::rawEnd()) gFrameErr = "raw frame must be 64800 bytes, got " + String(gFrameLen);
+    } else {
+      gFrameErr = "empty body";
+    }
+  } else {  // RAW_ABORTED
+    if (gFrameMode == FrameMode::Raw) display::rawAbort();
+    if (gFrameErr.isEmpty()) gFrameErr = "aborted";
   }
 }
 
 void handleFrameDone() {
   gServer.sendHeader("Access-Control-Allow-Origin", "*");
-  if (gFrameOk) gServer.send(200, "text/plain", "ok\n");
-  else gServer.send(HAS_TFT ? 400 : 501, "text/plain",
-                    HAS_TFT ? "bad frame (JPEG <=240x135 or RGB565 240x135)\n" : "no display\n");
+  if (gFrameMode == FrameMode::None && gFrameErr.isEmpty()) gFrameErr = "empty body (Content-Type?)";
+  if (gFrameErr.isEmpty()) {
+    gServer.send(200, "text/plain", "ok\n");
+    return;
+  }
+  Serial.printf("[HTTP] /frame error: %s (%u bytes)\n", gFrameErr.c_str(), (unsigned)gFrameLen);
+  gServer.send(HAS_TFT ? 400 : 501, "text/plain", "bad frame: " + gFrameErr + "\n");
 }
 
 void handleNotFound() { sendText(404, "not found"); }
