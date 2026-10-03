@@ -307,6 +307,7 @@ void setup() {
   delay(200);
   Serial.println("\n[AKM] AutoKeyMouse boot");
   esp_reset_reason_t rr = esp_reset_reason();
+  Serial.printf("[AKM] firmware %s (build %s %s)\n", FW_VERSION, __DATE__, __TIME__);
   Serial.printf("[AKM] reset reason: %d (%s)\n", (int)rr, resetReasonName(rr));
   led(0, 0, 255);
 

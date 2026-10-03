@@ -223,6 +223,7 @@ void handleStop() {
 
 void handleStatus() {
   String j = "{";
+  j += "\"fw\":\"" FW_VERSION "\",";
   j += "\"ble\":" + String(hid::connected() ? "true" : "false");
   j += ",\"blePeers\":" + String(hid::connectedPeers());
   j += ",\"wifi\":" + String(staConnected() ? "true" : "false");

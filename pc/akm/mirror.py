@@ -131,6 +131,14 @@ class Mirror:
         import requests
 
         s = requests.Session()
+        try:  # ESP32 のファームウェアが画面の受け取りを直した版か確認する
+            fw = s.get(self.url.replace("/frame", "/status"), timeout=5).json().get("fw")
+            if fw:
+                print(f"[mirror] ESP32 ファームウェア: {fw}")
+            else:
+                print("[mirror] ESP32 のファームウェアが古いです。画面が映らない場合は書き込み直してください (README 参照)")
+        except Exception as e:
+            print(f"[mirror] ESP32 の状態を取得できません: {e}")
         while True:
             t0 = time.monotonic()
             if self.grab is not None:
