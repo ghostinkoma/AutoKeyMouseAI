@@ -21,6 +21,9 @@ uint32_t gLastUp = 0;          // 最後に STA が接続していた時刻
 uint32_t gUpSince = 0;         // 今回の STA 接続が始まった時刻 (0 = 未接続)
 bool gApOn = false;
 volatile bool gGotIp = false;
+volatile int gLastReason = 0;      // 最後の切断理由 (0 = なし)
+int gLoggedReason = -1;
+uint32_t gLoggedAt = 0;
 
 // 他タスク (シリアルの対話設定) からの変更要求。loop() 側で適用する
 SemaphoreHandle_t gReqLock;
@@ -28,7 +31,7 @@ bool gReqPending = false;
 String gReqSsid, gReqPass;
 
 constexpr uint32_t kApFallbackMs = 30000;  // STA がこの時間つながらなければ AP を出す
-constexpr uint32_t kRetryMs = 30000;       // STA 再接続の間隔
+constexpr uint32_t kRetryMs = 60000;       // 自動再接続が止まっていたときの保険
 constexpr uint32_t kApOffDelayMs = 10000;  // STA 接続後、AP を止めるまでの猶予
 
 void startAp() {
@@ -53,8 +56,31 @@ void stopAp() {
 void connectSta() {
   if (gSsid.isEmpty()) return;
   gLastAttempt = millis();
+  gLastReason = 0;
+  gLoggedReason = -1;
   Serial.printf("[WIFI] connecting to \"%s\" ...\n", gSsid.c_str());
+  // 接続処理中に begin すると "sta is connecting, cannot set config" になるので一度止める
+  WiFi.disconnect();
+  delay(100);
   WiFi.begin(gSsid.c_str(), gPass.c_str());
+}
+
+const char* reasonHint(int r) {
+  switch (r) {
+    case WIFI_REASON_NO_AP_FOUND:
+      return "SSID not found: check spelling/case/spaces, and that it is a 2.4GHz network";
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_MIC_FAILURE:
+      return "wrong password?";
+    case WIFI_REASON_AUTH_EXPIRE:
+    case WIFI_REASON_ASSOC_FAIL:
+    case WIFI_REASON_CONNECTION_FAIL:
+      return "the router refused the connection (MAC filter / WPA3-only / too far?)";
+    default:
+      return "";
+  }
 }
 
 void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
@@ -72,8 +98,16 @@ void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
       wifi_err_reason_t r = (wifi_err_reason_t)info.wifi_sta_disconnected.reason;
-      if (gGotIp || millis() - gLastAttempt < 60000) {
-        Serial.printf("[WIFI] disconnected: reason %d (%s)\n", r, WiFi.disconnectReasonName(r));
+      // 8 / 36 (LEAVING) はこちらから切っただけなので無視する
+      bool self = r == WIFI_REASON_ASSOC_LEAVE || r == WIFI_REASON_STA_LEAVING;
+      if (!self) gLastReason = r;
+      // 同じ理由の連続は 30 秒に 1 回だけ出す
+      if (!self && (r != gLoggedReason || millis() - gLoggedAt > 30000)) {
+        gLoggedReason = r;
+        gLoggedAt = millis();
+        const char* hint = reasonHint(r);
+        Serial.printf("[WIFI] disconnected: reason %d (%s)%s%s\n", r, WiFi.disconnectReasonName(r),
+                      *hint ? " -> " : "", hint);
       }
       gGotIp = false;
       break;
@@ -255,6 +289,7 @@ void handleSettings() {
 // POST /wifi  ssid, pass  → NVS に保存して接続し直す
 void handleWifi() {
   String ssid = gServer.arg("ssid");
+  ssid.trim();
   sendText(200, ssid.isEmpty() ? "STA disabled" : "connecting to " + ssid);
   delay(100);
   setCredentials(ssid, gServer.arg("pass"));
@@ -340,14 +375,24 @@ void applyCredentials(const String& ssid, const String& pass) {
   gPrefs.putString("ssid", gSsid);
   gPrefs.putString("pass", gPass);
   Serial.printf("[WIFI] saved ssid=\"%s\" (pass %u chars)\n", gSsid.c_str(), (unsigned)gPass.length());
-  WiFi.disconnect();
   gLastUp = millis();  // ここから AP フォールバックの時間を数える
   if (gSsid.isEmpty()) {
+    WiFi.disconnect();
     startAp();
   } else {
     if (!gApOn) WiFi.mode(WIFI_STA);
     connectSta();
   }
+}
+
+int lastDisconnectReason() { return gLastReason; }
+String lastDisconnectText() {
+  int r = gLastReason;
+  if (!r) return "";
+  String t = String(r) + " (" + WiFi.disconnectReasonName((wifi_err_reason_t)r) + ")";
+  const char* hint = reasonHint(r);
+  if (*hint) t += " -> " + String(hint);
+  return t;
 }
 
 void setCredentials(const String& ssid, const String& pass) {

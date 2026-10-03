@@ -54,38 +54,55 @@ const char* authName(wifi_auth_mode_t m) {
   }
 }
 
-void wifiWizard() {
+// 1 回分の入力と接続。つながったら true
+// *again: 失敗したのでもう一度聞くべきなら true (キャンセル / タイムアウトなら false)
+bool wifiWizardOnce(bool* again) {
+  *again = false;
   Serial.println("\n=== Wi-Fi setup ===");
   Serial.println("[WIFI] scanning...");
+  if (!net::staConnected()) {
+    WiFi.disconnect();  // 再接続を繰り返している最中だとスキャンが失敗するので止める
+    delay(200);
+  }
   int n = WiFi.scanNetworks();
   if (n <= 0) Serial.println("[WIFI] no networks found (you can still type the SSID)");
   for (int i = 0; i < n && i < 20; ++i) {
     Serial.printf("  %2d) %-32s %4d dBm  ch%-2d %s\n", i + 1, WiFi.SSID(i).c_str(), (int)WiFi.RSSI(i),
                   (int)WiFi.channel(i), authName(WiFi.encryptionType(i)));
   }
-  Serial.println("  * ESP32 is 2.4GHz only. Choose a 2.4GHz network (not 5GHz).");
+  Serial.println("  * ESP32 is 2.4GHz only. A 5GHz-only network will not appear in this list.");
+  Serial.println("  * Typing the number is safer than typing the name (case and spaces must match).");
 
   Serial.print("SSID ? (number or name, empty = cancel): ");
   String ssid;
-  if (!readLine(&ssid, Echo::Plain, 120000)) return;
+  if (!readLine(&ssid, Echo::Plain, 120000)) return false;
   ssid.trim();
   if (ssid.isEmpty()) {
     Serial.println("[WIFI] cancelled");
     WiFi.scanDelete();
-    return;
+    return false;
   }
   long num = ssid.toInt();
-  if (num >= 1 && num <= n && String(num) == ssid) ssid = WiFi.SSID(num - 1);
+  if (num >= 1 && num <= n && String(num) == ssid) {
+    ssid = WiFi.SSID(num - 1);
+  } else {
+    bool found = false;
+    for (int i = 0; i < n; ++i) found |= WiFi.SSID(i) == ssid;
+    if (!found) {
+      Serial.printf("[WIFI] warning: \"%s\" is not in the scan list (typo? 5GHz? out of range?)\n",
+                    ssid.c_str());
+    }
+  }
   WiFi.scanDelete();
 
   Serial.printf("Password ? (for \"%s\", empty = open network): ", ssid.c_str());
   String pass;
-  if (!readLine(&pass, Echo::Masked, 120000)) return;
+  if (!readLine(&pass, Echo::Masked, 120000)) return false;
 
   net::setCredentials(ssid, pass);
-  Serial.println("[WIFI] connecting (up to 20 s)...");
+  Serial.printf("[WIFI] connecting to \"%s\" (up to 20 s)", ssid.c_str());
   uint32_t start = millis();
-  delay(500);
+  delay(1000);
   while (!net::staConnected() && millis() - start < 20000) {
     delay(500);
     Serial.print('.');
@@ -94,10 +111,41 @@ void wifiWizard() {
   if (net::staConnected()) {
     Serial.printf("[WIFI] OK  IP = %s   Web UI: http://%s/\n", net::staIp().c_str(),
                   net::staIp().c_str());
-  } else {
-    Serial.println("[WIFI] not connected yet. Check SSID/password (it keeps retrying in the background).");
-    Serial.println("[WIFI] type 'wifi' to try again.");
+    return true;
   }
+  String why = net::lastDisconnectText();
+  Serial.printf("[WIFI] FAILED: %s\n", why.isEmpty() ? "timeout (no answer from the router)" : why.c_str());
+  Serial.println("[WIFI] let's try again (empty SSID = stop and keep retrying in the background)");
+  *again = true;
+  return false;
+}
+
+void wifiWizard() {
+  bool again = true;
+  while (again) {
+    if (wifiWizardOnce(&again)) return;
+  }
+}
+
+// 起動後、Wi-Fi が未設定 / つながらないときは 1 回だけ自動で対話設定を始める
+void maybeAutoWizard() {
+  static bool done = false;
+  if (done) return;
+  uint32_t t = millis();
+  if (net::staConnected()) {
+    done = true;
+    return;
+  }
+  bool unset = !net::staConfigured() && t > 3000;
+  bool failing = net::staConfigured() && t > 25000;
+  if (!unset && !failing) return;
+  done = true;
+  if (failing) {
+    String why = net::lastDisconnectText();
+    Serial.printf("\n[WIFI] could not connect to \"%s\": %s\n", net::ssid().c_str(),
+                  why.isEmpty() ? "timeout" : why.c_str());
+  }
+  wifiWizard();
 }
 
 void printHelp() {
@@ -217,7 +265,10 @@ void serialRxTask(void*) {
 void serialCmdTask(void*) {
   for (;;) {
     String* item = nullptr;
-    if (xQueueReceive(gLines, &item, portMAX_DELAY) != pdTRUE) continue;
+    if (xQueueReceive(gLines, &item, pdMS_TO_TICKS(1000)) != pdTRUE) {
+      maybeAutoWizard();
+      continue;
+    }
     handleLine(*item);
     delete item;
   }

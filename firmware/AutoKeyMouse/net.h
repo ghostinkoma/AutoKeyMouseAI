@@ -17,6 +17,10 @@ String ssid();
 bool apActive();
 String apIp();
 
+// 最後の切断理由 (0 = なし) とその説明
+int lastDisconnectReason();
+String lastDisconnectText();
+
 // SSID / パスワードを NVS に保存して接続し直す (空の SSID で STA 無効 = AP のみ)
 void setCredentials(const String& ssid, const String& pass);
 
