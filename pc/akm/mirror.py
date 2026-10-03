@@ -3,10 +3,12 @@
 ボットの状態 (待機 / 動作中)・HP/MP・拾得数を上に重ねて描くので、
 PageUp を押して動き出したかどうかが手元の液晶で分かる。
 
-送信形式: POST http://<ESP32>/frame  本文 = 240x135 の RGB565 (ビッグエンディアン) 64,800 バイト
-GIF ではなく生の画素で送る理由:
-  * ESP32 側で GIF を展開する処理 (と FFmpeg のインストール) が要らない
-  * 受信しながら液晶へ流し込めるので ESP32 のメモリをほとんど使わない
+送信形式: POST http://<ESP32>/frame
+  * jpeg (既定): 240x135 のベースライン JPEG。5〜10KB 程度で、ESP32 の ROM 内蔵 JPEG デコーダで表示する
+  * raw        : RGB565 (ビッグエンディアン) 64,800 バイト
+JPEG にすると送るデータが 1/8 程度になり、Wi-Fi が空くので HID 操作の遅れも減る。
+240x135 の 1 枚を圧縮するのは CPU で 1ms 未満なので、GPU (NVENC) や FFmpeg は使わない
+(GTX 660 の NVENC は H.264 しか出せず、ESP32 では H.264 を展開できない)。
 送信は別スレッドで行い、ボットの判断ループを待たせない。
 """
 from __future__ import annotations
@@ -28,6 +30,15 @@ def to_rgb565_be(bgr: np.ndarray) -> bytes:
     return v.astype(">u2").tobytes()
 
 
+def encode(bgr: np.ndarray, fmt: str = "jpeg", quality: int = 70) -> bytes:
+    if fmt == "raw":
+        return to_rgb565_be(bgr)
+    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    if not ok:
+        raise RuntimeError("jpeg encode failed")
+    return buf.tobytes()
+
+
 def compose(img: np.ndarray, lines: list[tuple[str, tuple[int, int, int]]]) -> np.ndarray:
     """ゲーム画面を 240x135 に収め (縦横比を保って余白は黒)、上に文字を重ねる。"""
     h, w = img.shape[:2]
@@ -47,13 +58,17 @@ def compose(img: np.ndarray, lines: list[tuple[str, tuple[int, int, int]]]) -> n
 
 
 class Mirror:
-    def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True):
+    def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
+                 fmt: str = "jpeg", quality: int = 70):
         self.enabled = enabled and bool(host)
         self.url = None
         if self.enabled:
             base = host if host.startswith("http") else f"http://{host}"
             self.url = f"{base}/frame"
         self.interval = interval_s
+        self.fmt = fmt
+        self.quality = quality
+        self.last_bytes = 0
         self._lock = threading.Lock()
         self._pending: bytes | None = None
         self._last_put = 0.0
@@ -71,7 +86,8 @@ class Mirror:
         if not self.due():
             return
         self._last_put = time.monotonic()
-        data = to_rgb565_be(compose(img, lines))
+        data = encode(compose(img, lines), self.fmt, self.quality)
+        self.last_bytes = len(data)
         with self._lock:
             self._pending = data
 

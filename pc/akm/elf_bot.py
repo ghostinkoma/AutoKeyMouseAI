@@ -90,6 +90,10 @@ class ElfBot:
         self.collector = collector
         self.mirror = mirror
         self.last_fg_msg = 0.0
+        # 巡回: 開始地点からのずれ (マス) と次の巡回時刻
+        self.nav_pos = [0.0, 0.0]
+        self.next_patrol = 0.0
+        self.patrol_index = 0
         self.screen = screen
         self.dev = device
         self.detectors = detectors
@@ -156,7 +160,7 @@ class ElfBot:
             self.dev.run(script, timeout=120)
         if self.helper:
             self.helper.believed_on = False  # 死亡で MU Helper は止まる
-            self.helper.ensure_on(self.screen.grab())
+            self.helper.ensure_on(self.screen.grab(), self.screen.grab)
         self.hp_zero_since = None
         self.last_buff = 0.0  # 復帰後にバフを掛け直す
         return True
@@ -196,14 +200,19 @@ class ElfBot:
             return False
 
         self.release_attack()
-        off = pcfg.get("click_offset", [0, 0.6])
+        # クリック位置の候補 (ラベル高さ比)。拾えなければ次の位置を試す
+        offsets = pcfg.get("click_offsets") or [pcfg.get("click_offset", [0, 0.6])]
+        off = offsets[0]
         tx = target.center[0] + off[0] * target.h
         ty = target.center[1] + off[1] * target.h
         tx, ty = self._clamp(tx, ty)
         vec = (tx - char[0], ty - char[1])
 
         picked = False
-        for attempt in range(int(pcfg.get("attempts", 2))):
+        for attempt in range(max(int(pcfg.get("attempts", 2)), len(offsets))):
+            off = offsets[min(attempt, len(offsets) - 1)]
+            if attempt:
+                tx, ty = self._clamp(target.center[0] + off[0] * target.h, target.center[1] + off[1] * target.h)
             self.dev.run(f"{self._pt(tx, ty)};w:30;c:L")
             if self.helper:
                 self.helper.note_mouse_used()  # クリックで MU Helper は止まる
@@ -276,6 +285,59 @@ class ElfBot:
         else:
             self.dev.run(self._pt(ax, ay))
 
+    def volley(self) -> None:
+        """攻撃スキルで周囲 8 方向 (45 度ずつ) に撃つ。索敵せずに全方向を掃射する。"""
+        acfg = self.ecfg["attack"]
+        assert self.img is not None
+        h = self.img.shape[0]
+        cx, cy = self._char()
+        n = int(acfg.get("directions", 8))
+        r = float(acfg.get("radius", 0.18)) * h
+        shots = int(acfg.get("shots_per_direction", 2))
+        parts = [f"k:{acfg['skill_key']}"]
+        for i in range(n):
+            ang = 2 * math.pi * i / n
+            ax, ay = self._clamp(cx + r * math.cos(ang), cy + r * math.sin(ang) * 0.6)  # 見下ろしなので縦を潰す
+            move = self._pt(ax, ay)
+            if move:
+                parts.append(move)
+            parts.append(f"w:30;c:R,{shots};w:{int(acfg.get('dwell_ms', 300))}")
+        self.dev.run(";".join(parts), timeout=60)
+        if self.helper:
+            self.helper.note_mouse_used()
+
+    def handle_patrol(self, now: float) -> bool:
+        """開始地点から上下左右 range マスの範囲を巡回し、着いたら 8 方向に撃つ。"""
+        pcfg = self.ecfg.get("patrol") or {}
+        if not pcfg.get("enabled", True) or now < self.next_patrol:
+            return False
+        rng = float(pcfg.get("range", 5))
+        route = pcfg.get("route") or [[0, -1], [1, 0], [0, 1], [-1, 0]]
+        tx, ty = route[self.patrol_index % len(route)]
+        self.patrol_index += 1
+        goal = (tx * rng, ty * rng)
+        dx, dy = goal[0] - self.nav_pos[0], goal[1] - self.nav_pos[1]
+        step = pcfg.get("tile_px", [45, 32])  # 1 マスが画面上で何ピクセルか (横, 縦)
+        assert self.img is not None
+        cx, cy = self._char()
+        mx, my = self._clamp(cx + dx * step[0], cy + dy * step[1])
+        # 画面端で縮められた分は実際に動いた量として記録する
+        self.nav_pos[0] += (mx - cx) / step[0]
+        self.nav_pos[1] += (my - cy) / step[1]
+        dist = math.hypot(mx - cx, my - cy)
+        walk_ms = int(pcfg.get("walk_ms_per_px", 4) * dist) + 300
+        print(f"[bot] 巡回: 目標 ({goal[0]:+.0f}, {goal[1]:+.0f}) マス  現在 ({self.nav_pos[0]:+.1f}, {self.nav_pos[1]:+.1f})")
+        self.dev.run(f"{self._pt(mx, my)};w:30;c:L;w:{walk_ms}", timeout=30)
+        if self.helper:
+            self.helper.note_mouse_used()
+        if pcfg.get("volley", True):
+            self.img = self.screen.grab()
+            self.volley()
+        if self.helper:
+            self.helper.ensure_on(self.screen.grab(), self.screen.grab)  # 移動・射撃で止まった MU Helper を確実に再開
+        self.next_patrol = time.monotonic() + float(pcfg.get("hunt_s", 20))
+        return True
+
     # --------------------------------------------------------------- main --
     def report(self, st: Status, now: float) -> None:
         if now - self.last_report < 10:
@@ -299,11 +361,13 @@ class ElfBot:
         self.handle_recovery(st, now)
         if self.ecfg["pickup"].get("enabled", True) and self.handle_pickup(st, now):
             if self.helper is not None:
-                self.helper.ensure_on(self.img)  # 拾い終わったらすぐ再開
+                self.helper.ensure_on(self.img, self.screen.grab)  # 拾い終わったらすぐ再開
             return
         if self.mode == "helper":
+            if self.handle_patrol(now):
+                return
             if self.helper is not None:
-                self.helper.ensure_on(self.img)  # 拾得のクリック等で止まっていたら再開
+                self.helper.ensure_on(self.img, self.screen.grab)  # クリック等で止まっていたら再開
             self.report(st, now)
             return
         if self.handle_buffs(now):
@@ -364,8 +428,10 @@ class ElfBot:
                         running = True
                         self.last_buff = 0.0
                         print(f"[bot] 開始 ({self.mode} モード / PageDown で停止)")
+                        self.nav_pos = [0.0, 0.0]  # ここが巡回の中心 (開始地点)
+                        self.next_patrol = time.monotonic() + float((self.ecfg.get("patrol") or {}).get("first_after_s", 3))
                         if self.helper is not None and self.screen.is_active():
-                            self.helper.ensure_on(self.screen.grab())
+                            self.helper.ensure_on(self.screen.grab(), self.screen.grab)
                     time.sleep(0.05)
                     continue
                 if key_pressed(stop_vk):

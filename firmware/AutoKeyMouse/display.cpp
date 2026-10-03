@@ -8,6 +8,12 @@
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#include "esp32s3/rom/tjpgd.h"
+#else
+#include "esp32/rom/tjpgd.h"
+#endif
+
 #include "ble_hid.h"
 #include "macro.h"
 #include "net.h"
@@ -23,10 +29,6 @@ uint32_t gLastCheck = 0;
 constexpr uint32_t kFrameHoldMs = 5000;  // 最後のフレームからこの時間は状態画面に戻さない
 uint32_t gLastFrame = 0;
 bool gFrameShown = false;
-bool gFrameActive = false;  // 受信中
-uint32_t gFrameBytes = 0;
-uint32_t gFrameTotal = 0;
-int gCarry = -1;            // 2 バイト単位に揃わなかった余りの 1 バイト
 uint32_t gFrames = 0;
 
 // 液晶の内蔵フォントは ASCII のみなので、それ以外は '?' にする
@@ -79,48 +81,78 @@ void begin() {
   line(40, 2, ST77XX_WHITE, "booting...");
 }
 
-bool frameBegin(uint16_t w, uint16_t h) {
-  if (w != FRAME_W || h != FRAME_H) return false;
-  gFrameActive = true;
-  gFrameBytes = 0;
-  gFrameTotal = (uint32_t)w * h * 2;
-  gCarry = -1;
+namespace {
+
+struct JpegSrc {
+  const uint8_t* data;
+  size_t len;
+  size_t pos;
+};
+
+UINT jpegIn(JDEC* jd, BYTE* buf, UINT n) {
+  JpegSrc* src = (JpegSrc*)jd->device;
+  size_t left = src->len - src->pos;
+  if (n > left) n = left;
+  if (buf) memcpy(buf, src->data + src->pos, n);
+  src->pos += n;
+  return n;
+}
+
+UINT jpegOut(JDEC* jd, void* bitmap, JRECT* r) {
+  // tjpgd (ROM 版) は RGB888 で出力する。RGB565 に詰め直して液晶へ
+  static uint16_t px[16 * 16];
+  const uint8_t* rgb = (const uint8_t*)bitmap;
+  int w = r->right - r->left + 1, h = r->bottom - r->top + 1;
+  if (r->left >= FRAME_W || r->top >= FRAME_H) return 1;
+  for (int i = 0; i < w * h; ++i, rgb += 3) {
+    px[i] = (uint16_t)((rgb[0] & 0xF8) << 8 | (rgb[1] & 0xFC) << 3 | rgb[2] >> 3);
+  }
+  gTft.drawRGBBitmap(r->left, r->top, px, w, h);
+  return 1;
+}
+
+bool drawJpeg(const uint8_t* data, size_t len) {
+  static uint8_t work[3100];
+  JDEC jd;
+  JpegSrc src{data, len, 0};
+  JRESULT rc = jd_prepare(&jd, jpegIn, work, sizeof(work), &src);
+  if (rc != JDR_OK) {
+    Serial.printf("[TFT] jpeg prepare failed: %d\n", rc);
+    return false;
+  }
+  if (jd.width > FRAME_W || jd.height > FRAME_H) {
+    Serial.printf("[TFT] jpeg too large: %ux%u\n", jd.width, jd.height);
+    return false;
+  }
+  rc = jd_decomp(&jd, jpegOut, 0);  // drawRGBBitmap が SPI の開始/終了を行う
+  return rc == JDR_OK;
+}
+
+bool drawRaw(const uint8_t* data, size_t len) {
+  if (len != (size_t)FRAME_W * FRAME_H * 2) return false;
+  static uint16_t row[FRAME_W];
   gTft.startWrite();
-  gTft.setAddrWindow(0, 0, w, h);
+  gTft.setAddrWindow(0, 0, FRAME_W, FRAME_H);
+  for (int y = 0; y < FRAME_H; ++y) {
+    const uint8_t* p = data + (size_t)y * FRAME_W * 2;
+    for (int x = 0; x < FRAME_W; ++x) row[x] = (uint16_t)(p[2 * x] << 8 | p[2 * x + 1]);
+    gTft.writePixels(row, FRAME_W);
+  }
+  gTft.endWrite();
   return true;
 }
 
-void frameData(const uint8_t* data, size_t len) {
-  if (!gFrameActive) return;
-  static uint16_t px[384];
-  size_t i = 0;
-  while (i < len && gFrameBytes < gFrameTotal) {
-    size_t n = 0;
-    if (gCarry >= 0) {  // 前回の余り + 今回の先頭 1 バイトで 1 画素
-      px[n++] = (uint16_t)(gCarry << 8 | data[i++]);
-      gCarry = -1;
-      gFrameBytes += 2;
-    }
-    while (n < 384 && i + 1 < len && gFrameBytes < gFrameTotal) {
-      px[n++] = (uint16_t)(data[i] << 8 | data[i + 1]);  // ビッグエンディアン RGB565
-      i += 2;
-      gFrameBytes += 2;
-    }
-    if (n) gTft.writePixels(px, n);
-    if (i + 1 == len && gFrameBytes < gFrameTotal) {
-      gCarry = data[i++];
-    }
-  }
-}
+}  // namespace
 
-bool frameEnd() {
-  if (!gFrameActive) return false;
-  gTft.endWrite();
-  gFrameActive = false;
-  bool ok = gFrameBytes == gFrameTotal;
-  gLastFrame = millis();
-  gFrameShown = true;
-  ++gFrames;
+bool showFrame(const uint8_t* data, size_t len) {
+  bool ok;
+  if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) ok = drawJpeg(data, len);  // JPEG
+  else ok = drawRaw(data, len);                                                 // RGB565 BE
+  if (ok) {
+    gLastFrame = millis();
+    gFrameShown = true;
+    ++gFrames;
+  }
   return ok;
 }
 
@@ -182,9 +214,7 @@ void loop() {
 namespace display {
 void begin() {}
 void loop() {}
-bool frameBegin(uint16_t, uint16_t) { return false; }
-void frameData(const uint8_t*, size_t) {}
-bool frameEnd() { return false; }
+bool showFrame(const uint8_t*, size_t) { return false; }
 uint32_t framesShown() { return 0; }
 void test() { Serial.println("[TFT] this build has no TFT (HAS_TFT=0)"); }
 }  // namespace display

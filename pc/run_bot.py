@@ -39,9 +39,10 @@ def main() -> None:
     host = (cfg.get("device") or {}).get("host")
     mirror = None
     if mcfg.get("enabled", True) and not args.dry_run:
-        mirror = Mirror(host, float(mcfg.get("interval_s", 1.0)))
+        mirror = Mirror(host, float(mcfg.get("interval_s", 1.0)), fmt=mcfg.get("format", "jpeg"),
+                        quality=int(mcfg.get("quality", 70)))
         if mirror.enabled:
-            print(f"[mirror] ESP32 ({host}) の液晶にゲーム画面を {mirror.interval:.1f} 秒ごとに送ります")
+            print(f"[mirror] ESP32 ({host}) の液晶にゲーム画面を {mirror.interval:.1f} 秒ごとに送ります ({mirror.fmt})")
     ElfBot(cfg, screen, device, detectors, show=args.show, helper=helper, collector=collector, mirror=mirror).run()
 
 

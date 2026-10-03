@@ -8,13 +8,12 @@ void begin();
 void loop();  // loop() から呼ぶ。内容が変わったときだけ描き直す
 void test();  // 赤・緑・青で全面を塗る (表示確認用)
 
-// PC から送られてくる縮小画面 (240x135, RGB565 ビッグエンディアン) を液晶へ流し込む。
-// 受信しながらそのまま書き込むので大きなバッファは不要。
+// PC から送られてくる縮小画面を液晶に表示する。形式は
+//   * JPEG (240x135 以下)                         … 通常はこちら (数 KB で済む)
+//   * RGB565 ビッグエンディアン 240x135 = 64800 バイト
 constexpr uint16_t FRAME_W = 240;
 constexpr uint16_t FRAME_H = 135;
-bool frameBegin(uint16_t w, uint16_t h);  // 液晶が無い / サイズ違いなら false
-void frameData(const uint8_t* data, size_t len);
-bool frameEnd();                          // 画素数ぴったり受け取れたら true
+bool showFrame(const uint8_t* data, size_t len);  // 液晶が無い / 形式不正なら false
 uint32_t framesShown();
 
 }  // namespace display

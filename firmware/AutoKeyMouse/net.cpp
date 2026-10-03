@@ -298,25 +298,39 @@ void handleWifi() {
   setCredentials(ssid, gServer.arg("pass"));
 }
 
-// POST /frame  本文 = 240x135 の RGB565 (ビッグエンディアン) 64800 バイト
-// PC 側ボットが縮小したゲーム画面を送ってくる。受信しながら液晶に流し込む
+// POST /frame  本文 = JPEG (240x135 以下) または RGB565 BE 240x135 (64800 バイト)
+// PC 側ボットが縮小したゲーム画面を送ってくる
+constexpr size_t kFrameMax = 64800;
+uint8_t* gFrameBuf = nullptr;
+size_t gFrameLen = 0;
 bool gFrameOk = false;
 
 void handleFrameBody() {
   HTTPRaw& raw = gServer.raw();
   if (raw.status == RAW_START) {
-    gFrameOk = display::frameBegin(display::FRAME_W, display::FRAME_H);
+    if (!gFrameBuf) gFrameBuf = (uint8_t*)malloc(kFrameMax);
+    gFrameLen = 0;
+    gFrameOk = gFrameBuf != nullptr;
   } else if (raw.status == RAW_WRITE) {
-    if (gFrameOk) display::frameData(raw.buf, raw.currentSize);
-  } else if (raw.status == RAW_END || raw.status == RAW_ABORTED) {
-    if (gFrameOk) gFrameOk = display::frameEnd() && raw.status == RAW_END;
+    if (!gFrameOk) return;
+    if (gFrameLen + raw.currentSize > kFrameMax) {
+      gFrameOk = false;
+      return;
+    }
+    memcpy(gFrameBuf + gFrameLen, raw.buf, raw.currentSize);
+    gFrameLen += raw.currentSize;
+  } else if (raw.status == RAW_END) {
+    if (gFrameOk) gFrameOk = display::showFrame(gFrameBuf, gFrameLen);
+  } else {
+    gFrameOk = false;
   }
 }
 
 void handleFrameDone() {
   gServer.sendHeader("Access-Control-Allow-Origin", "*");
   if (gFrameOk) gServer.send(200, "text/plain", "ok\n");
-  else gServer.send(HAS_TFT ? 400 : 501, "text/plain", HAS_TFT ? "bad frame (240x135 RGB565 = 64800 bytes)\n" : "no display\n");
+  else gServer.send(HAS_TFT ? 400 : 501, "text/plain",
+                    HAS_TFT ? "bad frame (JPEG <=240x135 or RGB565 240x135)\n" : "no display\n");
 }
 
 void handleNotFound() { sendText(404, "not found"); }

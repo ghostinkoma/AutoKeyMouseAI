@@ -64,6 +64,14 @@ def key_pressed(vk: int) -> bool:
     return bool(user32.GetAsyncKeyState(vk) & 0x8000)
 
 
+def window_pid(hwnd: int) -> int:
+    if not IS_WINDOWS:
+        return 0
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
 def process_name(hwnd: int) -> str:
     """ウィンドウを持つプロセスの実行ファイル名 (例: main.exe)。取れなければ空文字。"""
     if not IS_WINDOWS:
@@ -151,6 +159,7 @@ class GameScreen:
         self.window_title = window_title
         self.process = process
         self.hwnd: int | None = None
+        self.pid = 0
         self.rect: Rect | None = None
 
     def locate(self) -> Rect:
@@ -161,11 +170,14 @@ class GameScreen:
                 " (python tools\\list_windows.py で確認)"
             )
         self.rect = client_rect(self.hwnd)
+        self.pid = window_pid(self.hwnd)
+        print(f"[screen] ゲームウィンドウを固定: hwnd=0x{self.hwnd:X} pid={self.pid} "
+              f"process={process_name(self.hwnd)} 画面 {self.rect.width}x{self.rect.height}")
         return self.rect
 
     def grab(self) -> np.ndarray:
-        """BGR 画像 (H, W, 3) を返す。"""
-        if self.hwnd is None:
+        """BGR 画像 (H, W, 3) を返す。起動時に固定したウィンドウを撮り続け、閉じられたら探し直す。"""
+        if self.hwnd is None or (IS_WINDOWS and not user32.IsWindow(self.hwnd)):
             self.locate()
         self.rect = client_rect(self.hwnd)
         r = self.rect

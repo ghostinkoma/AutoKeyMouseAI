@@ -101,13 +101,15 @@ class FakeDetector:
         return self.seq.pop(0) if len(self.seq) > 1 else self.seq[0]
 
 
-def make_bot(frames, det_seq, mode="manual"):
+def make_bot(frames, det_seq, mode="manual", patrol=False):
     from akm.helper import HelperControl
 
     cfg = yaml.safe_load((PC / "config.example.yaml").read_text(encoding="utf-8"))
     cfg["elf"]["heal"] = None
     cfg["elf"]["mode"] = mode
+    cfg["elf"]["patrol"]["enabled"] = patrol
     cfg["helper"]["settle_ms"] = 0
+    cfg["helper"]["indicator"]["off_image"] = None  # テスト画像には MU Helper パネルが無い
     rec = Recorder()
     dev = Device(rec, AbsMap.for_screen(1920, 1080))
     helper = HelperControl(cfg["helper"], dev, PC)
@@ -227,3 +229,28 @@ def test_mirror_frame_format():
     assert len(data) == 240 * 135 * 2
     mid = (134 * 240 + 120) * 2  # 最下行の中央 (左右は縦横比を保つための黒帯)
     assert data[mid : mid + 2] == b"\xf8\x00"  # 赤 = RGB565 0xF800 (ビッグエンディアン)
+
+
+def test_patrol_moves_then_volleys_8_directions_and_restarts_helper():
+    bot, rec = make_bot([full_hud_frame()], [[]], mode="helper", patrol=True)
+    bot.helper.believed_on = True
+    bot.step()
+    move, volley, f9 = rec.sent[0], rec.sent[1], rec.sent[2]
+    assert move.endswith(move.split(";")[-1]) and ";c:L;" in move  # 上へ 5 マス移動
+    assert volley.startswith("k:1") and volley.count("c:R,2") == 8  # 45 度ずつ 8 方向
+    assert f9 == "k:f9"  # クリックで止まった MU Helper を再開
+    assert bot.nav_pos[1] < 0  # 上 (画面の上方向) に動いた
+    assert bot.helper.is_on()
+
+
+def test_helper_indicator_reads_play_button():
+    import cv2
+    from akm.helper import HelperControl
+
+    cfg = yaml.safe_load((PC / "config.example.yaml").read_text(encoding="utf-8"))
+    hc = HelperControl(cfg["helper"], Device(Recorder(), AbsMap.for_screen(1920, 1080)), PC)
+    tpl = cv2.imread(str(PC / "templates/helper_off.png"))
+    frame = np.zeros((1050, 1680, 3), np.uint8)
+    assert hc.read_state(frame) is True  # ▶ が見えない = 動作中
+    frame[6:32, 276:304] = tpl
+    assert hc.read_state(frame) is False  # ▶ が見える = 停止中

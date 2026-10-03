@@ -36,8 +36,8 @@ class HelperControl:
         ind = self.cfg.get("indicator") or {}
         self.ind_roi = ind.get("roi")
         self.ind_thr = float(ind.get("threshold", 0.85))
-        self.tpl_on = self._load(base_dir, ind.get("on"))
-        self.tpl_off = self._load(base_dir, ind.get("off"))
+        self.tpl_on = self._load(base_dir, ind.get("on_image"))  # YAML では on/off が真偽値になるので別名
+        self.tpl_off = self._load(base_dir, ind.get("off_image"))
 
     @staticmethod
     def _load(base: Path, f: str | None) -> np.ndarray | None:
@@ -63,6 +63,9 @@ class HelperControl:
             return float(cv2.matchTemplate(area, tpl, cv2.TM_CCOEFF_NORMED).max())
 
         s_on, s_off = score(self.tpl_on), score(self.tpl_off)
+        if self.tpl_on is None:
+            # 停止中の表示 (▶ ボタン) だけ分かっている場合: 見えていれば停止中、見えなければ動作中
+            return s_off < self.ind_thr
         if max(s_on, s_off) < self.ind_thr:
             return None
         return s_on > s_off
@@ -85,15 +88,28 @@ class HelperControl:
         self.last_toggle = time.monotonic()
         self.toggles += 1
 
-    def ensure_on(self, img: np.ndarray | None = None) -> bool:
-        """止まっていれば切替キーで再開する。押したら True。"""
+    def ensure_on(self, img: np.ndarray | None = None, grab=None) -> bool:
+        """止まっていれば切替キーで再開する。押したら True。
+
+        grab (画面を撮る関数) を渡すと、押したあと画面で再開を確認し、だめなら押し直す。
+        """
         if self.is_on(img):
             return False
         if time.monotonic() - self.last_toggle < self.retry_s and self.read_state(img) is not None:
             return False  # 画面で確認できる場合は、押した直後の連打を避ける
-        print("[helper] MU Helper を開始します")
-        self.toggle()
-        time.sleep(self.settle_s)
+        for attempt in range(int(self.cfg.get("verify_attempts", 3))):
+            print("[helper] MU Helper を開始します" + (f" (再試行 {attempt})" if attempt else ""))
+            self.toggle()
+            time.sleep(self.settle_s)
+            if grab is None:
+                return True
+            state = self.read_state(grab())
+            if state is None or state:
+                if state:
+                    self.believed_on = True
+                return True
+            self.believed_on = False  # 画面上はまだ停止中: もう一度押す
+        print("[helper] MU Helper の開始を確認できませんでした")
         return True
 
     def ensure_off(self, img: np.ndarray | None = None) -> bool:

@@ -36,11 +36,14 @@ helper:
   stop_on_pause: true      # PageDown でボットを止めたら MU Helper も止める
   settle_ms: 800           # 切り替え後の待ち時間
   # 画面表示で ON/OFF を判定する場合 (左上の MU Helper パネルを切り出した画像)。未設定ならボットの操作から推定
+  # 左上の MU Helper パネルの ▶ (開始) ボタンが見えていれば停止中、見えなければ動作中と判定する。
+  # これで F9 を押したあと本当に再開したかを画面で確認し、だめなら押し直す
   indicator:
-    roi: null              # 例: [0.0, 0.0, 0.2, 0.05]
-    on: null               # 例: templates/helper_on.png
-    off: null              # 例: templates/helper_off.png
-    threshold: 0.85
+    roi: [0.150, 0.0, 0.045, 0.045]   # 1680x1050 で実測した ▶ ボタンの周辺
+    on_image: null                    # 動作中の表示の画像があれば指定 (無くても可)
+    off_image: templates/helper_off.png  # 停止中の ▶ ボタン
+    threshold: 0.8
+  verify_attempts: 3       # 再開を画面で確認できなければ押し直す回数
 
 loop_interval_ms: 50
 
@@ -48,6 +51,8 @@ loop_interval_ms: 50
 mirror:
   enabled: true
   interval_s: 1.0          # 送る間隔。短くすると ESP32 の HTTP が混んでキー操作が遅れるので 0.5 以上推奨
+  format: jpeg             # jpeg (5〜10KB/枚, 推奨) | raw (64.8KB/枚)
+  quality: 70              # JPEG 画質 (1-100)
 
 hud:
   # 1680x1050 のウィンドウで実測 (Murex S6)。比率なので他のサイズでも概ね合う
@@ -105,9 +110,22 @@ elf:
 
   attack:
     skill_key: "1"      # 攻撃スキル (Triple Shot / Multi-Shot など) を 1 に割り当てる
-    directions: 8       # モンスター未検出時に周囲を何方向に撃つか
-    dwell_ms: 600       # 1 方向に撃ち続ける時間
+    directions: 8       # 何方向に撃つか (8 = 45 度ずつ)
+    shots_per_direction: 2  # 1 方向あたりの右クリック回数 (矢は減らないので多めでよい)
+    dwell_ms: 300       # 1 方向ごとの待ち
     radius: 0.18        # 狙う位置の半径 (画面高さ比)
+
+  # 巡回: PageUp を押した地点を中心に、上下左右 range マスを順番に回り、着くたびに 8 方向へ撃つ。
+  # その間は MU Helper が狩りをする。移動・射撃のクリックで止まった MU Helper は毎回 F9 で再開 (画面で確認)
+  patrol:
+    enabled: true
+    range: 5            # 中心から何マスまで動くか
+    route: [[0, -1], [1, 0], [0, 1], [-1, 0]]   # 上 → 右 → 下 → 左 (range 倍)
+    hunt_s: 20          # 1 地点で MU Helper に狩らせる秒数
+    first_after_s: 3    # 開始から最初の巡回まで
+    tile_px: [45, 32]   # 1 マスの画面上の大きさ (横, 縦)。動きすぎ/足りなければ調整
+    walk_ms_per_px: 4   # 移動の待ち時間 (1 ピクセルあたり)
+    volley: true        # 着いたら 8 方向に撃つ
 
   buffs:
     keys: ["2", "3"]    # 2 = Greater Defense, 3 = Greater Damage (自分に掛ける)
@@ -131,9 +149,11 @@ elf:
     enabled: true
     targets: []         # 空なら vision で検出した item すべて (= 上の宝石と Zen)
     max_distance: 0.45  # キャラからこの距離 (画面高さ比) 以内だけ拾いに行く
-    click_offset: [0.0, 3.0]  # ラベルの下にある実物をクリック (ラベル高さ比, 下が +。Zen は約 3 行下に金貨)
+    # クリック位置の候補 (ラベル高さ比, 下が +)。1 回目で拾えなければ次を試す
+    #   [0, 3.0]: ラベルの下の実物 (Zen の金貨)   [0, 1.2]: すぐ下   [0, 0]: ラベルそのもの
+    click_offsets: [[0.0, 3.0], [0.0, 1.2], [0.0, 0.0]]
     walk_timeout_s: 3.0
-    attempts: 2
+    attempts: 3
     ignore_s: 15        # 拾えなかったアイテムを無視する秒数
     return_to_anchor: true
     return_wait_ms: 800
