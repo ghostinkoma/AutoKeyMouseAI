@@ -26,6 +26,9 @@ class HelperControl:
         self.cfg = cfg or {}
         self.dev = dev
         self.key = str(self.cfg.get("toggle_key", "f9"))
+        # click: パネルの ▶ ボタンをクリックして開始 / key: 切替キー / auto: ▶ が見えればクリック、無ければキー
+        self.start_method = str(self.cfg.get("start_method", "auto"))
+        self.to_screen = None  # クライアント座標 → スクリーン座標 (ElfBot が設定する)
         self.mouse_stops = bool(self.cfg.get("mouse_stops_helper", True))
         self.settle_s = float(self.cfg.get("settle_ms", 800)) / 1000
         self.retry_s = float(self.cfg.get("retry_s", 5))
@@ -74,6 +77,21 @@ class HelperControl:
             return None
         return s_on > s_off
 
+    def find_start_button(self, img: np.ndarray | None) -> tuple[float, float] | None:
+        """停止中の ▶ ボタンの中心 (クライアント座標)。見えなければ None。"""
+        if img is None or self.ind_roi is None or self.tpl_off is None:
+            return None
+        x0, y0, x1, y1 = roi_px(img.shape, self.ind_roi)
+        area = img[y0:y1, x0:x1]
+        th, tw = self.tpl_off.shape[:2]
+        if th > area.shape[0] or tw > area.shape[1]:
+            return None
+        res = cv2.matchTemplate(area, self.tpl_off, cv2.TM_CCOEFF_NORMED)
+        _, best, _, (bx, by) = cv2.minMaxLoc(res)
+        if best < self.ind_thr:
+            return None
+        return x0 + bx + tw / 2, y0 + by + th / 2
+
     def is_on(self, img: np.ndarray | None = None) -> bool:
         s = self.read_state(img)
         if s is not None:
@@ -85,6 +103,21 @@ class HelperControl:
         """ボットがクリックした。MU Helper は止まっているはず。"""
         if self.mouse_stops:
             self.believed_on = False
+
+    def start(self, img: np.ndarray | None) -> None:
+        """MU Helper を開始する。▶ ボタンが見えればクリック、見えなければ切替キー。"""
+        pos = None
+        if self.start_method in ("click", "auto") and self.to_screen is not None:
+            pos = self.find_start_button(img)
+        if pos is not None:
+            sx, sy = self.to_screen(*pos)
+            print(f"[helper] ▶ ボタンをクリック ({sx:.0f},{sy:.0f})")
+            self.dev.click(sx, sy)
+            self.believed_on = True
+            self.last_toggle = time.monotonic()
+            self.toggles += 1
+        else:
+            self.toggle()
 
     def toggle(self) -> None:
         self.dev.run(f"k:{self.key}")
@@ -103,11 +136,12 @@ class HelperControl:
             return False  # 画面で確認できる場合は、押した直後の連打を避ける
         for attempt in range(int(self.cfg.get("verify_attempts", 3))):
             print("[helper] MU Helper を開始します" + (f" (再試行 {attempt})" if attempt else ""))
-            self.toggle()
+            self.start(img)
             time.sleep(self.settle_s)
             if grab is None:
                 return True
-            state = self.read_state(grab())
+            img = grab()
+            state = self.read_state(img)
             if state is None or state:
                 if state:
                     self.believed_on = True

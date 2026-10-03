@@ -31,6 +31,11 @@ helper:
   # F12 は Windows がデバッガ用に予約しているキーで、ゲームが固まることがあるので使わない
   # PageUp / PageDown (ボットの開始・停止) とも重ねないこと
   toggle_key: f9
+  # MU Helper の開始方法
+  #   auto  : 左上パネルの ▶ ボタンが見えればクリックして開始、見えなければ toggle_key (推奨)
+  #   click : 常に ▶ ボタンのクリック (見えなければ toggle_key)
+  #   key   : toggle_key だけ (ゲーム側で MU Helper にキーを割り当てている場合)
+  start_method: auto
   initially_on: false      # ボット開始時に MU Helper が止まっている前提 (PageUp で開始すると F9 で入れる)
   mouse_stops_helper: true # クリックすると MU Helper が止まる (拾得後に F9 で入れ直す)
   stop_on_pause: true      # PageDown でボットを止めたら MU Helper も止める

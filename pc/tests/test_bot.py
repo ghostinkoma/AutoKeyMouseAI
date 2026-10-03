@@ -257,3 +257,22 @@ def test_helper_indicator_reads_play_button():
     assert hc.read_state(frame) is True  # パネルあり・▶ が見えない = 動作中
     frame[6:32, 276:304] = tpl
     assert hc.read_state(frame) is False  # ▶ が見える = 停止中
+
+
+def test_helper_starts_by_clicking_play_button():
+    import cv2
+    from akm.helper import HelperControl
+
+    cfg = yaml.safe_load((PC / "config.example.yaml").read_text(encoding="utf-8"))
+    cfg["helper"]["settle_ms"] = 0
+    rec = Recorder()
+    hc = HelperControl(cfg["helper"], Device(rec, AbsMap.for_screen(1920, 1080)), PC)
+    hc.to_screen = lambda x, y: (x + 100, y + 10)
+    frame = np.zeros((1050, 1680, 3), np.uint8)
+    frame[8:25, 116:188] = cv2.imread(str(PC / "templates/helper_panel.png"))
+    tpl = cv2.imread(str(PC / "templates/helper_off.png"))
+    frame[6:6 + tpl.shape[0], 276:276 + tpl.shape[1]] = tpl
+    assert hc.find_start_button(frame) == (276 + tpl.shape[1] / 2, 6 + tpl.shape[0] / 2)
+    hc.ensure_on(frame)
+    assert rec.sent and "c:L" in rec.sent[-1] and "k:f9" not in rec.sent[-1]
+    assert hc.is_on()

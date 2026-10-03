@@ -87,6 +87,8 @@ class ElfBot:
         # manual: 攻撃・バフもボットが行う
         self.mode = self.ecfg.get("mode", "helper")
         self.helper = helper if self.mode == "helper" else None
+        if self.helper is not None:
+            self.helper.to_screen = screen.to_screen  # ▶ ボタンのクリック位置の変換
         self.collector = collector
         self.mirror = mirror
         self.last_fg_msg = 0.0
