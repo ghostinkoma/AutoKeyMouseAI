@@ -388,10 +388,13 @@ class ElfBot:
     def update_mirror(self, state: str, color: tuple[int, int, int], st: Status | None = None,
                       img: np.ndarray | None = None) -> None:
         """ESP32 の液晶に縮小画面と状態を出す。"""
-        if self.mirror is None or not self.mirror.due():
+        if self.mirror is None:
+            return
+        live = self.mirror.grab is not None  # ミラーが自分で撮る場合は文字だけ渡す
+        if not live and not self.mirror.due():
             return
         img = img if img is not None else self.img
-        if img is None:
+        if img is None and not live:
             return
         lines = [(state, color)]
         if st is not None:
@@ -431,7 +434,8 @@ class ElfBot:
                 if not running:
                     if self.mirror is not None and self.mirror.due():
                         try:
-                            self.update_mirror("STANDBY  (PageUp = start)", (0, 200, 255), img=self.screen.grab())
+                            self.update_mirror("STANDBY  (PageUp = start)", (0, 200, 255),
+                                               img=None if self.mirror.grab else self.screen.grab())
                         except Exception:
                             pass
                     if key_pressed(start_vk):
@@ -460,7 +464,8 @@ class ElfBot:
                         print("[bot] MU が前面にないので待機中 (MU のウィンドウをクリックしてください)")
                     if self.mirror is not None and self.mirror.due():
                         try:
-                            self.update_mirror("PAUSED: MU not active", (0, 0, 255), img=self.screen.grab())
+                            self.update_mirror("PAUSED: MU not active", (0, 0, 255),
+                                               img=None if self.mirror.grab else self.screen.grab())
                         except Exception:
                             pass
                     time.sleep(0.5)

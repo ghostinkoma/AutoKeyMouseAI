@@ -301,3 +301,34 @@ def test_popup_guard_clicks_cancel():
     assert "c:L" in rec.sent[-1] and pg.handled["party"] == 1
     import shutil
     shutil.rmtree(tmp)
+
+
+def test_mirror_thread_captures_and_posts_by_itself():
+    import http.server
+    import threading
+    import time
+
+    from akm.mirror import Mirror
+
+    got = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append(self.rfile.read(int(self.headers["Content-Length"])))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    frame = np.full((1050, 1680, 3), 80, np.uint8)
+    m = Mirror(f"127.0.0.1:{srv.server_port}", 0.05, fmt="jpeg", grab=lambda: frame)
+    m.set_lines([("RUN", (0, 255, 0))])
+    t = time.monotonic()
+    while len(got) < 2 and time.monotonic() - t < 5:
+        time.sleep(0.05)
+    srv.shutdown()
+    assert len(got) >= 2 and got[0][:2] == b"\xff\xd8" and m.sent >= 2

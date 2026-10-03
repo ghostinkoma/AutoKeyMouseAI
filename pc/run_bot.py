@@ -27,7 +27,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    screen = GameScreen(cfg["game"]["window_title"], cfg["game"].get("process"))
+    screen = GameScreen(cfg["game"]["window_title"], cfg["game"].get("process"), cfg["game"].get("capture", "auto"))
     device = open_device(cfg, abs_map_from(cfg), dry_run=args.dry_run)
     detectors = build_detectors(cfg.get("vision", {}), PC_DIR)
     helper = HelperControl(cfg.get("helper", {}), device, PC_DIR)
@@ -41,7 +41,7 @@ def main() -> None:
     mirror = None
     if mcfg.get("enabled", True) and not args.dry_run:
         mirror = Mirror(host, float(mcfg.get("interval_s", 1.0)), fmt=mcfg.get("format", "jpeg"),
-                        quality=int(mcfg.get("quality", 70)))
+                        quality=int(mcfg.get("quality", 70)), grab=screen.grab)
         if mirror.enabled:
             print(f"[mirror] ESP32 ({host}) の液晶にゲーム画面を {mirror.interval:.1f} 秒ごとに送ります ({mirror.fmt})")
     popups = PopupGuard(cfg.get("popups"), device, PC_DIR)

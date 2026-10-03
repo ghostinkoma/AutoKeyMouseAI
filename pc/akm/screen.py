@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -140,6 +141,80 @@ def client_rect(hwnd: int) -> Rect:
     return Rect(pt.x, pt.y, rc.right - rc.left, rc.bottom - rc.top)
 
 
+_gdi_ready = False
+
+
+def _setup_gdi() -> None:
+    """64bit でハンドルが切り詰められないよう、使う API の型を宣言する。"""
+    global _gdi_ready
+    if _gdi_ready:
+        return
+    gdi32 = ctypes.windll.gdi32
+    H = ctypes.c_void_p
+    user32.GetDC.restype = H
+    user32.GetDC.argtypes = [wintypes.HWND]
+    user32.ReleaseDC.argtypes = [wintypes.HWND, H]
+    user32.PrintWindow.argtypes = [wintypes.HWND, H, wintypes.UINT]
+    gdi32.CreateCompatibleDC.restype = H
+    gdi32.CreateCompatibleDC.argtypes = [H]
+    gdi32.CreateCompatibleBitmap.restype = H
+    gdi32.CreateCompatibleBitmap.argtypes = [H, ctypes.c_int, ctypes.c_int]
+    gdi32.SelectObject.restype = H
+    gdi32.SelectObject.argtypes = [H, H]
+    gdi32.DeleteObject.argtypes = [H]
+    gdi32.DeleteDC.argtypes = [H]
+    gdi32.GetDIBits.argtypes = [H, H, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+    _gdi_ready = True
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32), ("biHeight", ctypes.c_int32),
+                ("biPlanes", ctypes.c_uint16), ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32), ("biClrImportant", ctypes.c_uint32)]
+
+
+def capture_window(hwnd: int) -> np.ndarray | None:
+    """ウィンドウのクライアント領域をウィンドウ自身に描かせて取得する (PrintWindow)。
+
+    画面に映っていなくても撮れるので、仮想デスクトップを切り替えたり他のウィンドウが
+    上に重なったりしてもゲーム画面が取れる。最小化中や失敗時は None。
+    """
+    if not IS_WINDOWS:
+        return None
+    _setup_gdi()
+    gdi32 = ctypes.windll.gdi32
+    rc = wintypes.RECT()
+    user32.GetClientRect(hwnd, ctypes.byref(rc))
+    w, h = rc.right - rc.left, rc.bottom - rc.top
+    if w <= 0 or h <= 0:
+        return None
+    hdc = user32.GetDC(hwnd)
+    if not hdc:
+        return None
+    mem = gdi32.CreateCompatibleDC(hdc)
+    bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
+    old = gdi32.SelectObject(mem, bmp)
+    try:
+        # 1 = PW_CLIENTONLY, 2 = PW_RENDERFULLCONTENT (DirectX のゲームも撮れる。Windows 8.1 以降)
+        ok = user32.PrintWindow(hwnd, mem, 3)
+        gdi32.SelectObject(mem, old)  # GetDIBits の前に DC から外す
+        old = None
+        if not ok:
+            return None
+        bmi = _BITMAPINFOHEADER(ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+        buf = ctypes.create_string_buffer(w * h * 4)
+        if not gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bmi), 0):
+            return None
+        return np.frombuffer(buf, np.uint8).reshape(h, w, 4)[:, :, :3].copy()
+    finally:
+        if old is not None:
+            gdi32.SelectObject(mem, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem)
+        user32.ReleaseDC(hwnd, hdc)
+
+
 def is_foreground(hwnd: int) -> bool:
     if not IS_WINDOWS:
         return True
@@ -152,10 +227,12 @@ class GameScreen:
     ウィンドウモードで起動すること (排他フルスクリーンだとキャプチャが黒くなることがある)。
     """
 
-    def __init__(self, window_title: str, process: str | None = None):
-        import mss
-
-        self._mss = mss.mss()
+    def __init__(self, window_title: str, process: str | None = None, capture: str = "auto"):
+        # capture: auto   = ウィンドウから直接 (PrintWindow)。真っ黒など撮れなければ画面から
+        #          window = ウィンドウから直接だけ / screen = 画面に映っているものを撮る (mss)
+        self.capture = capture
+        self._local = threading.local()  # mss はスレッドごとに作る (液晶ミラーが別スレッドで撮る)
+        self._warned_fallback = False
         self.window_title = window_title
         self.process = process
         self.hwnd: int | None = None
@@ -175,14 +252,31 @@ class GameScreen:
               f"process={process_name(self.hwnd)} 画面 {self.rect.width}x{self.rect.height}")
         return self.rect
 
+    def _grab_screen(self, r: Rect) -> np.ndarray:
+        m = getattr(self._local, "mss", None)
+        if m is None:
+            import mss
+
+            m = self._local.mss = mss.mss()
+        shot = m.grab({"left": r.left, "top": r.top, "width": r.width, "height": r.height})
+        return np.ascontiguousarray(np.asarray(shot)[:, :, :3])
+
     def grab(self) -> np.ndarray:
         """BGR 画像 (H, W, 3) を返す。起動時に固定したウィンドウを撮り続け、閉じられたら探し直す。"""
         if self.hwnd is None or (IS_WINDOWS and not user32.IsWindow(self.hwnd)):
             self.locate()
-        self.rect = client_rect(self.hwnd)
-        r = self.rect
-        shot = self._mss.grab({"left": r.left, "top": r.top, "width": r.width, "height": r.height})
-        return np.ascontiguousarray(np.asarray(shot)[:, :, :3])
+        hwnd = self.hwnd
+        self.rect = client_rect(hwnd)
+        if self.capture in ("auto", "window"):
+            img = capture_window(hwnd)
+            if img is not None and (self.capture == "window" or img.max() > 8):
+                return img
+            if self.capture == "window":
+                raise RuntimeError("ゲーム画面を取得できません (最小化されていませんか)")
+            if not self._warned_fallback:
+                self._warned_fallback = True
+                print("[screen] ウィンドウから直接撮れないので画面から撮ります (仮想デスクトップを切り替えると別の画面が映ります)")
+        return self._grab_screen(self.rect)
 
     def to_screen(self, x: float, y: float) -> tuple[float, float]:
         """クライアント座標 → スクリーン座標"""
