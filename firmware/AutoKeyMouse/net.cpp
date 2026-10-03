@@ -40,6 +40,7 @@ void startAp() {
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
                     IPAddress(255, 255, 255, 0));
   WiFi.softAP(AP_SSID, AP_PASS);
+  WiFi.setTxPower(WIFI_TX_POWER);
   gApOn = true;
   Serial.printf("[WIFI] SoftAP ON  ssid=%s pass=%s  http://%s/\n", AP_SSID, AP_PASS,
                 WiFi.softAPIP().toString().c_str());
@@ -63,6 +64,7 @@ void connectSta() {
   WiFi.disconnect();
   delay(100);
   WiFi.begin(gSsid.c_str(), gPass.c_str());
+  WiFi.setTxPower(WIFI_TX_POWER);
 }
 
 const char* reasonHint(int r) {

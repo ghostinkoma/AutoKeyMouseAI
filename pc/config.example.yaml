@@ -4,9 +4,9 @@
 # tools/vision_preview.py で枠を表示しながら合わせる。
 
 device:
-  transport: serial        # serial (COM ポート, 低遅延) | http (Wi-Fi)
-  port: COM5               # デバイスマネージャーで確認
-  host: 192.168.4.1        # http のとき。STA 接続なら ESP32 に割り当てられた IP
+  transport: http          # http (Wi-Fi) | serial (COM ポート。USB が不安定な基板では http 推奨)
+  port: COM18              # serial のとき
+  host: 192.168.1.43       # ESP32 の IP (液晶 / シリアルに表示される) または autokeymouse.local
 
 mouse:
   # tools/calibrate_mouse.py の出力を貼り付ける。null ならプライマリモニタ全体で計算

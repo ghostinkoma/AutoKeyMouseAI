@@ -148,6 +148,20 @@ void maybeAutoWizard() {
   wifiWizard();
 }
 
+const char* resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON: return "power on";
+    case ESP_RST_SW: return "software restart";
+    case ESP_RST_PANIC: return "CRASH (panic)";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT: return "WATCHDOG";
+    case ESP_RST_BROWNOUT: return "BROWNOUT (supply voltage dropped)";
+    case ESP_RST_EXT: return "reset button / external";
+    default: return "other";
+  }
+}
+
 void printHelp() {
   Serial.println("commands:");
   Serial.println("  wifi              set up Wi-Fi interactively (SSID / password)");
@@ -201,7 +215,8 @@ void handleLine(String line) {
     macro::Slot s = macro::slot(id);
     reply(macro::start(s.script, repeat, "#" + String(id) + " " + s.name, &err), err);
   } else if (line == "status") {
-    Serial.printf("OK ble=%d peers=%u busy=%d wifi=%d ssid=%s ip=%s ap=%s last=%s\n", hid::connected(),
+    Serial.printf("OK uptime=%lus heap=%u ble=%d peers=%u busy=%d wifi=%d ssid=%s ip=%s ap=%s last=%s\n",
+                  (unsigned long)(millis() / 1000), (unsigned)ESP.getFreeHeap(), hid::connected(),
                   (unsigned)hid::connectedPeers(), macro::busy(), net::staConnected(),
                   net::ssid().c_str(), net::staIp().c_str(), net::apIp().c_str(),
                   macro::lastResult().c_str());
@@ -280,6 +295,8 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(200);
   Serial.println("\n[AKM] AutoKeyMouse boot");
+  esp_reset_reason_t rr = esp_reset_reason();
+  Serial.printf("[AKM] reset reason: %d (%s)\n", (int)rr, resetReasonName(rr));
   led(0, 0, 255);
 
   display::begin();
