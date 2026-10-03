@@ -80,6 +80,7 @@ class ElfBot:
         helper=None,
         collector=None,
         mirror=None,
+        popups=None,
     ):
         self.cfg = cfg
         self.ecfg = cfg["elf"]
@@ -90,6 +91,9 @@ class ElfBot:
         if self.helper is not None:
             self.helper.to_screen = screen.to_screen  # ▶ ボタンのクリック位置の変換
         self.collector = collector
+        self.popups = popups
+        if self.popups is not None:
+            self.popups.to_screen = screen.to_screen
         self.mirror = mirror
         self.last_fg_msg = 0.0
         # 巡回: 開始地点からのずれ (マス) と次の巡回時刻
@@ -358,6 +362,10 @@ class ElfBot:
         if self.collector is not None:
             self.collector.collect(self.img, st.detections)
         self.update_mirror("RUN", (0, 255, 0), st)
+        if self.popups is not None and self.popups.check(self.img):
+            if self.helper is not None:
+                self.helper.note_mouse_used()  # 次のループで画面を見て必要なら再開
+            return
         if self.handle_death(st, now):
             return
         self.handle_recovery(st, now)
@@ -430,6 +438,10 @@ class ElfBot:
                         running = True
                         self.last_buff = 0.0
                         print(f"[bot] 開始 ({self.mode} モード / PageDown で停止)")
+                        start_script = g.get("start_script")
+                        if start_script and self.screen.is_active():
+                            print(f"[bot] 開始時スクリプト: {start_script}")
+                            self.dev.run(start_script)
                         self.nav_pos = [0.0, 0.0]  # ここが巡回の中心 (開始地点)
                         self.next_patrol = time.monotonic() + float((self.ecfg.get("patrol") or {}).get("first_after_s", 3))
                         if self.helper is not None and self.screen.is_active():

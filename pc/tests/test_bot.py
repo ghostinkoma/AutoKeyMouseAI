@@ -276,3 +276,28 @@ def test_helper_starts_by_clicking_play_button():
     hc.ensure_on(frame)
     assert rec.sent and "c:L" in rec.sent[-1] and "k:f9" not in rec.sent[-1]
     assert hc.is_on()
+
+
+def test_popup_guard_clicks_cancel():
+    import cv2
+    from akm.popups import PopupGuard
+
+    rng = np.random.default_rng(1)
+    detect = rng.integers(0, 255, (20, 60, 3), dtype=np.uint8)
+    cancel = rng.integers(0, 255, (16, 40, 3), dtype=np.uint8)
+    tmp = PC / "dataset" / "_test_popup"
+    tmp.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(tmp / "d.png"), detect)
+    cv2.imwrite(str(tmp / "c.png"), cancel)
+    rec = Recorder()
+    pg = PopupGuard([{"name": "party", "detect": str(tmp / "d.png"), "click": str(tmp / "c.png"), "wait_ms": 0}],
+                    Device(rec, AbsMap.for_screen(1920, 1080)), PC)
+    pg.to_screen = lambda x, y: (x, y)
+    frame = np.zeros((600, 800, 3), np.uint8)
+    assert not pg.check(frame)
+    frame[100:120, 300:360] = detect
+    frame[200:216, 320:360] = cancel
+    assert pg.check(frame)
+    assert "c:L" in rec.sent[-1] and pg.handled["party"] == 1
+    import shutil
+    shutil.rmtree(tmp)

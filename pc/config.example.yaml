@@ -25,6 +25,10 @@ game:
   # 注意: ESP32 が送るキーもこの PC のキーとして見えるので、ボットが送るキー (helper.toggle_key 等) と重ねないこと
   start_key_vk: 0x21
   stop_key_vk: 0x22
+  # PageUp で開始したときに 1 回だけ送るスクリプト (ESP32 のマクロ書式)。
+  # 例: チャットで申請拒否コマンドを打つ (サーバーが対応していれば、パーティ・取引の申請が来なくなる)
+  # start_script: "k:enter;w:300;t:/re off;k:enter;w:300"
+  start_script: null
 
 helper:
   # MU Helper のオン/オフを切り替えるキー (ゲーム側の割り当てに合わせる)
@@ -52,6 +56,18 @@ helper:
   verify_attempts: 3       # 再開を画面で確認できなければ押し直す回数
 
 loop_interval_ms: 50
+
+# 割り込んでくるダイアログ (パーティ申請など) を自動で断る。
+# ダイアログが出ている状態で tools/grab_templates.py を実行し、
+#   detect: ダイアログだと分かる部分 (例: "パーティに招待" の文字や枠の見出し)
+#   click : 断るボタン (Cancel / いいえ)。無ければ key を押す
+# を切り出して保存し、下のコメントを外す
+popups:
+  # - name: party request
+  #   detect: templates/party_request.png
+  #   click: templates/party_cancel.png
+  #   key: esc
+  #   threshold: 0.8
 
 # ゲーム画面を縮小して ESP32 (T-Display) の液晶に映す。状態 (STANDBY / RUN)・HP/MP・拾得数も重ねて表示
 mirror:

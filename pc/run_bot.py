@@ -14,6 +14,7 @@ from akm.collector import LabelCollector
 from akm.elf_bot import ElfBot
 from akm.helper import HelperControl
 from akm.mirror import Mirror
+from akm.popups import PopupGuard
 from akm.screen import GameScreen
 from akm.vision import build_detectors
 
@@ -43,7 +44,11 @@ def main() -> None:
                         quality=int(mcfg.get("quality", 70)))
         if mirror.enabled:
             print(f"[mirror] ESP32 ({host}) の液晶にゲーム画面を {mirror.interval:.1f} 秒ごとに送ります ({mirror.fmt})")
-    ElfBot(cfg, screen, device, detectors, show=args.show, helper=helper, collector=collector, mirror=mirror).run()
+    popups = PopupGuard(cfg.get("popups"), device, PC_DIR)
+    if popups.entries:
+        print(f"[popup] 自動で断るダイアログ: {', '.join(e['name'] for e in popups.entries)}")
+    ElfBot(cfg, screen, device, detectors, show=args.show, helper=helper, collector=collector, mirror=mirror,
+           popups=popups).run()
 
 
 if __name__ == "__main__":
