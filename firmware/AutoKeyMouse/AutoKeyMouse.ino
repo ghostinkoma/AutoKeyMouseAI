@@ -9,6 +9,7 @@
 //       status
 //       wifi           対話形式で Wi-Fi (SSID / パスワード) を設定して接続
 //       wifi clear     Wi-Fi 設定を消す (SoftAP のみになる)
+//       ble clear      BLE のペアリング情報を消す
 //       help
 #include <WiFi.h>
 
@@ -170,6 +171,7 @@ void printHelp() {
   Serial.println("  run <script>      run a macro script (e.g. run t:hello;k:enter)");
   Serial.println("  macro <id> [rep]  run macro slot 1-10 (rep 0 = loop until stop)");
   Serial.println("  stop              stop the running macro");
+  Serial.println("  ble clear         forget BLE pairings (then remove the device in Windows and pair again)");
 }
 
 void led(uint8_t r, uint8_t g, uint8_t b) {
@@ -225,6 +227,9 @@ void handleLine(String line) {
   } else if (line == "wifi clear") {
     net::setCredentials("", "");
     Serial.println("OK Wi-Fi settings cleared");
+  } else if (line == "ble clear") {
+    hid::clearBonds();
+    Serial.println("OK");
   } else if (line == "help" || line == "?") {
     printHelp();
   } else {

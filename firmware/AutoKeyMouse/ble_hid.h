@@ -25,6 +25,9 @@ void begin(const char* deviceName, const char* manufacturer);
 bool connected();
 uint32_t connectedPeers();
 
+// 保存しているペアリング情報 (ボンド) をすべて消す
+void clearBonds();
+
 // キーボード (code は HID Usage ID, modifier は 0xE0-0xE7 もコードとして受け付ける)
 void keyDown(uint8_t code);
 void keyUp(uint8_t code);

@@ -168,10 +168,16 @@ void begin(const char* deviceName, const char* manufacturer) {
   adv->setName(deviceName);
   adv->enableScanResponse(true);
   adv->start();
-  Serial.println("[BLE] advertising");
+  Serial.printf("[BLE] advertising as \"%s\"  address %s  bonds %d\n", deviceName,
+                NimBLEDevice::getAddress().toString().c_str(), NimBLEDevice::getNumBonds());
 }
 
 bool connected() { return gPeers > 0 && gSecured; }
+
+void clearBonds() {
+  NimBLEDevice::deleteAllBonds();
+  Serial.println("[BLE] all bonds deleted. Remove AutoKeyMouse in Windows too, then pair again.");
+}
 uint32_t connectedPeers() { return gPeers; }
 
 void keyDown(uint8_t code) {
