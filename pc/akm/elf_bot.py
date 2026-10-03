@@ -286,18 +286,32 @@ class ElfBot:
         cv2.waitKey(1)
 
     def run(self) -> None:
-        g = self.cfg["game"]
-        stop_vk = int(g.get("stop_key_vk", 0x13))
-        interval = float(self.cfg.get("loop_interval_ms", 50)) / 1000
-        self.screen.locate()
-        print(f"[bot] 開始。ゲーム画面 {self.screen.rect}。Pause キー (stop_key_vk) で停止")
+        """待機状態で起動し、開始キーで動作、停止キーで待機に戻る。Ctrl+C で終了。"""
         from .screen import key_pressed
 
+        g = self.cfg["game"]
+        start_vk = int(g.get("start_key_vk", 0x21))  # PageUp
+        stop_vk = int(g.get("stop_key_vk", 0x22))    # PageDown
+        interval = float(self.cfg.get("loop_interval_ms", 50)) / 1000
+        self.screen.locate()
+        print(f"[bot] ゲーム画面 {self.screen.rect}")
+        print("[bot] 待機中: PageUp で開始 / PageDown で停止 / Ctrl+C で終了")
+
+        running = False
         try:
             while True:
+                if not running:
+                    if key_pressed(start_vk):
+                        running = True
+                        self.last_buff = 0.0
+                        print("[bot] 開始 (PageDown で停止)")
+                    time.sleep(0.05)
+                    continue
                 if key_pressed(stop_vk):
-                    print("[bot] 停止キーが押されました")
-                    break
+                    running = False
+                    self.pause()
+                    print(f"[bot] 停止。拾得数: {dict(self.picked)}  (PageUp で再開)")
+                    continue
                 if g.get("require_foreground", True) and not self.screen.is_active():
                     self.release_attack()
                     time.sleep(0.5)
@@ -309,10 +323,17 @@ class ElfBot:
                     self.holding_attack = False
                     time.sleep(1.0)
                 time.sleep(interval)
+        except KeyboardInterrupt:
+            pass
         finally:
-            try:
-                self.dev.stop()
-                self.dev.release_all()
-            except Exception:
-                pass
+            self.pause()
             print(f"[bot] 終了。拾得数: {dict(self.picked)}")
+
+    def pause(self) -> None:
+        """押しっぱなしのキー・ボタンを全部離す。"""
+        self.holding_attack = False
+        try:
+            self.dev.stop()
+            self.dev.release_all()
+        except Exception:
+            pass

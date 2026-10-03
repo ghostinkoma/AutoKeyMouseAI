@@ -21,9 +21,10 @@ game:
   # ゲームのプロセス名 (python tools\list_windows.py で確認)。指定するとブラウザのタブ等と取り違えない
   process: null            # 例: main.exe
   require_foreground: true # ゲームが前面にないときは操作しない
-  # この PC で押すとボット停止 (仮想キーコード)。0x13 = Pause/Break
+  # この PC で押すとボット開始 / 停止 (仮想キーコード)。0x21 = PageUp, 0x22 = PageDown
   # 注意: ESP32 が送るキーもこの PC のキーとして見えるので、ボットが送るキー (helper.toggle_key 等) と重ねないこと
-  stop_key_vk: 0x13
+  start_key_vk: 0x21
+  stop_key_vk: 0x22
 
 helper:
   # MU Helper のオン/オフを切り替えるキー (ゲーム側の割り当てに合わせる)

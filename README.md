@@ -203,7 +203,7 @@ MU は **ウィンドウモード** で起動する (排他フルスクリーン
 5. **スキル配置** (ゲーム内): 1 = 攻撃スキル (Triple Shot 等), 2 = Greater Defense,
    3 = Greater Damage, 4 = Heal, Q = HP ポーション, W = MP ポーション
 6. **試運転**: `python run_bot.py --dry-run --show` (送る予定のコマンドを表示するだけ)
-7. **本番**: `python run_bot.py --show`。**Pause キーで停止** (`game.stop_key_vk`)。MU が前面にないときは何もしない
+7. **本番**: `python run_bot.py --show`。起動すると待機状態になり、**PageUp で開始 / PageDown で停止** (`game.start_key_vk` / `stop_key_vk`)。Ctrl+C で終了。MU が前面にないときは何もしない
 
 ### ボットの動き
 
