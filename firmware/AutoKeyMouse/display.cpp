@@ -8,7 +8,7 @@
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
 
-#include <TJpg_Decoder.h>
+#include "akm_tjpgd.h"  // 同梱の JPEG デコーダ (外部ライブラリ不要)
 
 #include "ble_hid.h"
 #include "macro.h"
@@ -79,33 +79,43 @@ void begin() {
 
 namespace {
 
-bool jpegOut(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
-  // TJpg_Decoder は RGB565 (16x16 などのブロック単位) で渡してくる。そのまま液晶へ
-  if (x >= FRAME_W || y >= FRAME_H) return false;  // 画面外は打ち切り
-  gTft.drawRGBBitmap(x, y, bitmap, w, h);
-  return true;
+struct JpegSrc {
+  const uint8_t* data;
+  size_t len;
+  size_t pos;
+};
+
+size_t jpegIn(JDEC* jd, uint8_t* buf, size_t n) {
+  JpegSrc* src = (JpegSrc*)jd->device;
+  size_t left = src->len - src->pos;
+  if (n > left) n = left;
+  if (buf) memcpy(buf, src->data + src->pos, n);
+  src->pos += n;
+  return n;
+}
+
+int jpegOut(JDEC* jd, void* bitmap, JRECT* r) {
+  // RGB565 (ホストのバイト順) のブロックが来るのでそのまま液晶へ
+  if (r->left >= FRAME_W || r->top >= FRAME_H) return 1;
+  gTft.drawRGBBitmap(r->left, r->top, (uint16_t*)bitmap, r->right - r->left + 1, r->bottom - r->top + 1);
+  return 1;
 }
 
 bool drawJpeg(const uint8_t* data, size_t len) {
-  // ESP32 の ROM 内蔵 tjpgd は版が古く OpenCV の JPEG を展開できないことがあるため、
-  // ソフトウェア版 (Bodmer の TJpg_Decoder) で展開する
-  static bool init = false;
-  if (!init) {
-    TJpgDec.setJpgScale(1);
-    TJpgDec.setSwapBytes(false);  // drawRGBBitmap はホストのバイト順 (リトルエンディアン) を受け取る
-    TJpgDec.setCallback(jpegOut);
-    init = true;
-  }
-  uint16_t w = 0, h = 0;
-  if (TJpgDec.getJpgSize(&w, &h, data, len) != JDR_OK) {
-    Serial.println("[TFT] jpeg header error");
+  static uint32_t work[TJPGD_WORKSPACE_SIZE / 4 + 1];  // 4 バイト境界に置く
+  JDEC jd;
+  JpegSrc src{data, len, 0};
+  JRESULT rc = akm_jd_prepare(&jd, jpegIn, work, sizeof(work), &src);
+  if (rc != JDR_OK) {
+    Serial.printf("[TFT] jpeg prepare failed: %d\n", rc);
     return false;
   }
-  if (w > FRAME_W || h > FRAME_H) {
-    Serial.printf("[TFT] jpeg too large: %ux%u\n", w, h);
+  if (jd.width > FRAME_W || jd.height > FRAME_H) {
+    Serial.printf("[TFT] jpeg too large: %ux%u\n", jd.width, jd.height);
     return false;
   }
-  JRESULT rc = TJpgDec.drawJpg(0, 0, data, len);
+  jd.swap = 0;
+  rc = akm_jd_decomp(&jd, jpegOut, 0);
   if (rc != JDR_OK) Serial.printf("[TFT] jpeg decode failed: %d\n", rc);
   return rc == JDR_OK;
 }
