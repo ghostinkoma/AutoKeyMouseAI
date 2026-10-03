@@ -225,4 +225,5 @@ def test_mirror_frame_format():
     assert out.shape == (135, 240, 3)
     data = to_rgb565_be(out)
     assert len(data) == 240 * 135 * 2
-    assert data[-2:] == b"\xf8\x00"  # 右下は赤 (RGB565 0xF800, ビッグエンディアン)
+    mid = (134 * 240 + 120) * 2  # 最下行の中央 (左右は縦横比を保つための黒帯)
+    assert data[mid : mid + 2] == b"\xf8\x00"  # 赤 = RGB565 0xF800 (ビッグエンディアン)
