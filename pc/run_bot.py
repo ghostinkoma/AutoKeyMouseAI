@@ -13,6 +13,7 @@ from akm.device import open_device
 from akm.collector import LabelCollector
 from akm.elf_bot import ElfBot
 from akm.helper import HelperControl
+from akm.mirror import Mirror
 from akm.screen import GameScreen
 from akm.vision import build_detectors
 
@@ -34,7 +35,14 @@ def main() -> None:
     ccfg.setdefault("search_roi", tcfg.get("search_roi"))
     ccfg.setdefault("exclude_rois", tcfg.get("exclude_rois", []))
     collector = LabelCollector(ccfg, PC_DIR) if ccfg.get("enabled", True) else None
-    ElfBot(cfg, screen, device, detectors, show=args.show, helper=helper, collector=collector).run()
+    mcfg = cfg.get("mirror") or {}
+    host = (cfg.get("device") or {}).get("host")
+    mirror = None
+    if mcfg.get("enabled", True) and not args.dry_run:
+        mirror = Mirror(host, float(mcfg.get("interval_s", 1.0)))
+        if mirror.enabled:
+            print(f"[mirror] ESP32 ({host}) の液晶にゲーム画面を {mirror.interval:.1f} 秒ごとに送ります")
+    ElfBot(cfg, screen, device, detectors, show=args.show, helper=helper, collector=collector, mirror=mirror).run()
 
 
 if __name__ == "__main__":

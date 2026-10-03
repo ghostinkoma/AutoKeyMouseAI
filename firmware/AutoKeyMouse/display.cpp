@@ -19,6 +19,16 @@ Adafruit_ST7789 gTft(&SPI, TFT_PIN_CS, TFT_PIN_DC, TFT_PIN_RST);
 String gShown;
 uint32_t gLastCheck = 0;
 
+// PC から送られてくる縮小画面 (ミラー)
+constexpr uint32_t kFrameHoldMs = 5000;  // 最後のフレームからこの時間は状態画面に戻さない
+uint32_t gLastFrame = 0;
+bool gFrameShown = false;
+bool gFrameActive = false;  // 受信中
+uint32_t gFrameBytes = 0;
+uint32_t gFrameTotal = 0;
+int gCarry = -1;            // 2 バイト単位に揃わなかった余りの 1 バイト
+uint32_t gFrames = 0;
+
 // 液晶の内蔵フォントは ASCII のみなので、それ以外は '?' にする
 String ascii(const String& s, size_t maxLen) {
   String o;
@@ -69,9 +79,64 @@ void begin() {
   line(40, 2, ST77XX_WHITE, "booting...");
 }
 
+bool frameBegin(uint16_t w, uint16_t h) {
+  if (w != FRAME_W || h != FRAME_H) return false;
+  gFrameActive = true;
+  gFrameBytes = 0;
+  gFrameTotal = (uint32_t)w * h * 2;
+  gCarry = -1;
+  gTft.startWrite();
+  gTft.setAddrWindow(0, 0, w, h);
+  return true;
+}
+
+void frameData(const uint8_t* data, size_t len) {
+  if (!gFrameActive) return;
+  static uint16_t px[384];
+  size_t i = 0;
+  while (i < len && gFrameBytes < gFrameTotal) {
+    size_t n = 0;
+    if (gCarry >= 0) {  // 前回の余り + 今回の先頭 1 バイトで 1 画素
+      px[n++] = (uint16_t)(gCarry << 8 | data[i++]);
+      gCarry = -1;
+      gFrameBytes += 2;
+    }
+    while (n < 384 && i + 1 < len && gFrameBytes < gFrameTotal) {
+      px[n++] = (uint16_t)(data[i] << 8 | data[i + 1]);  // ビッグエンディアン RGB565
+      i += 2;
+      gFrameBytes += 2;
+    }
+    if (n) gTft.writePixels(px, n);
+    if (i + 1 == len && gFrameBytes < gFrameTotal) {
+      gCarry = data[i++];
+    }
+  }
+}
+
+bool frameEnd() {
+  if (!gFrameActive) return false;
+  gTft.endWrite();
+  gFrameActive = false;
+  bool ok = gFrameBytes == gFrameTotal;
+  gLastFrame = millis();
+  gFrameShown = true;
+  ++gFrames;
+  return ok;
+}
+
+uint32_t framesShown() { return gFrames; }
+
 void loop() {
   if (millis() - gLastCheck < 300) return;
   gLastCheck = millis();
+
+  // ミラー表示中は状態画面を描かない。途切れたら状態画面に戻す
+  if (gFrameShown) {
+    if (millis() - gLastFrame < kFrameHoldMs) return;
+    gFrameShown = false;
+    gShown = "";
+    Serial.println("[TFT] mirror stopped, back to status screen");
+  }
 
   bool sta = net::staConnected();
   bool ble = hid::connected();
@@ -117,6 +182,10 @@ void loop() {
 namespace display {
 void begin() {}
 void loop() {}
+bool frameBegin(uint16_t, uint16_t) { return false; }
+void frameData(const uint8_t*, size_t) {}
+bool frameEnd() { return false; }
+uint32_t framesShown() { return 0; }
 void test() { Serial.println("[TFT] this build has no TFT (HAS_TFT=0)"); }
 }  // namespace display
 

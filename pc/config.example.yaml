@@ -44,6 +44,11 @@ helper:
 
 loop_interval_ms: 50
 
+# ゲーム画面を縮小して ESP32 (T-Display) の液晶に映す。状態 (STANDBY / RUN)・HP/MP・拾得数も重ねて表示
+mirror:
+  enabled: true
+  interval_s: 1.0          # 送る間隔。短くすると ESP32 の HTTP が混んでキー操作が遅れるので 0.5 以上推奨
+
 hud:
   # 1680x1050 のウィンドウで実測 (Murex S6)。比率なので他のサイズでも概ね合う
   hp:

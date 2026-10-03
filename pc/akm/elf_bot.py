@@ -79,6 +79,7 @@ class ElfBot:
         show: bool = False,
         helper=None,
         collector=None,
+        mirror=None,
     ):
         self.cfg = cfg
         self.ecfg = cfg["elf"]
@@ -87,6 +88,8 @@ class ElfBot:
         self.mode = self.ecfg.get("mode", "helper")
         self.helper = helper if self.mode == "helper" else None
         self.collector = collector
+        self.mirror = mirror
+        self.last_fg_msg = 0.0
         self.screen = screen
         self.dev = device
         self.detectors = detectors
@@ -290,6 +293,7 @@ class ElfBot:
             self._show(st)
         if self.collector is not None:
             self.collector.collect(self.img, st.detections)
+        self.update_mirror("RUN", (0, 255, 0), st)
         if self.handle_death(st, now):
             return
         self.handle_recovery(st, now)
@@ -306,6 +310,25 @@ class ElfBot:
             return
         self.handle_attack(st, now)
         self.report(st, now)
+
+    def update_mirror(self, state: str, color: tuple[int, int, int], st: Status | None = None,
+                      img: np.ndarray | None = None) -> None:
+        """ESP32 の液晶に縮小画面と状態を出す。"""
+        if self.mirror is None or not self.mirror.due():
+            return
+        img = img if img is not None else self.img
+        if img is None:
+            return
+        lines = [(state, color)]
+        if st is not None:
+            hs = ""
+            if self.helper is not None:
+                hs = "  Helper " + ("ON" if self.helper.is_on() else "OFF")
+            lines.append((f"HP {st.hp:.0%}  MP {st.mp:.0%}{hs}", (255, 255, 255)))
+        if self.picked:
+            short = {k: k.replace("Jewel of ", "").replace("Silver ", "") for k in self.picked}
+            lines.append(("  ".join(f"{short[k]} {v}" for k, v in self.picked.items()), (0, 220, 255)))
+        self.mirror.update(img, lines)
 
     def _show(self, st: Status) -> None:
         import cv2
@@ -332,6 +355,11 @@ class ElfBot:
         try:
             while True:
                 if not running:
+                    if self.mirror is not None and self.mirror.due():
+                        try:
+                            self.update_mirror("STANDBY  (PageUp = start)", (0, 200, 255), img=self.screen.grab())
+                        except Exception:
+                            pass
                     if key_pressed(start_vk):
                         running = True
                         self.last_buff = 0.0
@@ -347,6 +375,14 @@ class ElfBot:
                     continue
                 if g.get("require_foreground", True) and not self.screen.is_active():
                     self.release_attack()
+                    if time.monotonic() - self.last_fg_msg > 5:
+                        self.last_fg_msg = time.monotonic()
+                        print("[bot] MU が前面にないので待機中 (MU のウィンドウをクリックしてください)")
+                    if self.mirror is not None and self.mirror.due():
+                        try:
+                            self.update_mirror("PAUSED: MU not active", (0, 0, 255), img=self.screen.grab())
+                        except Exception:
+                            pass
                     time.sleep(0.5)
                     continue
                 try:

@@ -7,6 +7,7 @@
 
 #include "ble_hid.h"
 #include "config.h"
+#include "display.h"
 #include "macro.h"
 #include "web_ui.h"
 
@@ -297,6 +298,27 @@ void handleWifi() {
   setCredentials(ssid, gServer.arg("pass"));
 }
 
+// POST /frame  本文 = 240x135 の RGB565 (ビッグエンディアン) 64800 バイト
+// PC 側ボットが縮小したゲーム画面を送ってくる。受信しながら液晶に流し込む
+bool gFrameOk = false;
+
+void handleFrameBody() {
+  HTTPRaw& raw = gServer.raw();
+  if (raw.status == RAW_START) {
+    gFrameOk = display::frameBegin(display::FRAME_W, display::FRAME_H);
+  } else if (raw.status == RAW_WRITE) {
+    if (gFrameOk) display::frameData(raw.buf, raw.currentSize);
+  } else if (raw.status == RAW_END || raw.status == RAW_ABORTED) {
+    if (gFrameOk) gFrameOk = display::frameEnd() && raw.status == RAW_END;
+  }
+}
+
+void handleFrameDone() {
+  gServer.sendHeader("Access-Control-Allow-Origin", "*");
+  if (gFrameOk) gServer.send(200, "text/plain", "ok\n");
+  else gServer.send(HAS_TFT ? 400 : 501, "text/plain", HAS_TFT ? "bad frame (240x135 RGB565 = 64800 bytes)\n" : "no display\n");
+}
+
 void handleNotFound() { sendText(404, "not found"); }
 
 }  // namespace
@@ -333,6 +355,7 @@ void begin() {
   gServer.on("/save", HTTP_POST, handleSave);
   gServer.on("/settings", handleSettings);
   gServer.on("/wifi", HTTP_POST, handleWifi);
+  gServer.on("/frame", HTTP_POST, handleFrameDone, handleFrameBody);
   gServer.onNotFound(handleNotFound);
   gServer.begin();
 }

@@ -214,3 +214,15 @@ def test_helper_mode_turns_helper_on_and_restarts_after_pickup():
     assert rec.sent[-1] == "k:f9"
     assert not any(s.startswith("bd:R") or "bd:R" in s for s in rec.sent)  # 自分では攻撃しない
     assert bot.picked["Jewel of Bless"] == 1 and bot.helper.is_on()
+
+
+def test_mirror_frame_format():
+    from akm.mirror import compose, to_rgb565_be
+
+    img = np.zeros((1050, 1680, 3), np.uint8)
+    img[:, :, 2] = 255  # 赤一色
+    out = compose(img, [("RUN", (0, 255, 0))])
+    assert out.shape == (135, 240, 3)
+    data = to_rgb565_be(out)
+    assert len(data) == 240 * 135 * 2
+    assert data[-2:] == b"\xf8\x00"  # 右下は赤 (RGB565 0xF800, ビッグエンディアン)
