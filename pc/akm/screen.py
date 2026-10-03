@@ -41,6 +41,14 @@ def primary_screen_size() -> tuple[int, int]:
     return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
 
+def virtual_screen_rect() -> Rect:
+    """全モニタを合わせた仮想スクリーン (左や上のモニタは負の座標になる)"""
+    if not IS_WINDOWS:
+        return Rect(0, 0, 1920, 1080)
+    return Rect(user32.GetSystemMetrics(76), user32.GetSystemMetrics(77),
+                user32.GetSystemMetrics(78), user32.GetSystemMetrics(79))
+
+
 def cursor_pos() -> tuple[int, int]:
     if not IS_WINDOWS:
         return 0, 0

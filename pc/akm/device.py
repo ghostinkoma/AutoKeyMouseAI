@@ -32,6 +32,12 @@ class AbsMap:
     scale_x: float = 1.0
     scale_y: float = 1.0
 
+    def reachable(self, x: float, y: float) -> bool:
+        """絶対座標マウスでその位置まで動かせるか (例: プライマリモニタだけに対応している場合の別モニタは不可)"""
+        hx = (x - self.origin_x) * self.scale_x
+        hy = (y - self.origin_y) * self.scale_y
+        return -0.5 <= hx <= ABS_MAX + 0.5 and -0.5 <= hy <= ABS_MAX + 0.5
+
     def to_hid(self, x: float, y: float) -> tuple[int, int]:
         hx = round((x - self.origin_x) * self.scale_x)
         hy = round((y - self.origin_y) * self.scale_y)
@@ -121,12 +127,27 @@ class HttpTransport(Transport):
 
 
 class Device:
-    """HID 操作の高水準 API。座標はすべてスクリーン座標 (物理ピクセル)。"""
+    """HID 操作の高水準 API。座標はすべてスクリーン座標 (物理ピクセル)。
 
-    def __init__(self, transport: Transport, abs_map: AbsMap, dry_run: bool = False):
+    mouse_mode:
+      absolute : 絶対座標マウスで一発移動 (Windows はプライマリモニタにだけ対応させることが多い)
+      relative : 相対移動 + 実際のカーソル位置を読んで合わせ込む (どのモニタでも動くが遅い)
+      auto     : 絶対座標で届く範囲は absolute、届かない位置 (別モニタ等) は relative
+    """
+
+    def __init__(
+        self,
+        transport: Transport,
+        abs_map: AbsMap,
+        dry_run: bool = False,
+        mouse_mode: str = "auto",
+        cursor=None,
+    ):
         self.t = transport
         self.abs_map = abs_map
         self.dry_run = dry_run
+        self.mouse_mode = mouse_mode
+        self.cursor = cursor  # () -> (x, y) 実際のカーソル位置。relative に必要
 
     # -- 低水準
     def run(self, script: str, timeout: float = 35.0) -> str:
@@ -139,8 +160,34 @@ class Device:
         if not self.dry_run:
             self.t.stop()
 
+    def move_relative(self, x: float, y: float, tolerance: int = 2, max_steps: int = 8) -> bool:
+        """相対移動を繰り返して (x, y) に合わせる。マウス加速があっても数回で収束する。"""
+        if self.cursor is None:
+            raise DeviceError("relative mouse mode needs a cursor position reader")
+        for _ in range(max_steps):
+            cx, cy = self.cursor()
+            dx, dy = round(x - cx), round(y - cy)
+            if abs(dx) <= tolerance and abs(dy) <= tolerance:
+                return True
+            if self.dry_run:
+                print(f"[dry-run] m:{dx},{dy}")
+                return True
+            self.run(f"m:{dx},{dy}")
+        return False
+
+    def _use_relative(self, x: float, y: float) -> bool:
+        if self.mouse_mode == "relative":
+            return True
+        if self.mouse_mode == "auto" and self.cursor is not None:
+            return not self.abs_map.reachable(x, y)
+        return False
+
     # -- スクリプト断片 (組み合わせて 1 回で送ると速い)
     def s_move(self, x: float, y: float) -> str:
+        """移動コマンドを返す。相対移動が必要な位置ならここで移動を済ませて空文字を返す。"""
+        if self._use_relative(x, y):
+            self.move_relative(x, y)
+            return ""
         hx, hy = self.abs_map.to_hid(x, y)
         return f"a:{hx},{hy}"
 
@@ -150,7 +197,9 @@ class Device:
 
     # -- よく使う操作
     def move(self, x: float, y: float) -> None:
-        self.run(self.s_move(x, y))
+        cmd = self.s_move(x, y)
+        if cmd:
+            self.run(cmd)
 
     def click(self, x: float, y: float, button: str = "L", settle_ms: int = 30) -> None:
         self.run(f"{self.s_move(x, y)};w:{settle_ms};c:{button}")
@@ -163,11 +212,15 @@ class Device:
 
 
 def open_device(cfg: dict, abs_map: AbsMap, dry_run: bool = False) -> Device:
+    from .screen import IS_WINDOWS, cursor_pos
+
     dev_cfg = cfg["device"]
+    mode = (cfg.get("mouse") or {}).get("mode", "auto")
+    cursor = cursor_pos if IS_WINDOWS else None
     if dry_run:
-        return Device(Transport(), abs_map, dry_run=True)
+        return Device(Transport(), abs_map, dry_run=True, mouse_mode=mode, cursor=cursor)
     if dev_cfg.get("transport", "serial") == "serial":
         t: Transport = SerialTransport(dev_cfg["port"], int(dev_cfg.get("baud", 115200)))
     else:
         t = HttpTransport(dev_cfg["host"])
-    return Device(t, abs_map)
+    return Device(t, abs_map, mouse_mode=mode, cursor=cursor)

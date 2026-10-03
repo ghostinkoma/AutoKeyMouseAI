@@ -12,7 +12,7 @@ import numpy as np
 
 from akm.config import abs_map_from, load_config
 from akm.device import ABS_MAX, AbsMap, open_device
-from akm.screen import IS_WINDOWS, cursor_pos, primary_screen_size
+from akm.screen import IS_WINDOWS, client_rect, cursor_pos, find_window, primary_screen_size, virtual_screen_rect
 
 
 def main() -> None:
@@ -41,7 +41,26 @@ def main() -> None:
         ex, ey = m.to_hid(x, y)
         err.append(max(abs(ex - hx) / m.scale_x, abs(ey - hy) / m.scale_y))
     w, h = primary_screen_size()
+    vs = virtual_screen_rect()
+    reach_w, reach_h = ABS_MAX / m.scale_x, ABS_MAX / m.scale_y
     print(f"\nプライマリモニタ: {w}x{h}")
+    print(f"全モニタ (仮想スクリーン): x={vs.left}..{vs.left + vs.width}  y={vs.top}..{vs.top + vs.height}")
+    print(f"絶対座標マウスが届く範囲: x={m.origin_x:.0f}..{m.origin_x + reach_w:.0f}  "
+          f"y={m.origin_y:.0f}..{m.origin_y + reach_h:.0f}")
+
+    hwnd = find_window(cfg["game"]["window_title"])
+    if hwnd is None:
+        print(f"ゲームウィンドウ '{cfg['game']['window_title']}' は見つかりませんでした (起動していれば game.window_title を確認)")
+    else:
+        r = client_rect(hwnd)
+        corners = [(r.left, r.top), (r.left + r.width - 1, r.top + r.height - 1)]
+        ok = all(m.reachable(x, y) for x, y in corners)
+        print(f"ゲーム画面: x={r.left}..{r.left + r.width}  y={r.top}..{r.top + r.height}  ({r.width}x{r.height})")
+        if ok:
+            print("→ ゲーム画面は絶対座標で届きます (mouse.mode: auto / absolute で OK)")
+        else:
+            print("→ ゲーム画面の一部/全部に絶対座標が届きません。mouse.mode: auto のままなら相対移動で補います")
+            print("  (速くしたい場合はゲームをプライマリモニタに移す)")
     print(f"最大誤差: {max(err):.1f} px  (数 px 以内なら OK)")
     if max(err) > 5:
         print("誤差が大きい: マウスを触っていないか / ゲームがカーソルを固定していないか確認")

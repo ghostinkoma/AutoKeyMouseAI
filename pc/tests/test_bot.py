@@ -156,3 +156,27 @@ def test_bot_potion_when_hp_low():
     bot.last_buff = 1e18
     bot.step()
     assert "k:q" in rec.sent
+
+
+def test_relative_mouse_for_unreachable_position():
+    pos = [0, 0]
+
+    def cursor():
+        return tuple(pos)
+
+    class MoveRec(Recorder):
+        def run(self, script, timeout=35.0):
+            super().run(script, timeout)
+            if script.startswith("m:"):
+                dx, dy = map(int, script[2:].split(","))
+                pos[0] += int(dx * 0.8)  # マウス加速などで少しずれる想定
+                pos[1] += int(dy * 0.8)
+            return "ok"
+
+    rec = MoveRec()
+    dev = Device(rec, AbsMap.for_screen(1920, 1080), mouse_mode="auto", cursor=cursor)
+    assert dev.s_move(100, 100).startswith("a:")  # プライマリ内は絶対座標
+    assert rec.sent == []
+    assert dev.s_move(2500, 300) == ""  # 右のモニタ: 相対移動で合わせ込む
+    assert abs(pos[0] - 2500) <= 2 and abs(pos[1] - 300) <= 2
+    assert all(s.startswith("m:") for s in rec.sent)

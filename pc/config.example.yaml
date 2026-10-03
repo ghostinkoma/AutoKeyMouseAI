@@ -9,6 +9,10 @@ device:
   host: 192.168.1.43       # ESP32 の IP (液晶 / シリアルに表示される) または autokeymouse.local
 
 mouse:
+  # auto     : 絶対座標で届く位置は一発移動、届かない位置 (別モニタ等) は相対移動で合わせ込む
+  # absolute : 常に絶対座標 / relative : 常に相対移動 (遅いがどのモニタでも動く)
+  # relative を使うときは Windows の「ポインターの精度を高める」を OFF にすると速く収束する
+  mode: auto
   # tools/calibrate_mouse.py の出力を貼り付ける。null ならプライマリモニタ全体で計算
   abs_map: null
 
