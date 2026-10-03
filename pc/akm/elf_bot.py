@@ -70,9 +70,23 @@ def nearest(dets: list[Detection], kind: str, pos: tuple[float, float]) -> Detec
 
 
 class ElfBot:
-    def __init__(self, cfg: dict, screen: GameScreen, device: Device, detectors: list, show: bool = False):
+    def __init__(
+        self,
+        cfg: dict,
+        screen: GameScreen,
+        device: Device,
+        detectors: list,
+        show: bool = False,
+        helper=None,
+        collector=None,
+    ):
         self.cfg = cfg
         self.ecfg = cfg["elf"]
+        # helper: 攻撃は MU Helper に任せ、ボットは拾得・回復・死亡復帰だけ行う
+        # manual: 攻撃・バフもボットが行う
+        self.mode = self.ecfg.get("mode", "helper")
+        self.helper = helper if self.mode == "helper" else None
+        self.collector = collector
         self.screen = screen
         self.dev = device
         self.detectors = detectors
@@ -137,6 +151,9 @@ class ElfBot:
         script = dcfg.get("script")
         if script:
             self.dev.run(script, timeout=120)
+        if self.helper:
+            self.helper.believed_on = False  # 死亡で MU Helper は止まる
+            self.helper.ensure_on(self.screen.grab())
         self.hp_zero_since = None
         self.last_buff = 0.0  # 復帰後にバフを掛け直す
         return True
@@ -146,7 +163,7 @@ class ElfBot:
         pots = self.ecfg.get("potions") or {}
         cooldown = float(pots.get("cooldown_s", 1.0))
 
-        if heal and st.hp < float(heal["hp_below"]) and st.mp > 0.1 and now - self.last_heal > float(heal.get("cooldown_s", 1.5)):
+        if heal and self.mode == "manual" and st.hp < float(heal["hp_below"]) and st.mp > 0.1 and now - self.last_heal > float(heal.get("cooldown_s", 1.5)):
             # Heal は自分にカーソルを合わせて右クリック
             self.release_attack()
             cx, cy = self._char()
@@ -185,6 +202,8 @@ class ElfBot:
         picked = False
         for attempt in range(int(pcfg.get("attempts", 2))):
             self.dev.run(f"{self._pt(tx, ty)};w:30;c:L")
+            if self.helper:
+                self.helper.note_mouse_used()  # クリックで MU Helper は止まる
             deadline = time.monotonic() + float(pcfg.get("walk_timeout_s", 3.0))
             while time.monotonic() < deadline:
                 time.sleep(0.15)
@@ -259,17 +278,29 @@ class ElfBot:
         if now - self.last_report < 10:
             return
         self.last_report = now
-        print(f"[bot] HP {st.hp:.0%}  MP {st.mp:.0%}  検出 {len(st.detections)}  拾得 {dict(self.picked)}")
+        hs = ""
+        if self.helper is not None:
+            hs = f"  MU Helper {'ON' if self.helper.is_on() else 'OFF'} (切替 {self.helper.toggles} 回)"
+        print(f"[bot] HP {st.hp:.0%}  MP {st.mp:.0%}  検出 {len(st.detections)}  拾得 {dict(self.picked)}{hs}")
 
     def step(self) -> None:
         now = time.monotonic()
         st = self.observe()
         if self.show:
             self._show(st)
+        if self.collector is not None:
+            self.collector.collect(self.img, st.detections)
         if self.handle_death(st, now):
             return
         self.handle_recovery(st, now)
         if self.ecfg["pickup"].get("enabled", True) and self.handle_pickup(st, now):
+            if self.helper is not None:
+                self.helper.ensure_on(self.img)  # 拾い終わったらすぐ再開
+            return
+        if self.mode == "helper":
+            if self.helper is not None:
+                self.helper.ensure_on(self.img)  # 拾得のクリック等で止まっていたら再開
+            self.report(st, now)
             return
         if self.handle_buffs(now):
             return
@@ -304,7 +335,9 @@ class ElfBot:
                     if key_pressed(start_vk):
                         running = True
                         self.last_buff = 0.0
-                        print("[bot] 開始 (PageDown で停止)")
+                        print(f"[bot] 開始 ({self.mode} モード / PageDown で停止)")
+                        if self.helper is not None and self.screen.is_active():
+                            self.helper.ensure_on(self.screen.grab())
                     time.sleep(0.05)
                     continue
                 if key_pressed(stop_vk):
@@ -330,10 +363,12 @@ class ElfBot:
             print(f"[bot] 終了。拾得数: {dict(self.picked)}")
 
     def pause(self) -> None:
-        """押しっぱなしのキー・ボタンを全部離す。"""
+        """押しっぱなしのキー・ボタンを全部離す。MU Helper も止める (helper.stop_on_pause)。"""
         self.holding_attack = False
         try:
             self.dev.stop()
             self.dev.release_all()
+            if self.helper is not None and self.helper.cfg.get("stop_on_pause", True):
+                self.helper.ensure_off()
         except Exception:
             pass

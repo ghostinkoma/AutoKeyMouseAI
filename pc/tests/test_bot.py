@@ -101,12 +101,17 @@ class FakeDetector:
         return self.seq.pop(0) if len(self.seq) > 1 else self.seq[0]
 
 
-def make_bot(frames, det_seq):
+def make_bot(frames, det_seq, mode="manual"):
+    from akm.helper import HelperControl
+
     cfg = yaml.safe_load((PC / "config.example.yaml").read_text(encoding="utf-8"))
     cfg["elf"]["heal"] = None
+    cfg["elf"]["mode"] = mode
+    cfg["helper"]["settle_ms"] = 0
     rec = Recorder()
     dev = Device(rec, AbsMap.for_screen(1920, 1080))
-    bot = ElfBot(cfg, FakeScreen(frames), dev, [FakeDetector(det_seq)])
+    helper = HelperControl(cfg["helper"], dev, PC)
+    bot = ElfBot(cfg, FakeScreen(frames), dev, [FakeDetector(det_seq)], helper=helper)
     return bot, rec
 
 
@@ -195,3 +200,17 @@ def test_template_detector_gold_mask(tmp_path):
     det = TemplateDetector([{"name": "Zen", "files": ["zen.png"], "threshold": 0.8, "color": "gold"}], base_dir=tmp_path)
     found = det.detect(scene)
     assert [(d.x, d.y) for d in found] == [(100, 200)]
+
+
+def test_helper_mode_turns_helper_on_and_restarts_after_pickup():
+    jewel = Detection("Jewel of Bless", "item", 470, 330, 80, 12, 0.95)
+    bot, rec = make_bot([full_hud_frame()], [[], [jewel], []], mode="helper")
+    bot.step()  # 何も落ちていない: MU Helper を入れるだけ
+    assert rec.sent == ["k:f9"]
+    assert bot.helper.is_on()
+    rec.sent.clear()
+    bot.step()  # 宝石: クリックで拾う (MU Helper は止まる) → 戻る → F9 で再開
+    assert rec.sent[0].endswith("c:L")
+    assert rec.sent[-1] == "k:f9"
+    assert not any(s.startswith("bd:R") or "bd:R" in s for s in rec.sent)  # 自分では攻撃しない
+    assert bot.picked["Jewel of Bless"] == 1 and bot.helper.is_on()

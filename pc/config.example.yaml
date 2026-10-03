@@ -31,6 +31,16 @@ helper:
   # F12 は Windows がデバッガ用に予約しているキーで、ゲームが固まることがあるので使わない
   # PageUp / PageDown (ボットの開始・停止) とも重ねないこと
   toggle_key: f9
+  initially_on: false      # ボット開始時に MU Helper が止まっている前提 (PageUp で開始すると F9 で入れる)
+  mouse_stops_helper: true # クリックすると MU Helper が止まる (拾得後に F9 で入れ直す)
+  stop_on_pause: true      # PageDown でボットを止めたら MU Helper も止める
+  settle_ms: 800           # 切り替え後の待ち時間
+  # 画面表示で ON/OFF を判定する場合 (左上の MU Helper パネルを切り出した画像)。未設定ならボットの操作から推定
+  indicator:
+    roi: null              # 例: [0.0, 0.0, 0.2, 0.05]
+    on: null               # 例: templates/helper_on.png
+    off: null              # 例: templates/helper_off.png
+    threshold: 0.85
 
 loop_interval_ms: 50
 
@@ -52,7 +62,9 @@ vision:
     search_roi: [0.0, 0.12, 1.0, 0.70]
     # チャット欄 (左下) は "Zen" などの文字が流れるので除外
     exclude_rois:
-      - [0.0, 0.74, 0.30, 0.08]
+      - [0.0, 0.74, 0.30, 0.08]   # チャット欄
+      - [0.43, 0.72, 0.13, 0.03]  # "Welcome to Rex Project"
+      - [0.88, 0.74, 0.07, 0.03]  # "Events"
     # tools/grab_templates.py で切り出した画像を登録する。
     # 同じアイテムに複数枚登録すると (明るさ違いなど) 取りこぼしが減る
     # color: gold を付けると金色の文字だけで照合する (ラベル背景や地面の色に強い)
@@ -67,6 +79,12 @@ vision:
       # - {name: "Jewel of Creation", files: [templates/creation.png], threshold: 0.8, color: gold}
       # - {name: "Jewel of Guardian", files: [templates/guardian.png], threshold: 0.8, color: gold}
       # - {name: "Jewel of Harmony",  files: [templates/harmony.png],  threshold: 0.8, color: gold}
+  # まだテンプレートの無いアイテム名ラベル (金色文字) を自動で dataset/labels/ に保存する。
+  # 放置すれば "Jewel of Bless" などのラベル画像が溜まるので、名前を付けて templates/ に移せばテンプレートになる
+  collect:
+    enabled: true
+    colors: [gold]
+    interval_s: 1.0
   yolo:
     # 学習済みモデルを用意したら有効にする (README の「AI 検出」参照)
     enabled: false
@@ -75,6 +93,9 @@ vision:
     class_kinds: {monster: monster}   # 記載のないクラスは item 扱い
 
 elf:
+  # helper: 攻撃は MU Helper に任せ、ボットは拾得・回復 (ポーション)・死亡復帰だけ
+  # manual: 攻撃・バフ・Heal もボットが行う (MU Helper を使わない)
+  mode: helper
   character_offset: [0.0, -0.08]   # キャラの位置 (画面中心からのずれ, 画面高さ比)
 
   attack:

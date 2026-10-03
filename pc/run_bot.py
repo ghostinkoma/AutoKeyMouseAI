@@ -10,7 +10,9 @@ import argparse
 
 from akm.config import PC_DIR, abs_map_from, load_config
 from akm.device import open_device
+from akm.collector import LabelCollector
 from akm.elf_bot import ElfBot
+from akm.helper import HelperControl
 from akm.screen import GameScreen
 from akm.vision import build_detectors
 
@@ -26,7 +28,13 @@ def main() -> None:
     screen = GameScreen(cfg["game"]["window_title"], cfg["game"].get("process"))
     device = open_device(cfg, abs_map_from(cfg), dry_run=args.dry_run)
     detectors = build_detectors(cfg.get("vision", {}), PC_DIR)
-    ElfBot(cfg, screen, device, detectors, show=args.show).run()
+    helper = HelperControl(cfg.get("helper", {}), device, PC_DIR)
+    ccfg = (cfg.get("vision") or {}).get("collect") or {}
+    tcfg = (cfg.get("vision") or {}).get("templates") or {}
+    ccfg.setdefault("search_roi", tcfg.get("search_roi"))
+    ccfg.setdefault("exclude_rois", tcfg.get("exclude_rois", []))
+    collector = LabelCollector(ccfg, PC_DIR) if ccfg.get("enabled", True) else None
+    ElfBot(cfg, screen, device, detectors, show=args.show, helper=helper, collector=collector).run()
 
 
 if __name__ == "__main__":
