@@ -8,11 +8,7 @@
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-#include "esp32s3/rom/tjpgd.h"
-#else
-#include "esp32/rom/tjpgd.h"
-#endif
+#include <TJpg_Decoder.h>
 
 #include "ble_hid.h"
 #include "macro.h"
@@ -83,49 +79,34 @@ void begin() {
 
 namespace {
 
-struct JpegSrc {
-  const uint8_t* data;
-  size_t len;
-  size_t pos;
-};
-
-UINT jpegIn(JDEC* jd, BYTE* buf, UINT n) {
-  JpegSrc* src = (JpegSrc*)jd->device;
-  size_t left = src->len - src->pos;
-  if (n > left) n = left;
-  if (buf) memcpy(buf, src->data + src->pos, n);
-  src->pos += n;
-  return n;
-}
-
-UINT jpegOut(JDEC* jd, void* bitmap, JRECT* r) {
-  // tjpgd (ROM 版) は RGB888 で出力する。RGB565 に詰め直して液晶へ
-  static uint16_t px[16 * 16];
-  const uint8_t* rgb = (const uint8_t*)bitmap;
-  int w = r->right - r->left + 1, h = r->bottom - r->top + 1;
-  if (r->left >= FRAME_W || r->top >= FRAME_H) return 1;
-  for (int i = 0; i < w * h; ++i, rgb += 3) {
-    px[i] = (uint16_t)((rgb[0] & 0xF8) << 8 | (rgb[1] & 0xFC) << 3 | rgb[2] >> 3);
-  }
-  gTft.drawRGBBitmap(r->left, r->top, px, w, h);
-  return 1;
+bool jpegOut(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
+  // TJpg_Decoder は RGB565 (16x16 などのブロック単位) で渡してくる。そのまま液晶へ
+  if (x >= FRAME_W || y >= FRAME_H) return false;  // 画面外は打ち切り
+  gTft.drawRGBBitmap(x, y, bitmap, w, h);
+  return true;
 }
 
 bool drawJpeg(const uint8_t* data, size_t len) {
-  // ROM の tjpgd は作業領域を 4 バイト境界で使うので uint32_t で確保する (ずれていると例外で再起動する)
-  static uint32_t work[3100 / 4];
-  JDEC jd;
-  JpegSrc src{data, len, 0};
-  JRESULT rc = jd_prepare(&jd, jpegIn, work, sizeof(work), &src);
-  if (rc != JDR_OK) {
-    Serial.printf("[TFT] jpeg prepare failed: %d\n", rc);
+  // ESP32 の ROM 内蔵 tjpgd は版が古く OpenCV の JPEG を展開できないことがあるため、
+  // ソフトウェア版 (Bodmer の TJpg_Decoder) で展開する
+  static bool init = false;
+  if (!init) {
+    TJpgDec.setJpgScale(1);
+    TJpgDec.setSwapBytes(false);  // drawRGBBitmap はホストのバイト順 (リトルエンディアン) を受け取る
+    TJpgDec.setCallback(jpegOut);
+    init = true;
+  }
+  uint16_t w = 0, h = 0;
+  if (TJpgDec.getJpgSize(&w, &h, data, len) != JDR_OK) {
+    Serial.println("[TFT] jpeg header error");
     return false;
   }
-  if (jd.width > FRAME_W || jd.height > FRAME_H) {
-    Serial.printf("[TFT] jpeg too large: %ux%u\n", jd.width, jd.height);
+  if (w > FRAME_W || h > FRAME_H) {
+    Serial.printf("[TFT] jpeg too large: %ux%u\n", w, h);
     return false;
   }
-  rc = jd_decomp(&jd, jpegOut, 0);  // drawRGBBitmap が SPI の開始/終了を行う
+  JRESULT rc = TJpgDec.drawJpg(0, 0, data, len);
+  if (rc != JDR_OK) Serial.printf("[TFT] jpeg decode failed: %d\n", rc);
   return rc == JDR_OK;
 }
 

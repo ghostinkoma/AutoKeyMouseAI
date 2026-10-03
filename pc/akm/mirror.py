@@ -4,7 +4,7 @@
 PageUp を押して動き出したかどうかが手元の液晶で分かる。
 
 送信形式: POST http://<ESP32>/frame
-  * jpeg (既定): 240x135 のベースライン JPEG。5〜10KB 程度で、ESP32 の ROM 内蔵 JPEG デコーダで表示する
+  * jpeg (既定): 240x135 のベースライン JPEG。5〜10KB 程度で、ESP32 側は TJpg_Decoder で展開して表示する
   * raw        : RGB565 (ビッグエンディアン) 64,800 バイト
 JPEG にすると送るデータが 1/8 程度になり、Wi-Fi が空くので HID 操作の遅れも減る。
 240x135 の 1 枚を圧縮するのは CPU で 1ms 未満なので、GPU (NVENC) や FFmpeg は使わない
