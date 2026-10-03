@@ -25,6 +25,8 @@ void begin(const char* deviceName, const char* manufacturer);
 bool connected();
 uint32_t connectedPeers();
 bool advertising();
+uint32_t sendRetries();     // 送信バッファ待ちで再送した回数
+uint32_t droppedReports();  // 再送しても送れず捨てたレポート数
 
 // loop() から呼ぶ。広告が止まっていたら再開し、未接続なら 30 秒ごとに状態を出す
 void loop();

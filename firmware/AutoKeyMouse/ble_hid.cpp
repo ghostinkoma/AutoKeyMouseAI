@@ -125,18 +125,30 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
 };
 
-void sendKeyboard() {
+uint32_t gRetries = 0;
+uint32_t gDropped = 0;
+
+// 送信バッファが一杯だと notify が失敗してキーを取りこぼすので、空くまで待って再送する
+void send(NimBLECharacteristic* chr, const uint8_t* data, size_t len) {
   if (!connected()) return;
+  for (int i = 0; i < 40; ++i) {  // 最大 約 200ms
+    if (chr->notify(data, len)) return;
+    ++gRetries;
+    vTaskDelay(pdMS_TO_TICKS(5));
+    if (!connected()) return;
+  }
+  ++gDropped;
+  Serial.printf("[BLE] report dropped (total %u)\n", (unsigned)gDropped);
+}
+
+void sendKeyboard() {
   uint8_t r[8] = {gMods, 0, gKeys[0], gKeys[1], gKeys[2], gKeys[3], gKeys[4], gKeys[5]};
-  gKbIn->setValue(r, sizeof(r));
-  gKbIn->notify();
+  send(gKbIn, r, sizeof(r));
 }
 
 void sendMouse(int8_t dx, int8_t dy, int8_t wheel) {
-  if (!connected()) return;
   uint8_t r[4] = {gButtons, (uint8_t)dx, (uint8_t)dy, (uint8_t)wheel};
-  gMouseIn->setValue(r, sizeof(r));
-  gMouseIn->notify();
+  send(gMouseIn, r, sizeof(r));
 }
 
 }  // namespace
@@ -181,6 +193,8 @@ void clearBonds() {
   Serial.println("[BLE] all bonds deleted. Remove AutoKeyMouse in Windows too, then pair again.");
 }
 uint32_t connectedPeers() { return gPeers; }
+uint32_t sendRetries() { return gRetries; }
+uint32_t droppedReports() { return gDropped; }
 
 bool advertising() { return NimBLEDevice::getAdvertising()->isAdvertising(); }
 
@@ -261,8 +275,7 @@ void moveAbs(uint16_t x, uint16_t y) {
   if (y > ABS_MAX) y = ABS_MAX;
   uint8_t r[6] = {0, (uint8_t)(x & 0xFF), (uint8_t)(x >> 8),
                   (uint8_t)(y & 0xFF), (uint8_t)(y >> 8), 0};
-  gAbsIn->setValue(r, sizeof(r));
-  gAbsIn->notify();
+  send(gAbsIn, r, sizeof(r));
 }
 
 void releaseAll() {

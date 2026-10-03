@@ -20,7 +20,9 @@ def main() -> None:
     print("status:", dev.t.status())
     print("5 秒後に入力します。メモ帳などを前面にしてください")
     time.sleep(5)
-    dev.run("t:AutoKeyMouse test 123 @[]:;k:enter")
+    expected = "AutoKeyMouse test 123 @[]:;"
+    dev.run("t:AutoKeyMouse test 123 @[]:\\;;k:enter")  # 文字列中の ; は \; と書く
+    print(f"メモ帳に次の 1 行が入っていれば OK: {expected}")
     w, h = primary_screen_size()
     cx, cy, r = w / 2, h / 2, h / 4
     t0 = time.monotonic()

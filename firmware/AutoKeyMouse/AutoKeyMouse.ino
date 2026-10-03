@@ -218,9 +218,9 @@ void handleLine(String line) {
     macro::Slot s = macro::slot(id);
     reply(macro::start(s.script, repeat, "#" + String(id) + " " + s.name, &err), err);
   } else if (line == "status") {
-    Serial.printf("OK uptime=%lus heap=%u ble=%d adv=%d peers=%u busy=%d wifi=%d ssid=%s ip=%s ap=%s last=%s\n",
+    Serial.printf("OK uptime=%lus heap=%u ble=%d adv=%d peers=%u retry=%u drop=%u busy=%d wifi=%d ssid=%s ip=%s ap=%s last=%s\n",
                   (unsigned long)(millis() / 1000), (unsigned)ESP.getFreeHeap(), hid::connected(), hid::advertising(),
-                  (unsigned)hid::connectedPeers(), macro::busy(), net::staConnected(),
+                  (unsigned)hid::connectedPeers(), (unsigned)hid::sendRetries(), (unsigned)hid::droppedReports(), macro::busy(), net::staConnected(),
                   net::ssid().c_str(), net::staIp().c_str(), net::apIp().c_str(),
                   macro::lastResult().c_str());
   } else if (line == "wifi") {
