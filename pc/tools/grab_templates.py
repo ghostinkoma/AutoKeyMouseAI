@@ -19,7 +19,7 @@ from akm.screen import GameScreen
 
 def main() -> None:
     cfg = load_config("config.yaml")
-    screen = GameScreen(cfg["game"]["window_title"])
+    screen = GameScreen(cfg["game"]["window_title"], cfg["game"].get("process"))
     out_dir = PC_DIR / "templates"
     out_dir.mkdir(exist_ok=True)
     img = screen.grab()

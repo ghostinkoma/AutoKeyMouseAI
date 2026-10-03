@@ -64,11 +64,31 @@ def key_pressed(vk: int) -> bool:
     return bool(user32.GetAsyncKeyState(vk) & 0x8000)
 
 
-def find_window(title_contains: str) -> int | None:
-    """タイトルに文字列を含む最初の可視ウィンドウのハンドル。"""
+def process_name(hwnd: int) -> str:
+    """ウィンドウを持つプロセスの実行ファイル名 (例: main.exe)。取れなければ空文字。"""
     if not IS_WINDOWS:
-        return None
-    found: list[int] = []
+        return ""
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    kernel32 = ctypes.windll.kernel32
+    h = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return buf.value.replace("/", "\\").split("\\")[-1]
+        return ""
+    finally:
+        kernel32.CloseHandle(h)
+
+
+def list_windows() -> list[tuple[int, str, str, "Rect"]]:
+    """可視でタイトルのあるウィンドウ一覧: (hwnd, タイトル, プロセス名, クライアント領域)"""
+    if not IS_WINDOWS:
+        return []
+    out: list[tuple[int, str, str, Rect]] = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
     def cb(hwnd, _):
@@ -77,13 +97,30 @@ def find_window(title_contains: str) -> int | None:
             if n:
                 buf = ctypes.create_unicode_buffer(n + 1)
                 user32.GetWindowTextW(hwnd, buf, n + 1)
-                if title_contains.lower() in buf.value.lower():
-                    found.append(hwnd)
-                    return False
+                out.append((hwnd, buf.value, process_name(hwnd), client_rect(hwnd)))
         return True
 
     user32.EnumWindows(cb, 0)
-    return found[0] if found else None
+    return out
+
+
+def find_window(title_contains: str, process: str | None = None) -> int | None:
+    """ゲームウィンドウを探す。
+
+    process (例: "main.exe") を指定するとそのプロセスのウィンドウだけを対象にする。
+    ブラウザのタブ名などに同じ文字列が入っていても取り違えない。
+    候補が複数ならクライアント領域が一番大きいものを選ぶ。
+    """
+    best, best_area = None, -1
+    for hwnd, title, proc, rect in list_windows():
+        if title_contains and title_contains.lower() not in title.lower():
+            continue
+        if process and proc.lower() != process.lower():
+            continue
+        area = rect.width * rect.height
+        if area > best_area:
+            best, best_area = hwnd, area
+    return best
 
 
 def client_rect(hwnd: int) -> Rect:
@@ -107,18 +144,22 @@ class GameScreen:
     ウィンドウモードで起動すること (排他フルスクリーンだとキャプチャが黒くなることがある)。
     """
 
-    def __init__(self, window_title: str):
+    def __init__(self, window_title: str, process: str | None = None):
         import mss
 
         self._mss = mss.mss()
         self.window_title = window_title
+        self.process = process
         self.hwnd: int | None = None
         self.rect: Rect | None = None
 
     def locate(self) -> Rect:
-        self.hwnd = find_window(self.window_title)
+        self.hwnd = find_window(self.window_title, self.process)
         if self.hwnd is None:
-            raise RuntimeError(f"ウィンドウが見つかりません: '{self.window_title}'")
+            raise RuntimeError(
+                f"ウィンドウが見つかりません: title='{self.window_title}' process='{self.process}'"
+                " (python tools\\list_windows.py で確認)"
+            )
         self.rect = client_rect(self.hwnd)
         return self.rect
 

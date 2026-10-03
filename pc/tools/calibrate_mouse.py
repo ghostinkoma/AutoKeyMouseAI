@@ -48,7 +48,7 @@ def main() -> None:
     print(f"絶対座標マウスが届く範囲: x={m.origin_x:.0f}..{m.origin_x + reach_w:.0f}  "
           f"y={m.origin_y:.0f}..{m.origin_y + reach_h:.0f}")
 
-    hwnd = find_window(cfg["game"]["window_title"])
+    hwnd = find_window(cfg["game"]["window_title"], cfg["game"].get("process"))
     if hwnd is None:
         print(f"ゲームウィンドウ '{cfg['game']['window_title']}' は見つかりませんでした (起動していれば game.window_title を確認)")
     else:

@@ -18,6 +18,8 @@ mouse:
 
 game:
   window_title: "MU"       # ゲームウィンドウのタイトルの一部
+  # ゲームのプロセス名 (python tools\list_windows.py で確認)。指定するとブラウザのタブ等と取り違えない
+  process: null            # 例: main.exe
   require_foreground: true # ゲームが前面にないときは操作しない
   stop_key_vk: 0x7B        # この PC で F12 を押すと停止 (仮想キーコード)
 
@@ -46,7 +48,8 @@ vision:
     # 同じアイテムに複数枚登録すると (明るさ違いなど) 取りこぼしが減る
     # color: gold を付けると金色の文字だけで照合する (ラベル背景や地面の色に強い)
     targets:
-      - {name: "Zen",               files: [templates/zen.png],      threshold: 0.8, color: gold}
+      - {name: "Zen",               files: [templates/zen.png],          threshold: 0.8, color: gold}
+      - {name: "Silver Medal",      files: [templates/silver_medal.png], threshold: 0.8, color: gold}
       # 宝石は tools/grab_templates.py で切り出してから有効にする (文字色が金色でなければ color を外す)
       # - {name: "Jewel of Bless",    files: [templates/bless.png],    threshold: 0.8, color: gold}
       # - {name: "Jewel of Soul",     files: [templates/soul.png],     threshold: 0.8, color: gold}

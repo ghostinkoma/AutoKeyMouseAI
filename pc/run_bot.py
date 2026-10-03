@@ -23,7 +23,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    screen = GameScreen(cfg["game"]["window_title"])
+    screen = GameScreen(cfg["game"]["window_title"], cfg["game"].get("process"))
     device = open_device(cfg, abs_map_from(cfg), dry_run=args.dry_run)
     detectors = build_detectors(cfg.get("vision", {}), PC_DIR)
     ElfBot(cfg, screen, device, detectors, show=args.show).run()

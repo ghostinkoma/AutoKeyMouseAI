@@ -25,7 +25,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    screen = GameScreen(cfg["game"]["window_title"])
+    screen = GameScreen(cfg["game"]["window_title"], cfg["game"].get("process"))
     detectors = build_detectors(cfg.get("vision", {}), PC_DIR)
     out = PC_DIR / "dataset" / "images"
     out.mkdir(parents=True, exist_ok=True)
