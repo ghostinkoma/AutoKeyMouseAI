@@ -6,3 +6,5 @@ __pycache__/
 pc/config.yaml
 pc/dataset/
 pc/obs_debug.png
+pc/data/
+pc/maplog_*.png

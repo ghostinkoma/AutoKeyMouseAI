@@ -10,3 +10,10 @@ windows-capture>=1.5; sys_platform == "win32"
 # ultralytics>=8.3
 # OBS のゲームキャプチャから画面をもらう場合のみ:
 # obsws-python>=1.7
+# 現在地の読み取り (tools/map_logger.py) に Windows 標準の OCR を使う:
+winrt-runtime; sys_platform == "win32"
+winrt-Windows.Foundation; sys_platform == "win32"
+winrt-Windows.Media.Ocr; sys_platform == "win32"
+winrt-Windows.Graphics.Imaging; sys_platform == "win32"
+winrt-Windows.Storage.Streams; sys_platform == "win32"
+winrt-Windows.Globalization; sys_platform == "win32"

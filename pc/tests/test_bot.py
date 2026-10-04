@@ -375,3 +375,42 @@ def test_save_obs_password_rewrites_only_obs_block(tmp_path):
     assert save_obs_password(p, 'n"ew#1')
     d = _y.safe_load(p.read_text(encoding="utf-8"))
     assert d["obs"]["password"] == 'n"ew#1' and d["device"]["password"] == "keep" and d["game"]["a"] == 1
+
+
+def test_parse_location_handles_ocr_noise():
+    from akm.maploc import Location, parse_location
+
+    assert parse_location("Atlans (32, 68)") == Location("Atlans", 32, 68)
+    assert parse_location("Atlans(32,68)") == Location("Atlans", 32, 68)
+    assert parse_location("Atlns ( 3O, l7 )") == Location("Atlans", 30, 17)  # O→0, l→1, 綴り補正
+    assert parse_location("Lost Tower (120, 200)") == Location("Lost Tower", 120, 200)
+    assert parse_location("Custom Map (5, 6)") == Location("Custom Map", 5, 6)  # 未知のマップ名もそのまま
+    assert parse_location("Welcome to Rex Project") is None
+    assert parse_location("Atlans (300, 68)") is None  # 範囲外
+
+
+def test_location_reader_rejects_single_jump():
+    from akm.maploc import Location, LocationReader
+
+    r = LocationReader({}, ocr=lambda img: "")
+    A = Location("Atlans", 30, 60)
+    assert r.accept(A) is None                       # 最初は確認待ち
+    assert r.accept(Location("Atlans", 31, 60)) == Location("Atlans", 31, 60)
+    assert r.accept(Location("Atlans", 200, 10)) is None   # 読み違いらしい飛び
+    assert r.accept(Location("Atlans", 32, 61)) == Location("Atlans", 32, 61)
+    assert r.accept(Location("Lorencia", 130, 130)) is None  # マップ移動: 1 回目は保留
+    assert r.accept(Location("Lorencia", 131, 130)) == Location("Lorencia", 131, 130)
+
+
+def test_mapdb_records_cells_and_events(tmp_path):
+    from akm.maploc import Location, MapDB
+
+    db = MapDB(tmp_path / "m.db")
+    db.record(Location("Atlans", 10, 10), ts=1.0)
+    db.record(Location("Atlans", 13, 10), ts=2.0)   # 途中の 11, 12 も歩けるマス
+    assert db.record(Location("Lorencia", 130, 130), ts=3.0) == "map_change"
+    cells = {(m, x, y) for m, x, y in db.db.execute("SELECT map, x, y FROM cells")}
+    assert {("Atlans", x, 10) for x in range(10, 14)} <= cells and ("Lorencia", 130, 130) in cells
+    assert db.db.execute("SELECT kind FROM events").fetchall() == [("map_change",)]
+    db.add_spot("hunt1", db.latest(), 8)
+    assert db.db.execute("SELECT name, map, radius FROM spots").fetchone() == ("hunt1", "Lorencia", 8)

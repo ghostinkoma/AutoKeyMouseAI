@@ -64,6 +64,18 @@ helper:
 
 loop_interval_ms: 50
 
+# 現在地 (マップ名と座標) の読み取りと記録 (tools/map_logger.py)
+maplog:
+  roi: [0.86, 0.955, 0.14, 0.045]   # 画面右下 "Atlans (32, 68)" の表示 (ミニマップの下)。--check で確認して調整
+  ocr: auto            # auto | winrt (Windows 標準) | tesseract
+  tesseract_cmd: null  # Tesseract の場所 (既定 C:\Program Files\Tesseract-OCR\tesseract.exe)
+  scale: 3             # OCR 前に拡大する倍率
+  threshold: 130       # 文字とみなす明るさ (0-255)。読めなければ 100〜170 で調整
+  interval_s: 0.5      # 読み取り間隔
+  max_step: 12         # 1 回で動ける最大マス数 (これより飛んだら 2 回続けて読めたときだけ採用)
+  heartbeat_s: 10      # 止まっていてもこの間隔で位置を記録
+  db: data/mu_map.db   # 記録先 (SQLite)
+
 # OBS Studio のゲームキャプチャから画面をもらう (別の仮想デスクトップにゲームを置いても液晶に映し続けたい場合)
 #   1. OBS で「ソース +」→「ゲームキャプチャ」→ モード「特定のウィンドウをキャプチャ」→ MU (Main.exe) を選ぶ。
 #      ソース名を下の source と同じにする (既定の名前は「ゲームキャプチャ」)
