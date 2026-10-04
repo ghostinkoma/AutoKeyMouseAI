@@ -66,7 +66,7 @@ loop_interval_ms: 50
 
 # OBS Studio のゲームキャプチャから画面をもらう (別の仮想デスクトップにゲームを置いても液晶に映し続けたい場合)
 #   1. OBS で「ソース +」→「ゲームキャプチャ」→ モード「特定のウィンドウをキャプチャ」→ MU (Main.exe) を選ぶ。
-#      ソース名を下の source と同じにする (例: MU)
+#      ソース名を下の source と同じにする (既定の名前は「ゲームキャプチャ」)
 #   2. OBS の「ツール」→「WebSocket サーバー設定」→「WebSocket サーバーを有効にする」。パスワードを下に書く
 #   3. pip install obsws-python
 #   OBS は配信・録画しなくてよい (起動しておくだけ)
@@ -75,7 +75,7 @@ obs:
   host: localhost
   port: 4455
   password: ""
-  source: MU
+  source: ゲームキャプチャ    # OBS のソース名 (見つからなければゲームキャプチャのソースを自動で探す)
   # 液晶やボットの画面に余白が出る場合、OBS の画像から切り出す範囲 [x, y, 幅, 高さ] (ピクセル) を指定する。
   # 起動時に出る "[screen] OBS の画像 WxH / ゲーム画面 WxH" を見て決める。null なら自動
   crop: null

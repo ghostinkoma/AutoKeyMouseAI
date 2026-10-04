@@ -314,12 +314,31 @@ class ObsCapture:
     def _client(self):
         c = getattr(self._local, "client", None)
         if c is None:
+            import logging
+
             import obsws_python as obs  # pip install obsws-python
 
+            logging.getLogger("obsws_python").setLevel(logging.CRITICAL)  # 失敗時のトレースバックを出さない
             c = self._local.client = obs.ReqClient(
                 host=self.cfg.get("host", "localhost"), port=int(self.cfg.get("port", 4455)),
                 password=self.cfg.get("password") or "", timeout=3)
         return c
+
+    def _find_game_capture(self) -> bool:
+        """source の名前が見つからないとき、OBS の「ゲームキャプチャ」ソースを探して使う。"""
+        try:
+            inputs = self._client().get_input_list(None).inputs
+        except Exception:
+            return False
+        names = [i.get("inputName") for i in inputs]
+        games = [i.get("inputName") for i in inputs if i.get("inputKind") == "game_capture"]
+        if games and games[0] != self.source:
+            print(f"[screen] OBS にソース '{self.source}' が無いので、ゲームキャプチャ '{games[0]}' を使います"
+                  f" (config.yaml の obs.source を '{games[0]}' にすると消えます)")
+            self.source = games[0]
+            return True
+        print(f"[screen] OBS にソース '{self.source}' がありません。OBS のソース: {names}")
+        return False
 
     def grab(self, width: int | None = None, height: int | None = None) -> np.ndarray:
         import base64
@@ -328,7 +347,9 @@ class ObsCapture:
 
         try:
             r = self._client().get_source_screenshot(self.source, "jpg", width, height, 90)
-        except Exception:
+        except Exception as e:
+            if "No source was found" in str(e) and self._find_game_capture():
+                return self.grab(width, height)
             self._local.client = None  # 次回つなぎ直す
             raise
         data = r.image_data
