@@ -57,6 +57,7 @@ public final class MapViewer extends JFrame {
     private List<MapDb.Spot> spotList = List.of();
     private final JList<String> spotView = new JList<>(spotModel);
     private MapDb.Pos lastPos;
+    private java.util.Map<Long, List<String>> spotMonsters = java.util.Map.of();
     private String shownMap;
     private boolean fitted;
     private boolean updatingBox;
@@ -177,13 +178,16 @@ public final class MapViewer extends JFrame {
 
             lastPos = cur;
             List<MapDb.Spot> spots = db.spots(null);
-            if (!spots.equals(spotList)) {  // 変わったときだけ作り直す (選択を保つ)
+            java.util.Map<Long, List<String>> mons = db.spotMonsters();
+            if (!spots.equals(spotList) || !mons.equals(spotMonsters)) {
+                spotMonsters = mons;  // 変わったときだけ作り直す (選択を保つ)
                 long selId = selectedSpot() == null ? -1 : selectedSpot().id();
                 spotList = spots;
                 spotModel.clear();
                 for (MapDb.Spot s : spotList)
-                    spotModel.addElement(String.format("#%d [%s] %s  %s (%d, %d) 半径%d%s", s.id(), SpotDialog.kindLabel(s.kind()),
+                    spotModel.addElement(String.format("#%d [%s] %s  %s (%d, %d) 半径%d%s%s", s.id(), SpotDialog.kindLabel(s.kind()),
                             s.name(), s.map(), s.x(), s.y(), s.radius(),
+                            spotMonsters.containsKey(s.id()) ? "  狙い: " + String.join(", ", spotMonsters.get(s.id())) : "",
                             s.note() == null || s.note().isEmpty() ? "" : "  " + s.note()));
                 for (int i = 0; i < spotList.size(); i++) if (spotList.get(i).id() == selId) spotView.setSelectedIndex(i);
             }
@@ -235,6 +239,14 @@ public final class MapViewer extends JFrame {
         return i >= 0 && i < spotList.size() ? spotList.get(i) : null;
     }
 
+    private List<MapDb.Monster> monstersOf(String map) {
+        try {
+            return db.monsters(map);
+        } catch (SQLException e) {
+            return List.of();
+        }
+    }
+
     private List<String> mapNames() {
         try {
             return db.maps();
@@ -250,10 +262,11 @@ public final class MapViewer extends JFrame {
     }
 
     private void addSpot(String map, int x, int y) {
-        SpotDialog.Result r = SpotDialog.create(this, mapNames(), map, x, y);
+        SpotDialog.Result r = SpotDialog.create(this, mapNames(), this::monstersOf, map, x, y);
         if (r == null) return;
         try {
-            db.addSpot(r.name(), r.map(), r.x(), r.y(), r.radius(), r.kind(), r.note());
+            long id = db.addSpot(r.name(), r.map(), r.x(), r.y(), r.radius(), r.kind(), r.note());
+            db.setSpotMonsters(id, r.monsters());
             status.setText("登録しました: " + r.name() + "  " + r.map() + " (" + r.x() + ", " + r.y() + ")");
             refresh();
         } catch (SQLException ex) {
@@ -266,10 +279,12 @@ public final class MapViewer extends JFrame {
             JOptionPane.showMessageDialog(this, "一覧から地点を選んでください");
             return;
         }
-        SpotDialog.Result r = SpotDialog.edit(this, mapNames(), s);
+        SpotDialog.Result r = SpotDialog.edit(this, mapNames(), this::monstersOf, s,
+                spotMonsters.getOrDefault(s.id(), List.of()));
         if (r == null) return;
         try {
             db.updateSpot(s.id(), r.name(), r.map(), r.x(), r.y(), r.radius(), r.kind(), r.note());
+            db.setSpotMonsters(s.id(), r.monsters());
             refresh();
         } catch (SQLException ex) {
             error("保存できません", ex);

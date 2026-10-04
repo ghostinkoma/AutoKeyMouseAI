@@ -414,3 +414,19 @@ def test_mapdb_records_cells_and_events(tmp_path):
     assert db.db.execute("SELECT kind FROM events").fetchall() == [("map_change",)]
     db.add_spot("hunt1", db.latest(), 8)
     assert db.db.execute("SELECT name, map, radius FROM spots").fetchone() == ("hunt1", "Lorencia", 8)
+
+
+def test_monster_table_parsing_with_rowspan():
+    from akm.monsters import extract_monsters, parse_tables
+
+    html = """<h2>一覧</h2><table>
+      <tr><th>Lv</th><th>モンスター名</th><th>出現マップ</th></tr>
+      <tr><td>2</td><td>スパイダー</td><td rowspan="2">ロレンシア</td></tr>
+      <tr><td>4</td><td>バッジドラゴン</td></tr>
+      <tr><td>８６</td><td>バハムート</td><td>アトランス1、アトランス2</td></tr>
+    </table>"""
+    m = extract_monsters(parse_tables(html))
+    assert {"name": "スパイダー", "level": 2, "map": "ロレンシア", "map_en": "Lorencia"} in m
+    assert {"name": "バッジドラゴン", "level": 4, "map": "ロレンシア", "map_en": "Lorencia"} in m
+    assert [x["map_en"] for x in m if x["name"] == "バハムート"] == ["Atlans", "Atlans"]
+    assert all(x["level"] == 86 for x in m if x["name"] == "バハムート")

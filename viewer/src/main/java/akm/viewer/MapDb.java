@@ -15,6 +15,11 @@ public final class MapDb implements AutoCloseable {
 
     public record Pos(String map, int x, int y, double ts) {}
     public record Spot(long id, String name, String map, int x, int y, int radius, String kind, String note) {}
+    public record Monster(String name, Integer level, String map) {
+        public String label(boolean withMap) {
+            return name + " (Lv" + (level == null ? "?" : level) + (withMap && map != null && !map.isEmpty() ? ", " + map : "") + ")";
+        }
+    }
     public record Event(double ts, String kind, String map, Integer x, Integer y, String detail) {}
 
     private final Connection conn;
@@ -107,7 +112,55 @@ public final class MapDb implements AutoCloseable {
         return out;
     }
 
-    public void addSpot(String name, String map, int x, int y, int radius, String kind, String note) throws SQLException {
+    /** そのマップのモンスター (レベル順)。map は英語名 (Atlans) でも取り込んだ時の名前 (アトランス1) でもよい。 */
+    public List<Monster> monsters(String map) throws SQLException {
+        List<Monster> out = new ArrayList<>();
+        if (!hasTable("monsters")) return out;
+        String sql = "SELECT name, MIN(level), map FROM monsters" + (map != null ? " WHERE map_en=? OR map=?" : "")
+                + " GROUP BY name" + (map != null ? "" : ", map") + " ORDER BY MIN(level), name";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (map != null) {
+                ps.setString(1, map);
+                ps.setString(2, map);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) out.add(new Monster(rs.getString(1), (Integer) rs.getObject(2), rs.getString(3)));
+            }
+        }
+        return out;
+    }
+
+    /** 地点ごとの狙うモンスター。 */
+    public java.util.Map<Long, List<String>> spotMonsters() throws SQLException {
+        java.util.Map<Long, List<String>> out = new java.util.HashMap<>();
+        if (!hasTable("spot_monsters")) return out;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT spot_id, monster FROM spot_monsters ORDER BY rowid")) {
+            while (rs.next()) out.computeIfAbsent(rs.getLong(1), k -> new ArrayList<>()).add(rs.getString(2));
+        }
+        return out;
+    }
+
+    public void setSpotMonsters(long spotId, List<String> names) throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE TABLE IF NOT EXISTS spot_monsters (spot_id INTEGER NOT NULL, monster TEXT NOT NULL, "
+                    + "PRIMARY KEY (spot_id, monster))");
+        }
+        try (PreparedStatement del = conn.prepareStatement("DELETE FROM spot_monsters WHERE spot_id=?")) {
+            del.setLong(1, spotId);
+            del.executeUpdate();
+        }
+        try (PreparedStatement ins = conn.prepareStatement("INSERT OR IGNORE INTO spot_monsters(spot_id, monster) VALUES (?,?)")) {
+            for (String n : names) {
+                ins.setLong(1, spotId);
+                ins.setString(2, n);
+                ins.executeUpdate();
+            }
+        }
+    }
+
+    /** 登録して ID を返す。 */
+    public long addSpot(String name, String map, int x, int y, int radius, String kind, String note) throws SQLException {
         ensureSpots();
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO spots(name, map, x, y, radius, kind, note, created) VALUES (?,?,?,?,?,?,?,?)")) {
@@ -120,6 +173,9 @@ public final class MapDb implements AutoCloseable {
             ps.setString(7, note);
             ps.setDouble(8, System.currentTimeMillis() / 1000.0);
             ps.executeUpdate();
+        }
+        try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT last_insert_rowid()")) {
+            return rs.next() ? rs.getLong(1) : -1;
         }
     }
 
@@ -152,6 +208,7 @@ public final class MapDb implements AutoCloseable {
             ps.setLong(1, id);
             ps.executeUpdate();
         }
+        if (hasTable("spot_monsters")) setSpotMonsters(id, List.of());
     }
 
     private boolean hasTable(String name) throws SQLException {
