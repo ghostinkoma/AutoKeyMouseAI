@@ -430,3 +430,23 @@ def test_monster_table_parsing_with_rowspan():
     assert {"name": "バッジドラゴン", "level": 4, "map": "ロレンシア", "map_en": "Lorencia", "icon": ""} in m
     assert [x["map_en"] for x in m if x["name"] == "バハムート"] == ["Atlans", "Atlans"]
     assert all(x["level"] == 86 for x in m if x["name"] == "バハムート")
+
+
+def test_monster_table_with_icon_column_like_munou2014():
+    from akm.monsters import extract_monsters, map_to_en, parse_tables
+
+    html = """<table><tr><td>モンスター</td></tr></table>
+    <table><caption>モンスター</caption>
+      <tr><th>レベル</th><th colspan="2">モンスター名</th><th>生命</th><th>出現マップ</th></tr>
+      <tr><td>2</td><td><img src="image/mon_s_lorncia1.jpg"></td><td>スパイダー</td><td>40</td><td>ロレンシア</td></tr>
+      <tr><td>3</td><td><img src="image/mon_s_noria1.jpg"></td><td>パージゴブリン</td><td>60</td><td>ノリア</td></tr>
+      <tr><td>80</td><td><img src="image/x.jpg"></td><td>バハムート</td><td>3000</td><td>アトランス</td></tr>
+    </table>"""
+    m = extract_monsters(parse_tables(html))
+    assert [(x["name"], x["level"], x["map_en"], x["icon"]) for x in m] == [
+        ("スパイダー", 2, "Lorencia", "image/mon_s_lorncia1.jpg"),
+        ("パージゴブリン", 3, "Noria", "image/mon_s_noria1.jpg"),
+        ("バハムート", 80, "Atlans", "image/x.jpg")]
+    assert map_to_en("カルリマ3") == "Kalima" and map_to_en("DS2") == "Devil Square"
+    assert map_to_en("奈落のアトランス") == "奈落のアトランス"  # Atlans と取り違えない
+    assert map_to_en("バルガス兵営") == "Barracks of Balgass" and map_to_en("ヴォルカノス") == "Vulcanus"

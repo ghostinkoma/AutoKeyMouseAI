@@ -14,15 +14,19 @@ from html.parser import HTMLParser
 MAP_JA = {
     "ロレンシア": "Lorencia", "ダンジョン": "Dungeon", "デビアス": "Devias", "ノリア": "Noria",
     "ロストタワー": "Lost Tower", "エクサイル": "Exile", "アリーナ": "Arena", "アトランス": "Atlans",
-    "タルカン": "Tarkan", "デビルスクエア": "Devil Square", "イカルス": "Icarus", "ブラッドキャッスル": "Blood Castle",
-    "カオスキャッスル": "Chaos Castle", "カリマ": "Kalima", "試練の地": "Land of Trials", "アイーダ": "Aida",
-    "クライウルフ": "Crywolf Fortress", "クライウルフ要塞": "Crywolf Fortress", "カントル": "Kanturu",
-    "カンツル": "Kanturu", "カントル遺跡": "Kanturu Relics", "カンツル遺跡": "Kanturu Relics",
-    "バルガス兵舎": "Barracks of Balgass", "バルガスの兵舎": "Barracks of Balgass", "避難所": "Balgass Refuge",
-    "幻影寺院": "Illusion Temple", "エルベランド": "Elbeland", "平穏の沼": "Swamp of Calmness",
-    "安息の沼": "Swamp of Calmness", "ラクリオン": "Raklion", "バルカヌス": "Vulcanus", "ヴァルカヌス": "Vulcanus",
+    "タルカン": "Tarkan", "デビルスクエア": "Devil Square", "DS": "Devil Square",
+    "イカルス": "Icarus", "イカロス": "Icarus", "ブラッドキャッスル": "Blood Castle", "BC": "Blood Castle",
+    "カオスキャッスル": "Chaos Castle", "CC": "Chaos Castle", "カリマ": "Kalima", "カルリマ": "Kalima",
+    "試練の地": "Land of Trials", "アイダ": "Aida", "アイーダ": "Aida",
+    "クライウルフ": "Crywolf Fortress", "クライウルフ要塞": "Crywolf Fortress", "ＣＷ攻防戦": "Crywolf Fortress",
+    "カントル": "Kanturu", "カンツル": "Kanturu", "カントル遺跡": "Kanturu Relics", "カンツル遺跡": "Kanturu Relics",
+    "バルガス兵舎": "Barracks of Balgass", "バルガス兵営": "Barracks of Balgass", "バルガスの兵舎": "Barracks of Balgass",
+    "バルガス安息所": "Balgass Refuge", "避難所": "Balgass Refuge",
+    "幻影寺院": "Illusion Temple", "IT": "Illusion Temple", "エルベランド": "Elbeland",
+    "平穏の沼": "Swamp of Calmness", "平穏の沼地": "Swamp of Calmness", "安息の沼": "Swamp of Calmness",
+    "ラクリオン": "Raklion", "バルカヌス": "Vulcanus", "ヴァルカヌス": "Vulcanus", "ヴォルカノス": "Vulcanus",
     "サンタ村": "Santa Village", "ドッペルゲンガー": "Doppelganger", "帝国守護要塞": "Imperial Guardian",
-    "ロレンマーケット": "Loren Market", "カルトゥラン": "Karutan", "カルタン": "Karutan",
+    "ロレンマーケット": "Loren Market", "カルタン": "Karutan", "カルトゥラン": "Karutan",
 }
 
 NAME_KEYS = ("モンスター", "名前", "名称", "monster", "name")
@@ -31,11 +35,17 @@ MAP_KEYS = ("マップ", "出現", "場所", "生息", "map", "location", "エ�
 
 
 def map_to_en(name: str) -> str:
-    """日本語のマップ名を英語に。末尾の数字 (アトランス2 など) や記号は外して照合する。"""
+    """日本語のマップ名をゲーム内の英語名に。末尾の番号 (カルリマ1, DS3 など) は外して照合する。
+
+    「奈落のアトランス」のような別マップを Atlans と取り違えないよう、完全一致か前方一致だけで判定する。
+    分からない名前はそのまま返す。
+    """
     s = re.sub(r"[\s　]+", "", name)
     base = re.sub(r"[0-9０-９\-－~〜・()（）]+$", "", s)
+    if base in MAP_JA:
+        return MAP_JA[base]
     for ja, en in sorted(MAP_JA.items(), key=lambda kv: -len(kv[0])):
-        if base.startswith(ja) or ja in base:
+        if len(ja) >= 3 and base.startswith(ja):
             return en
     return name.strip()
 
@@ -176,7 +186,11 @@ def extract_monsters(tables: list[dict]) -> list[dict]:
         if hi is None:
             continue
         header = rows[hi]
-        cn, cl, cm = _find_col(header, NAME_KEYS), _find_col(header, LEVEL_KEYS), _find_col(header, MAP_KEYS)
+        cl, cm = _find_col(header, LEVEL_KEYS), _find_col(header, MAP_KEYS)
+        # 「モンスター名」が 2 列 (アイコン + 名前) にまたがることがある: 文字の入っている列を選ぶ
+        name_cols = [i for i, h in enumerate(header) if any(k in h.lower() for k in NAME_KEYS)]
+        sample = rows[hi + 1: hi + 30]
+        cn = max(name_cols, key=lambda i: sum(1 for r in sample if i < len(r) and r[i].strip()))
         if cm == cn:
             cm = None
         for r, im in zip(rows[hi + 1:], imgs[hi + 1:]):
