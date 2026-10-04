@@ -209,7 +209,7 @@ def extract_monsters(tables: list[dict]) -> list[dict]:
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS monsters (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, level INTEGER, map TEXT NOT NULL DEFAULT '',
-    map_en TEXT NOT NULL DEFAULT '', source TEXT, updated REAL, icon TEXT, UNIQUE(name, map));
+    map_en TEXT NOT NULL DEFAULT '', source TEXT, updated REAL, icon TEXT, note TEXT, hp INTEGER, UNIQUE(name, map));
 CREATE TABLE IF NOT EXISTS spot_monsters (
     spot_id INTEGER NOT NULL, monster TEXT NOT NULL, PRIMARY KEY (spot_id, monster));
 """
@@ -218,8 +218,9 @@ CREATE TABLE IF NOT EXISTS spot_monsters (
 def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
     cols = [r[1] for r in db.execute("PRAGMA table_info(monsters)")]
-    if "icon" not in cols:  # 古い DB に列を足す
-        db.execute("ALTER TABLE monsters ADD COLUMN icon TEXT")
+    for col, typ in (("icon", "TEXT"), ("note", "TEXT"), ("hp", "INTEGER")):
+        if col not in cols:  # 古い DB に列を足す
+            db.execute(f"ALTER TABLE monsters ADD COLUMN {col} {typ}")
 
 
 def download_icons(monsters: list[dict], base_url: str | None, out_dir) -> int:
@@ -263,10 +264,12 @@ def save_monsters(db: sqlite3.Connection, monsters: list[dict], source: str) -> 
     ensure_schema(db)
     now = time.time()
     db.executemany(
-        "INSERT INTO monsters(name, level, map, map_en, source, updated, icon) VALUES (?,?,?,?,?,?,?) "
-        "ON CONFLICT(name, map) DO UPDATE SET level=excluded.level, map_en=excluded.map_en, "
-        "source=excluded.source, updated=excluded.updated, icon=COALESCE(NULLIF(excluded.icon, ''), monsters.icon)",
-        [(m["name"], m["level"], m["map"], m["map_en"], source, now, m.get("icon") or "") for m in monsters])
+        "INSERT INTO monsters(name, level, map, map_en, source, updated, icon, note, hp) VALUES (?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(name, map) DO UPDATE SET level=COALESCE(excluded.level, monsters.level), map_en=excluded.map_en, "
+        "source=excluded.source, updated=excluded.updated, icon=COALESCE(NULLIF(excluded.icon, ''), monsters.icon), "
+        "note=COALESCE(NULLIF(excluded.note, ''), monsters.note), hp=COALESCE(excluded.hp, monsters.hp)",
+        [(m["name"], m["level"], m["map"], m["map_en"], source, now, m.get("icon") or "", m.get("note") or "",
+          m.get("hp")) for m in monsters])
     db.commit()
     return len(monsters)
 
@@ -282,3 +285,74 @@ def fetch_html(url: str) -> str:
     if enc.lower() in ("shift_jis", "sjis", "x-sjis", "shift-jis"):
         enc = "cp932"
     return r.content.decode(enc, errors="replace")
+
+
+# ------------------------------------------------------------ 同梱データ --
+BUILTIN = __import__("pathlib").Path(__file__).resolve().parent / "data" / "monsters_munou2014.tsv"
+
+
+def load_builtin(path=BUILTIN) -> list[dict]:
+    """同梱のモンスター一覧 (レベル|名前|備考|生命|マップ/マップ...)。"""
+    out = []
+    for line in open(path, encoding="utf-8"):
+        line = line.rstrip("\n")
+        if not line.strip() or line.startswith("#"):
+            continue
+        lv, name, note, hp, maps = (line.split("|") + [""] * 5)[:5]
+        for mp in [m for m in maps.split("/") if m]:
+            out.append({"name": name, "level": int(lv) if lv.isdigit() else None, "map": mp,
+                        "map_en": map_to_en(mp), "icon": "", "note": note, "hp": int(hp) if hp.isdigit() else None})
+    return out
+
+
+def parse_pasted_text(text: str) -> list[dict]:
+    """ブラウザで表を選択してコピーしたテキスト (タブ区切り) を読む。
+
+    セルの中の改行 (「※レアキャラ」や複数の出現マップ) で 1 行が何行にも分かれるので、
+    レベルの数字で始まる行から次のレベル行までを 1 件としてつなげる。見出し行 (レベル…出現マップ) は飛ばす。
+    列: レベル, (アイコン), 名前, 生命, 最小攻撃力, 最大攻撃力, 防御力, 防御成功率, 攻撃成功率, 属性×3, 出現マップ…
+    """
+    records: list[list[str]] = []
+    in_header = False
+    for raw in text.splitlines():
+        line = raw.rstrip("\r")
+        if not line.strip():
+            continue
+        first = line.split("\t")[0].strip()
+        if first == "レベル":
+            in_header = "出現マップ" not in line
+            continue
+        if in_header:
+            if "出現マップ" in line:
+                in_header = False
+            continue
+        if re.fullmatch(r"[0-9０-９]+|[?？]", first) and "\t" in line:
+            records.append(line.split("\t"))
+        elif records:
+            records[-1].extend(line.split("\t"))
+    out = []
+    for f in records:
+        f = [c.strip() for c in f]
+        notes = [c.lstrip("※") for c in f if c.startswith("※")]
+        f = [c for c in f if not c.startswith("※")]
+        if len(f) < 4:
+            continue
+        lv = _level(f[0]) if f[0] not in ("?", "？") else None
+        name = f[2] if len(f) > 2 and f[2] else f[1]
+        hp = _level(f[3]) if len(f) > 3 else None
+        maps = [m for m in f[12:] if m] if len(f) > 12 else [f[-1]]
+        tags = [m for m in maps if m.upper() == "EVENT"]
+        maps = [m for m in maps if m.upper() != "EVENT"]
+        note = "、".join(notes + (["イベント"] if tags and not notes else []))
+        for mp in maps or [""]:
+            out.append({"name": name, "level": lv, "map": mp, "map_en": map_to_en(mp) if mp else "",
+                        "icon": "", "note": note, "hp": hp})
+    return out
+
+
+def ensure_builtin(db: sqlite3.Connection) -> int:
+    """モンスター一覧が空なら同梱データを入れる (ビューアのドロップダウンに最初から出るように)。"""
+    ensure_schema(db)
+    if db.execute("SELECT COUNT(*) FROM monsters").fetchone()[0]:
+        return 0
+    return save_monsters(db, load_builtin(), "builtin:munou2014")

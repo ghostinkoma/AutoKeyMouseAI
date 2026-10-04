@@ -450,3 +450,29 @@ def test_monster_table_with_icon_column_like_munou2014():
     assert map_to_en("カルリマ3") == "Kalima" and map_to_en("DS2") == "Devil Square"
     assert map_to_en("奈落のアトランス") == "奈落のアトランス"  # Atlans と取り違えない
     assert map_to_en("バルガス兵営") == "Barracks of Balgass" and map_to_en("ヴォルカノス") == "Vulcanus"
+
+
+def test_builtin_monsters_and_pasted_text():
+    from akm.monsters import load_builtin, parse_pasted_text
+
+    b = load_builtin()
+    names = {m["name"] for m in b}
+    assert len(names) > 320 and "スパイダー" in names and "バハムート" in names
+    assert {"Lorencia", "Atlans", "Kalima"} <= {m["map_en"] for m in b}
+    gp = [m for m in b if m["name"] == "ゴールドパージドラゴン"]
+    assert {m["map_en"] for m in gp} == {"Lorencia", "Noria", "Devias"} and gp[0]["note"] == "レアキャラ"
+
+    text = ("レベル\tモンスター名\t生命\t最小\n攻撃力\t最大\n攻撃力\t防御力\t防御\n成功率\t攻撃\n成功率\t属性\n"
+            "最小攻撃力\t属性\n最大攻撃力\t属性\n防御力\t出現マップ\n"
+            "2\t\tスパイダー\t40\t6\t8\t1\t1\t8\t-\t-\t-\tロレンシア\n"
+            "14\t\tゴールドパージドラゴン\n※レアキャラ\t4400\t120\t125\t90\t30\t75\t-\t-\t-\tロレンシア\nノリア\nデビアス\n"
+            "レベル\tモンスター名\t生命\t最小攻撃力\t最大攻撃力\t防御力\t防御成功率\t攻撃成功率\t属性\n最小攻撃力\t属性\n"
+            "最大攻撃力\t属性\n防御力\t出現マップ\n"
+            "30\t-\tデスキング\n※レアキャラ\t3600\t105\t110\t74\t37\t150\t-\t-\t-\tロレンシア\nノリア\nロストタワー\n"
+            "?\t\t福袋\t?\t?\t?\t?\t?\t?\t?\t/\t/\tアイダ\nロストタワー\nEVENT\n")
+    p = parse_pasted_text(text)
+    assert ("スパイダー", 2, "Lorencia", 40) in [(m["name"], m["level"], m["map_en"], m["hp"]) for m in p]
+    assert [m["map_en"] for m in p if m["name"] == "ゴールドパージドラゴン"] == ["Lorencia", "Noria", "Devias"]
+    assert [m["map"] for m in p if m["name"] == "デスキング"] == ["ロレンシア", "ノリア", "ロストタワー"]
+    assert [m["map"] for m in p if m["name"] == "福袋"] == ["アイダ", "ロストタワー"]
+    assert all(m["note"] == "レアキャラ" for m in p if m["name"] == "デスキング")

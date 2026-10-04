@@ -162,7 +162,7 @@ public final class SpotDialog extends JDialog {
             if (mon.name().equals(keepName)) select = mon;
         }
         if (select == NONE && keepName != null) {  // 一覧に無い名前 (以前に手入力したものなど)
-            MapDb.Monster extra = new MapDb.Monster(keepName, null, mapName, null);
+            MapDb.Monster extra = new MapDb.Monster(keepName, null, mapName, null, null);
             monsterBox.addItem(extra);
             select = extra;
         }
@@ -176,7 +176,8 @@ public final class SpotDialog extends JDialog {
         Object v = monsterBox.getSelectedItem();
         if (v instanceof MapDb.Monster m) {
             preview.setIcon(icon(m, 96));
-            preview.setText("<html>" + m.name() + "<br>Lv " + (m.level() == null ? "?" : m.level())
+            preview.setText("<html>" + m.name() + (m.note() == null || m.note().isEmpty() ? "" : " <small>※" + m.note() + "</small>")
+                    + "<br>Lv " + (m.level() == null ? "?" : m.level())
                     + (m.map() == null || m.map().isEmpty() ? "" : "<br>" + m.map()) + "</html>");
         } else {
             preview.setIcon(null);

@@ -265,9 +265,9 @@ class MapDB:
         self.db = sqlite3.connect(str(self.path))
         self.db.execute("PRAGMA journal_mode=WAL")  # 記録中でもビューアが読めるように
         self.db.executescript(SCHEMA)
-        from .monsters import ensure_schema
+        from .monsters import ensure_builtin
 
-        ensure_schema(self.db)  # モンスター一覧と狩場の狙うモンスター
+        ensure_builtin(self.db)  # モンスター一覧 (空なら同梱データ) と狩場の狙うモンスター
         self.heartbeat_s = heartbeat_s
         self.interp_max = interp_max
         self.last: Location | None = None

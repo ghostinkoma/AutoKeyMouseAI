@@ -268,10 +268,13 @@ java -jar D:\hobby\AutoKeyMouseAI\viewer\mapviewer.jar D:\hobby\AutoKeyMouseAI\p
   名前・種類 (狩場 / 薬屋 / 街 / 安全地帯 / その他)・マップ・座標・半径・メモを入力して「登録」
 * 右側の一覧で 追加 / 編集 / 削除 / 地図で見る。地図の右クリックで地点の中心を移すこともできる
 * **狙うモンスター**: 登録画面の「モンスター」のドロップダウンに、そのマップに出るモンスター (アイコン・レベル付き) が出る。
-  選ぶと大きなアイコンが表示され、「登録」で完了。モンスター一覧とアイコンは Web ページから取り込む:
+  選ぶと大きなアイコンが表示され、「登録」で完了。
+  モンスター一覧 (無[MU]脳2014 の約 380 種) は同梱していて、DB を開いたときに空なら自動で入る。
+  アイコン画像や最新の一覧は取り込みで追加・更新する:
   ```powershell
-  python tools\import_monsters.py http://munou2014.web.fc2.com/mon_lv.html
-  python tools\import_monsters.py URL --dump     # 取り込めないとき: 表の中身を表示
+  python tools\import_monsters.py http://munou2014.web.fc2.com/mon_lv.html   # アイコン画像も取得
+  python tools\import_monsters.py --text paste.txt   # ブラウザで表を選択してコピーしたテキストから
+  python tools\import_monsters.py                    # 同梱の一覧を入れ直す
   ```
   日本語のマップ名 (アトランス1 など) はゲーム内の英語名 (Atlans) に変換して突き合わせる
 * ビルドし直す場合: `cd viewer` → `mvn package` → `target\mapviewer.jar`

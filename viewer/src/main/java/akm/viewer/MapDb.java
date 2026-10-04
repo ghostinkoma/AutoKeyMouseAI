@@ -16,9 +16,10 @@ public final class MapDb implements AutoCloseable {
     public record Pos(String map, int x, int y, double ts) {}
     public record Spot(long id, String name, String map, int x, int y, int radius, String kind, String note) {}
     /** icon はアイコン画像の絶対パス (無ければ null)。 */
-    public record Monster(String name, Integer level, String map, String icon) {
+    public record Monster(String name, Integer level, String map, String icon, String note) {
         public String label(boolean withMap) {
-            return name + " (Lv" + (level == null ? "?" : level) + (withMap && map != null && !map.isEmpty() ? ", " + map : "") + ")";
+            return name + " (Lv" + (level == null ? "?" : level) + (withMap && map != null && !map.isEmpty() ? ", " + map : "") + ")"
+                    + (note == null || note.isEmpty() ? "" : " ※" + note);
         }
     }
     public record Event(double ts, String kind, String map, Integer x, Integer y, String detail) {}
@@ -32,6 +33,57 @@ public final class MapDb implements AutoCloseable {
         try (Statement st = conn.createStatement()) {
             st.execute("PRAGMA busy_timeout=3000"); // Python が書き込み中なら少し待つ
         }
+        try {
+            ensureBuiltinMonsters();
+        } catch (Exception e) {
+            System.err.println("モンスター一覧を入れられません: " + e);
+        }
+    }
+
+    /** モンスター一覧が空なら jar に同梱の一覧 (無[MU]脳2014) を入れる。狩場登録のドロップダウンに最初から出るように。 */
+    public int ensureBuiltinMonsters() throws Exception {
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE TABLE IF NOT EXISTS monsters (id INTEGER PRIMARY KEY, name TEXT NOT NULL, level INTEGER, "
+                    + "map TEXT NOT NULL DEFAULT '', map_en TEXT NOT NULL DEFAULT '', source TEXT, updated REAL, icon TEXT, "
+                    + "note TEXT, hp INTEGER, UNIQUE(name, map))");
+            for (String[] c : new String[][] {{"icon", "TEXT"}, {"note", "TEXT"}, {"hp", "INTEGER"}})
+                if (!hasColumn("monsters", c[0])) st.execute("ALTER TABLE monsters ADD COLUMN " + c[0] + " " + c[1]);
+            try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM monsters")) {
+                if (rs.next() && rs.getInt(1) > 0) return 0;
+            }
+        }
+        java.io.InputStream in = MapDb.class.getResourceAsStream("monsters.tsv");
+        if (in == null) return 0;
+        int n = 0;
+        boolean auto = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+             PreparedStatement ps = conn.prepareStatement(
+                     "INSERT OR IGNORE INTO monsters(name, level, map, map_en, source, updated, note, hp) VALUES (?,?,?,?,?,?,?,?)")) {
+            String line;
+            double now = System.currentTimeMillis() / 1000.0;
+            while ((line = r.readLine()) != null) {
+                if (line.isBlank() || line.startsWith("#")) continue;
+                String[] f = line.split("\\|", -1);
+                if (f.length < 6) continue;
+                ps.setString(1, f[1]);
+                if (f[0].matches("\\d+")) ps.setInt(2, Integer.parseInt(f[0])); else ps.setNull(2, java.sql.Types.INTEGER);
+                ps.setString(3, f[4]);
+                ps.setString(4, f[5]);
+                ps.setString(5, "builtin:munou2014");
+                ps.setDouble(6, now);
+                ps.setString(7, f[2]);
+                if (f[3].matches("\\d+")) ps.setLong(8, Long.parseLong(f[3])); else ps.setNull(8, java.sql.Types.INTEGER);
+                n += ps.executeUpdate();
+            }
+            conn.commit();
+        } catch (Exception e) {
+            conn.rollback();
+            throw e;
+        } finally {
+            conn.setAutoCommit(auto);
+        }
+        return n;
     }
 
     public List<String> maps() throws SQLException {
@@ -118,16 +170,18 @@ public final class MapDb implements AutoCloseable {
         List<Monster> out = new ArrayList<>();
         if (!hasTable("monsters")) return out;
         boolean hasIcon = hasColumn("monsters", "icon");
-        String sql = "SELECT name, MIN(level), map, " + (hasIcon ? "MAX(icon)" : "NULL") + " FROM monsters"
+        boolean hasNote = hasColumn("monsters", "note");
+        String sql = "SELECT name, MIN(level), map, " + (hasIcon ? "MAX(icon)" : "NULL") + ", "
+                + (hasNote ? "MAX(note)" : "NULL") + " FROM monsters"
                 + (map != null ? " WHERE map_en=? OR map=?" : "")
-                + " GROUP BY name" + (map != null ? "" : ", map") + " ORDER BY MIN(level), name";
+                + " GROUP BY name" + (map != null ? "" : ", map") + " ORDER BY MIN(level) IS NULL, MIN(level), name";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             if (map != null) {
                 ps.setString(1, map);
                 ps.setString(2, map);
             }
             try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) out.add(new Monster(rs.getString(1), (Integer) rs.getObject(2), rs.getString(3), iconPath(rs.getString(4))));
+                while (rs.next()) out.add(new Monster(rs.getString(1), (Integer) rs.getObject(2), rs.getString(3), iconPath(rs.getString(4)), rs.getString(5)));
             }
         }
         return out;
