@@ -49,6 +49,7 @@ class _TableParser(HTMLParser):
         self._stack: list[dict] = []
         self._cell: list[str] | None = None
         self._cell_span = (1, 1)
+        self._row_imgs: list[str] = []
         self._heading: list[str] | None = None
         self.last_heading = ""
 
@@ -57,9 +58,12 @@ class _TableParser(HTMLParser):
         if tag in ("h1", "h2", "h3", "h4", "caption"):
             self._heading = []
         elif tag == "table":
-            self._stack.append({"rows": [], "row": None, "spans": {}, "heading": self.last_heading})
+            self._stack.append({"rows": [], "imgs": [], "row": None, "spans": {}, "heading": self.last_heading})
         elif tag == "tr" and self._stack:
             self._stack[-1]["row"] = []
+            self._row_imgs = []
+        elif tag == "img" and self._cell is not None and a.get("src"):
+            self._row_imgs.append(a["src"])
         elif tag in ("td", "th") and self._stack:
             self._cell = []
             try:
@@ -92,10 +96,11 @@ class _TableParser(HTMLParser):
             t = self._stack[-1]
             self._fill_spans(t, upto=None)
             t["rows"].append([c if c is not None else "" for c in t["row"]])
+            t["imgs"].append(list(self._row_imgs))
             t["row"] = None
         elif tag == "table" and self._stack:
             t = self._stack.pop()
-            self.tables.append({"heading": t["heading"], "rows": t["rows"]})
+            self.tables.append({"heading": t["heading"], "rows": t["rows"], "imgs": t["imgs"]})
 
     def _next_col(self, t):
         self._fill_spans(t, upto=len(t["row"]))
@@ -156,7 +161,10 @@ def extract_monsters(tables: list[dict]) -> list[dict]:
     """表から {name, level, map, map_en} の一覧を作る。列は見出しの文字で判定する。"""
     out = []
     for t in tables:
-        rows = [r for r in t["rows"] if any(c for c in r)]
+        imgs_all = t.get("imgs") or [[] for _ in t["rows"]]
+        pairs = [(r, im) for r, im in zip(t["rows"], imgs_all) if any(c for c in r) or im]
+        rows = [r for r, _ in pairs]
+        imgs = [im for _, im in pairs]
         if len(rows) < 2:
             continue
         # 見出し行: 名前とレベルの列が見つかる最初の行
@@ -171,35 +179,80 @@ def extract_monsters(tables: list[dict]) -> list[dict]:
         cn, cl, cm = _find_col(header, NAME_KEYS), _find_col(header, LEVEL_KEYS), _find_col(header, MAP_KEYS)
         if cm == cn:
             cm = None
-        for r in rows[hi + 1:]:
+        for r, im in zip(rows[hi + 1:], imgs[hi + 1:]):
             if cn >= len(r) or not r[cn] or r == header:
                 continue
+            icon = im[0] if im else ""
             name = r[cn].strip()
             lv = _level(r[cl]) if cl is not None and cl < len(r) else None
             maps = r[cm] if cm is not None and cm < len(r) else t["heading"]
             # 「アトランス、カリマ」のように複数書かれていることがある
             for mp in [m.strip() for m in re.split(r"[、,/／・\s]+", maps or "") if m.strip()] or [""]:
-                out.append({"name": name, "level": lv, "map": mp, "map_en": map_to_en(mp) if mp else ""})
+                out.append({"name": name, "level": lv, "map": mp, "map_en": map_to_en(mp) if mp else "", "icon": icon})
     return out
 
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS monsters (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, level INTEGER, map TEXT NOT NULL DEFAULT '',
-    map_en TEXT NOT NULL DEFAULT '', source TEXT, updated REAL, UNIQUE(name, map));
+    map_en TEXT NOT NULL DEFAULT '', source TEXT, updated REAL, icon TEXT, UNIQUE(name, map));
 CREATE TABLE IF NOT EXISTS spot_monsters (
     spot_id INTEGER NOT NULL, monster TEXT NOT NULL, PRIMARY KEY (spot_id, monster));
 """
 
 
-def save_monsters(db: sqlite3.Connection, monsters: list[dict], source: str) -> int:
+def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
+    cols = [r[1] for r in db.execute("PRAGMA table_info(monsters)")]
+    if "icon" not in cols:  # 古い DB に列を足す
+        db.execute("ALTER TABLE monsters ADD COLUMN icon TEXT")
+
+
+def download_icons(monsters: list[dict], base_url: str | None, out_dir) -> int:
+    """アイコン画像 (ページの <img>) を out_dir に保存し、m["icon"] を保存先のファイル名にする。"""
+    import hashlib
+    from pathlib import Path
+    from urllib.parse import urljoin
+
+    import requests
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache: dict[str, str] = {}
+    n = 0
+    for m in monsters:
+        src = m.get("icon") or ""
+        if not src:
+            continue
+        url = urljoin(base_url, src) if base_url else src
+        if url not in cache:
+            ext = Path(url.split("?")[0]).suffix.lower() or ".png"
+            if ext not in (".png", ".gif", ".jpg", ".jpeg", ".bmp"):
+                ext = ".png"
+            fname = hashlib.sha1(url.encode()).hexdigest()[:16] + ext
+            path = out_dir / fname
+            try:
+                if not path.exists():
+                    r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                    r.raise_for_status()
+                    path.write_bytes(r.content)
+                    n += 1
+                cache[url] = f"{out_dir.name}/{fname}"  # DB からの相対パス
+            except Exception as e:
+                print(f"[monsters] アイコンを取得できません: {url} ({e})")
+                cache[url] = ""
+        m["icon"] = cache[url]
+    return n
+
+
+def save_monsters(db: sqlite3.Connection, monsters: list[dict], source: str) -> int:
+    ensure_schema(db)
     now = time.time()
     db.executemany(
-        "INSERT INTO monsters(name, level, map, map_en, source, updated) VALUES (?,?,?,?,?,?) "
+        "INSERT INTO monsters(name, level, map, map_en, source, updated, icon) VALUES (?,?,?,?,?,?,?) "
         "ON CONFLICT(name, map) DO UPDATE SET level=excluded.level, map_en=excluded.map_en, "
-        "source=excluded.source, updated=excluded.updated",
-        [(m["name"], m["level"], m["map"], m["map_en"], source, now) for m in monsters])
+        "source=excluded.source, updated=excluded.updated, icon=COALESCE(NULLIF(excluded.icon, ''), monsters.icon)",
+        [(m["name"], m["level"], m["map"], m["map_en"], source, now, m.get("icon") or "") for m in monsters])
     db.commit()
     return len(monsters)
 

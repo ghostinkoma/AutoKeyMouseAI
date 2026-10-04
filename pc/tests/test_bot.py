@@ -421,12 +421,12 @@ def test_monster_table_parsing_with_rowspan():
 
     html = """<h2>一覧</h2><table>
       <tr><th>Lv</th><th>モンスター名</th><th>出現マップ</th></tr>
-      <tr><td>2</td><td>スパイダー</td><td rowspan="2">ロレンシア</td></tr>
+      <tr><td>2</td><td><img src="img/spider.gif">スパイダー</td><td rowspan="2">ロレンシア</td></tr>
       <tr><td>4</td><td>バッジドラゴン</td></tr>
       <tr><td>８６</td><td>バハムート</td><td>アトランス1、アトランス2</td></tr>
     </table>"""
     m = extract_monsters(parse_tables(html))
-    assert {"name": "スパイダー", "level": 2, "map": "ロレンシア", "map_en": "Lorencia"} in m
-    assert {"name": "バッジドラゴン", "level": 4, "map": "ロレンシア", "map_en": "Lorencia"} in m
+    assert {"name": "スパイダー", "level": 2, "map": "ロレンシア", "map_en": "Lorencia", "icon": "img/spider.gif"} in m
+    assert {"name": "バッジドラゴン", "level": 4, "map": "ロレンシア", "map_en": "Lorencia", "icon": ""} in m
     assert [x["map_en"] for x in m if x["name"] == "バハムート"] == ["Atlans", "Atlans"]
     assert all(x["level"] == 86 for x in m if x["name"] == "バハムート")

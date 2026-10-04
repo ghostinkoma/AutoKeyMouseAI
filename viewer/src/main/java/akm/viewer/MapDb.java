@@ -15,7 +15,8 @@ public final class MapDb implements AutoCloseable {
 
     public record Pos(String map, int x, int y, double ts) {}
     public record Spot(long id, String name, String map, int x, int y, int radius, String kind, String note) {}
-    public record Monster(String name, Integer level, String map) {
+    /** icon はアイコン画像の絶対パス (無ければ null)。 */
+    public record Monster(String name, Integer level, String map, String icon) {
         public String label(boolean withMap) {
             return name + " (Lv" + (level == null ? "?" : level) + (withMap && map != null && !map.isEmpty() ? ", " + map : "") + ")";
         }
@@ -116,7 +117,9 @@ public final class MapDb implements AutoCloseable {
     public List<Monster> monsters(String map) throws SQLException {
         List<Monster> out = new ArrayList<>();
         if (!hasTable("monsters")) return out;
-        String sql = "SELECT name, MIN(level), map FROM monsters" + (map != null ? " WHERE map_en=? OR map=?" : "")
+        boolean hasIcon = hasColumn("monsters", "icon");
+        String sql = "SELECT name, MIN(level), map, " + (hasIcon ? "MAX(icon)" : "NULL") + " FROM monsters"
+                + (map != null ? " WHERE map_en=? OR map=?" : "")
                 + " GROUP BY name" + (map != null ? "" : ", map") + " ORDER BY MIN(level), name";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             if (map != null) {
@@ -124,7 +127,7 @@ public final class MapDb implements AutoCloseable {
                 ps.setString(2, map);
             }
             try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) out.add(new Monster(rs.getString(1), (Integer) rs.getObject(2), rs.getString(3)));
+                while (rs.next()) out.add(new Monster(rs.getString(1), (Integer) rs.getObject(2), rs.getString(3), iconPath(rs.getString(4))));
             }
         }
         return out;
@@ -209,6 +212,21 @@ public final class MapDb implements AutoCloseable {
             ps.executeUpdate();
         }
         if (hasTable("spot_monsters")) setSpotMonsters(id, List.of());
+    }
+
+    /** DB からの相対パスを絶対パスに (アイコンは DB と同じフォルダの monster_icons/ に保存される)。 */
+    private String iconPath(String rel) {
+        if (rel == null || rel.isEmpty()) return null;
+        java.io.File f = new java.io.File(rel);
+        if (!f.isAbsolute()) f = new java.io.File(new java.io.File(path).getAbsoluteFile().getParentFile(), rel);
+        return f.exists() ? f.getPath() : null;
+    }
+
+    private boolean hasColumn(String table, String col) throws SQLException {
+        try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) if (col.equalsIgnoreCase(rs.getString("name"))) return true;
+        }
+        return false;
     }
 
     private boolean hasTable(String name) throws SQLException {

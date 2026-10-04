@@ -6,13 +6,22 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Window;
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Font;
+import java.awt.Graphics2D;
+import java.awt.Image;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import javax.swing.DefaultListCellRenderer;
+import javax.swing.ImageIcon;
+import javax.swing.SwingConstants;
 import java.util.List;
 import java.util.function.Function;
-import javax.swing.DefaultListModel;
 import javax.swing.JButton;
-import javax.swing.JList;
-import javax.swing.JScrollPane;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JDialog;
@@ -39,8 +48,11 @@ public final class SpotDialog extends JDialog {
     private final JSpinner y = new JSpinner(new SpinnerNumberModel(0, 0, 255, 1));
     private final JSpinner radius = new JSpinner(new SpinnerNumberModel(8, 1, 60, 1));
     private final JTextField note = new JTextField(22);
-    private final JComboBox<String> monsterBox = new JComboBox<>();
-    private final DefaultListModel<String> chosen = new DefaultListModel<>();
+    private final JComboBox<Object> monsterBox = new JComboBox<>();
+    private final JLabel preview = new JLabel();
+    private static final String NONE = "(なし)";
+    private static final Map<String, ImageIcon> ICONS = new HashMap<>();
+    private String initialMonster;
     private final Function<String, List<MapDb.Monster>> monsterSource;
     private Result result;
 
@@ -60,7 +72,7 @@ public final class SpotDialog extends JDialog {
             y.setValue(init.y());
             radius.setValue(init.radius());
             note.setText(init.note() == null ? "" : init.note());
-            for (String m : initMonsters) chosen.addElement(m);
+            initialMonster = initMonsters.isEmpty() ? null : initMonsters.get(0);
         } else {
             map.setSelectedItem(defMap);
             x.setValue(clamp(defX));
@@ -88,27 +100,32 @@ public final class SpotDialog extends JDialog {
         row = addRow(form, c, row, "半径", rp);
         row = addRow(form, c, row, "メモ", note);
 
-        // 狙うモンスター: マップに出るモンスターをドロップダウンから選んで追加 (一覧に無ければ手入力)
-        monsterBox.setEditable(true);
-        monsterBox.setPreferredSize(new java.awt.Dimension(260, monsterBox.getPreferredSize().height));
+        // 狙うモンスター: ドロップダウンから選ぶとアイコンが出る。登録ボタンでそのまま保存
+        monsterBox.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(javax.swing.JList<?> list, Object value, int index,
+                                                          boolean selected, boolean focus) {
+                JLabel l = (JLabel) super.getListCellRendererComponent(list, value, index, selected, focus);
+                if (value instanceof MapDb.Monster m) {
+                    l.setText(m.label(showMap));
+                    l.setIcon(icon(m, 24));
+                } else {
+                    l.setIcon(null);
+                }
+                return l;
+            }
+        });
+        monsterBox.setPreferredSize(new java.awt.Dimension(300, 30));
+        monsterBox.setMaximumRowCount(16);
+        monsterBox.addActionListener(e -> updatePreview());
         reloadMonsters();
         map.addActionListener(e -> reloadMonsters());
-        JButton addMon = new JButton("追加");
-        addMon.addActionListener(e -> addMonster());
-        JPanel monRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        monRow.add(monsterBox);
-        monRow.add(addMon);
-        row = addRow(form, c, row, "モンスター", monRow);
-        JList<String> chosenView = new JList<>(chosen);
-        chosenView.setVisibleRowCount(4);
-        JButton delMon = new JButton("選んだものを外す");
-        delMon.addActionListener(e -> {
-            for (String v : chosenView.getSelectedValuesList()) chosen.removeElement(v);
-        });
-        JPanel monList = new JPanel(new BorderLayout(4, 0));
-        monList.add(new JScrollPane(chosenView), BorderLayout.CENTER);
-        monList.add(delMon, BorderLayout.EAST);
-        addRow(form, c, row, "狙う一覧", monList);
+        row = addRow(form, c, row, "モンスター", monsterBox);
+        preview.setPreferredSize(new java.awt.Dimension(300, 110));
+        preview.setHorizontalAlignment(SwingConstants.LEFT);
+        preview.setFont(preview.getFont().deriveFont(Font.BOLD, 14f));
+        addRow(form, c, row, "", preview);
+        updatePreview();
 
         JButton ok = new JButton(init == null ? "登録" : "保存");
         JButton cancel = new JButton("キャンセル");
@@ -126,26 +143,75 @@ public final class SpotDialog extends JDialog {
         setLocationRelativeTo(owner);
     }
 
+    private boolean showMap;
+
     /** 選ばれているマップのモンスターをドロップダウンに入れる。そのマップの登録が無ければ全モンスター。 */
     private void reloadMonsters() {
         Object m = map.getEditor().getItem();
         String mapName = m == null ? "" : m.toString().trim();
+        Object keep = monsterBox.getSelectedItem();
+        String keepName = keep instanceof MapDb.Monster km ? km.name() : initialMonster;
         List<MapDb.Monster> list = monsterSource.apply(mapName);
-        boolean all = list.isEmpty();
-        if (all) list = monsterSource.apply(null);
+        showMap = list.isEmpty();
+        if (showMap) list = monsterSource.apply(null);
         monsterBox.removeAllItems();
-        for (MapDb.Monster mon : list) monsterBox.addItem(mon.label(all));
-        monsterBox.setSelectedItem("");
-        monsterBox.setToolTipText(all ? "このマップのモンスターが登録されていないので全マップを表示しています"
-                : mapName + " に出るモンスター (" + list.size() + ")");
+        monsterBox.addItem(NONE);
+        Object select = NONE;
+        for (MapDb.Monster mon : list) {
+            monsterBox.addItem(mon);
+            if (mon.name().equals(keepName)) select = mon;
+        }
+        if (select == NONE && keepName != null) {  // 一覧に無い名前 (以前に手入力したものなど)
+            MapDb.Monster extra = new MapDb.Monster(keepName, null, mapName, null);
+            monsterBox.addItem(extra);
+            select = extra;
+        }
+        monsterBox.setSelectedItem(select);
+        monsterBox.setToolTipText(list.isEmpty() ? "モンスター一覧がありません (python tools\\import_monsters.py で取り込み)"
+                : showMap ? "このマップのモンスターが無いので全マップを表示しています" : mapName + " に出るモンスター " + list.size() + " 種");
+        updatePreview();
     }
 
-    private void addMonster() {
-        Object v = monsterBox.getEditor().getItem();
-        String name = v == null ? "" : v.toString().trim();
-        name = name.replaceFirst("\\s*\\(Lv[^)]*\\)\\s*$", "");  // "バハムート (Lv86)" → "バハムート"
-        if (!name.isEmpty() && !chosen.contains(name)) chosen.addElement(name);
-        monsterBox.setSelectedItem("");
+    private void updatePreview() {
+        Object v = monsterBox.getSelectedItem();
+        if (v instanceof MapDb.Monster m) {
+            preview.setIcon(icon(m, 96));
+            preview.setText("<html>" + m.name() + "<br>Lv " + (m.level() == null ? "?" : m.level())
+                    + (m.map() == null || m.map().isEmpty() ? "" : "<br>" + m.map()) + "</html>");
+        } else {
+            preview.setIcon(null);
+            preview.setText(monsterBox.getItemCount() <= 1 ? "モンスター一覧が未登録です" : "");
+        }
+    }
+
+    /** モンスターのアイコン。画像が無ければ頭文字の丸を描く。 */
+    static ImageIcon icon(MapDb.Monster m, int size) {
+        String key = m.name() + "|" + m.icon() + "|" + size;
+        return ICONS.computeIfAbsent(key, k -> {
+            if (m.icon() != null) {
+                ImageIcon raw = new ImageIcon(m.icon());
+                if (raw.getIconWidth() > 0) {
+                    double sc = Math.min(size / (double) raw.getIconWidth(), size / (double) raw.getIconHeight());
+                    if (size >= 64) sc = Math.min(sc, 3.0);  // 小さな画像は引き伸ばしすぎない
+                    int w = Math.max(1, (int) (raw.getIconWidth() * sc)), h = Math.max(1, (int) (raw.getIconHeight() * sc));
+                    return new ImageIcon(raw.getImage().getScaledInstance(w, h, Image.SCALE_SMOOTH));
+                }
+            }
+            BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g = img.createGraphics();
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+            float hue = (m.name().hashCode() & 0xffff) / 65535f;
+            g.setColor(Color.getHSBColor(hue, 0.55f, 0.75f));
+            g.fillOval(1, 1, size - 2, size - 2);
+            g.setColor(Color.WHITE);
+            g.setFont(new Font(Font.DIALOG, Font.BOLD, (int) (size * 0.5)));
+            String t = m.name().isEmpty() ? "?" : m.name().substring(0, 1);
+            var fm = g.getFontMetrics();
+            g.drawString(t, (size - fm.stringWidth(t)) / 2, (size - fm.getHeight()) / 2 + fm.getAscent());
+            g.dispose();
+            return new ImageIcon(img);
+        });
     }
 
     private static int addRow(JPanel p, GridBagConstraints c, int row, String label, JComponent comp) {
@@ -167,7 +233,7 @@ public final class SpotDialog extends JDialog {
             return;
         }
         List<String> mons = new ArrayList<>();
-        for (int i = 0; i < chosen.size(); i++) mons.add(chosen.get(i));
+        if (monsterBox.getSelectedItem() instanceof MapDb.Monster sel) mons.add(sel.name());
         result = new Result(name.getText().trim(), KINDS[kind.getSelectedIndex()][0], mapName,
                 (Integer) x.getValue(), (Integer) y.getValue(), (Integer) radius.getValue(), note.getText().trim(), mons);
         dispose();

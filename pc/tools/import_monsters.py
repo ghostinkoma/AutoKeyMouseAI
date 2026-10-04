@@ -15,7 +15,7 @@ from pathlib import Path
 import _path  # noqa: F401
 
 from akm.config import PC_DIR, load_config
-from akm.monsters import extract_monsters, fetch_html, parse_tables, save_monsters
+from akm.monsters import download_icons, extract_monsters, fetch_html, parse_tables, save_monsters
 
 
 def main() -> None:
@@ -51,6 +51,12 @@ def main() -> None:
     cfg = load_config("config.yaml")
     db_path = PC_DIR / (cfg.get("maplog") or {}).get("db", "data/mu_map.db")
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    with_img = sum(1 for m in mons if m.get("icon"))
+    if with_img:
+        got = download_icons(mons, args.url, db_path.parent / "monster_icons")
+        print(f"[monsters] アイコン画像 {got} 枚を取得 ({db_path.parent / 'monster_icons'})")
+    else:
+        print("[monsters] ページにアイコン画像がありませんでした (ビューアでは名前の頭文字を表示します)")
     db = sqlite3.connect(str(db_path))
     n = save_monsters(db, mons, args.url or args.file)
     db.close()
