@@ -17,6 +17,10 @@ from akm.screen import GameScreen
 def main() -> None:
     cfg = load_config("config.yaml")
     screen = GameScreen.from_config(cfg)
+    obs = cfg.get("obs") or {}
+    print(f"[mirror] 設定: game.capture={cfg['game'].get('capture', 'auto')}  "
+          + (f"obs=有効 (source={obs.get('source')}, port={obs.get('port', 4455)})" if obs.get("enabled") else
+             "obs=無効 (config.yaml に obs: が無いか enabled: false)"))
     screen.locate()
     mcfg = cfg.get("mirror") or {}
     host = (cfg.get("device") or {}).get("host")
