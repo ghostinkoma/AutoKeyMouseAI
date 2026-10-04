@@ -39,6 +39,25 @@ def main() -> None:
     print(f"[monsters] 表 {len(tables)} 個")
 
     if args.dump:
+        import re
+
+        out = PC_DIR / "data" / "monster_page.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html, encoding="utf-8")
+        low = html.lower()
+        print(f"[dump] HTML を保存しました: {out}  ({len(html)} 文字)")
+        print(f"[dump] タグの数: table={low.count('<table')} tr={low.count('<tr')} td={low.count('<td')} "
+              f"img={low.count('<img')} div={low.count('<div')} frame={low.count('<frame') + low.count('<iframe')} "
+              f"script={low.count('<script')}")
+        srcs = re.findall(r'<img[^>]+src=["\']?([^"\' >]+)', html, re.I)
+        print(f"[dump] 画像の例: {srcs[:8]}")
+        frames = re.findall(r'<i?frame[^>]+src=["\']?([^"\' >]+)', html, re.I)
+        if frames:
+            print(f"[dump] フレームの中身は別ページです: {frames}")
+        text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.S | re.I)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        print(f"[dump] 本文の先頭: {text[:600]}")
         for i, t in enumerate(tables):
             print(f"\n--- 表 {i}  見出し: {t['heading']!r}  {len(t['rows'])} 行")
             for r in t["rows"][:6]:
