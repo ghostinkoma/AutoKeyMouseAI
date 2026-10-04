@@ -9,13 +9,14 @@ import time
 
 import _path  # noqa: F401
 
-from akm.config import load_config
+from akm.config import ask_obs_password, load_config
 from akm.mirror import Mirror
 from akm.screen import GameScreen
 
 
 def main() -> None:
     cfg = load_config("config.yaml")
+    ask_obs_password(cfg, "config.yaml")
     screen = GameScreen.from_config(cfg)
     obs = cfg.get("obs") or {}
     print(f"[mirror] 設定: game.capture={cfg['game'].get('capture', 'auto')}  "

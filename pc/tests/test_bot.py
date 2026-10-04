@@ -361,3 +361,16 @@ def test_obs_image_is_cropped_to_client_area():
     assert out.shape == (1050, 1680, 3) and out.min() == 100
     small = np.full((637, 840, 3), 50, np.uint8)  # 半分に縮小された画像 + 下に余白
     assert gs._fit_client(small).shape == (1050, 1680, 3)
+
+
+def test_save_obs_password_rewrites_only_obs_block(tmp_path):
+    import yaml as _y
+
+    from akm.config import save_obs_password
+
+    p = tmp_path / "c.yaml"
+    p.write_text("device:\n  password: keep  # x\nobs:\n  enabled: true\n  password: \"old\"\n  source: MU\ngame:\n  a: 1\n",
+                 encoding="utf-8")
+    assert save_obs_password(p, 'n"ew#1')
+    d = _y.safe_load(p.read_text(encoding="utf-8"))
+    assert d["obs"]["password"] == 'n"ew#1' and d["device"]["password"] == "keep" and d["game"]["a"] == 1

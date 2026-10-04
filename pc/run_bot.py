@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 
-from akm.config import PC_DIR, abs_map_from, load_config
+from akm.config import PC_DIR, abs_map_from, ask_obs_password, load_config
 from akm.device import open_device
 from akm.collector import LabelCollector
 from akm.elf_bot import ElfBot
@@ -27,6 +27,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    ask_obs_password(cfg, args.config)
     screen = GameScreen.from_config(cfg)
     device = open_device(cfg, abs_map_from(cfg), dry_run=args.dry_run)
     detectors = build_detectors(cfg.get("vision", {}), PC_DIR)
