@@ -235,3 +235,33 @@ Copy-Item runs\detect\train\weights\best.pt models\mu_s6.pt
 pip install pytest
 python -m pytest tests
 ```
+
+---
+
+## 6. マップの記録とビューア
+
+### 現在地の記録 (Python)
+画面右下 (ミニマップの下) の `Atlans (32, 68)` を OCR で読み、SQLite (`pc/data/mu_map.db`) に記録する。
+実際に立ったマス (= 歩けるマス)、位置の履歴、マップ移動・ワープ、狩場などの登録地点が溜まっていく。
+
+```powershell
+cd D:\hobby\AutoKeyMouseAI\pc
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt          # Windows 標準 OCR (winrt) が入る
+python tools\map_logger.py --check       # 1 回だけ読む。maplog_crop.png で読み取り位置を確認
+python tools\map_logger.py               # 記録を続ける (Ctrl+C で終了)
+python tools\map_spot.py add "Atlans 狩場1" --radius 8   # 今いる場所を狩場として登録
+python tools\map_spot.py list
+```
+読み取り位置は `config.yaml` の `maplog.roi`、文字の明るさは `maplog.threshold` で調整する。
+Windows 標準 OCR が使えない場合は Tesseract (https://github.com/UB-Mannheim/tesseract/wiki) を入れて
+`pip install pytesseract` (`maplog.ocr: tesseract`)。
+
+### ビューア (Java)
+`viewer/mapviewer.jar` (Java 17 以上)。記録中でも 1 秒ごとに読み直して表示する。
+```powershell
+java -jar D:\hobby\AutoKeyMouseAI\viewer\mapviewer.jar D:\hobby\AutoKeyMouseAI\pc\data\mu_map.db
+```
+* 緑 = 歩いたマス (明るいほど何度も通った) / 黄線 = 足跡 / 赤丸 = 現在地 / 円 = 登録地点 (橙 = 狩場)
+* ホイールで拡大縮小、ドラッグで移動、右クリックで地点の登録・削除、地点一覧のダブルクリックでその場所へ
+* ビルドし直す場合: `cd viewer` → `mvn package` → `target\mapviewer.jar`
