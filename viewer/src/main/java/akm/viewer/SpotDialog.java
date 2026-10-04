@@ -54,12 +54,16 @@ public final class SpotDialog extends JDialog {
     private static final Map<String, ImageIcon> ICONS = new HashMap<>();
     private String initialMonster;
     private final Function<String, List<MapDb.Monster>> monsterSource;
+    /** モンスター登録画面を開く (引数: 今のマップ)。登録した名前を返す。 */
+    private final java.util.function.BiFunction<Window, String, String> monsterRegistrar;
     private Result result;
 
     private SpotDialog(Window owner, String title, List<String> maps, Function<String, List<MapDb.Monster>> monsterSource,
+                       java.util.function.BiFunction<Window, String, String> monsterRegistrar,
                        MapDb.Spot init, List<String> initMonsters, String defMap, int defX, int defY) {
         super(owner, title, ModalityType.APPLICATION_MODAL);
         this.monsterSource = monsterSource;
+        this.monsterRegistrar = monsterRegistrar;
         for (String[] k : KINDS) kind.addItem(k[1]);
         map.setEditable(true);
         for (String m : maps) map.addItem(m);
@@ -120,7 +124,13 @@ public final class SpotDialog extends JDialog {
         monsterBox.addActionListener(e -> updatePreview());
         reloadMonsters();
         map.addActionListener(e -> reloadMonsters());
-        row = addRow(form, c, row, "モンスター", monsterBox);
+        JButton newMon = new JButton("モンスター登録…");
+        newMon.setToolTipText("一覧に無いモンスターをアイコン・ステータス付きで登録する");
+        newMon.addActionListener(e -> registerMonster());
+        JPanel monRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        monRow.add(monsterBox);
+        monRow.add(newMon);
+        row = addRow(form, c, row, "モンスター", monRow);
         preview.setPreferredSize(new java.awt.Dimension(300, 110));
         preview.setHorizontalAlignment(SwingConstants.LEFT);
         preview.setFont(preview.getFont().deriveFont(Font.BOLD, 14f));
@@ -170,6 +180,19 @@ public final class SpotDialog extends JDialog {
         monsterBox.setToolTipText(list.isEmpty() ? "モンスター一覧がありません (python tools\\import_monsters.py で取り込み)"
                 : showMap ? "このマップのモンスターが無いので全マップを表示しています" : mapName + " に出るモンスター " + list.size() + " 種");
         updatePreview();
+    }
+
+    /** 一覧に無いモンスターを登録し、終わったらドロップダウンでそれを選ぶ。 */
+    private void registerMonster() {
+        if (monsterRegistrar == null) return;
+        Object m = map.getEditor().getItem();
+        String created = monsterRegistrar.apply(this, m == null ? "" : m.toString().trim());
+        if (created == null) return;
+        initialMonster = created;
+        monsterBox.setSelectedItem(null);
+        reloadMonsters();
+        for (int i = 0; i < monsterBox.getItemCount(); i++)
+            if (monsterBox.getItemAt(i) instanceof MapDb.Monster mm && mm.name().equals(created)) monsterBox.setSelectedIndex(i);
     }
 
     private void updatePreview() {
@@ -255,16 +278,16 @@ public final class SpotDialog extends JDialog {
 
     /** 新規登録。キャンセルなら null。 */
     public static Result create(Window owner, List<String> maps, Function<String, List<MapDb.Monster>> monsters,
-                                String map, int x, int y) {
-        SpotDialog d = new SpotDialog(owner, "地点の登録", maps, monsters, null, List.of(), map, x, y);
+                                java.util.function.BiFunction<Window, String, String> registrar, String map, int x, int y) {
+        SpotDialog d = new SpotDialog(owner, "地点の登録", maps, monsters, registrar, null, List.of(), map, x, y);
         d.setVisible(true);
         return d.result;
     }
 
     /** 編集。キャンセルなら null。 */
     public static Result edit(Window owner, List<String> maps, Function<String, List<MapDb.Monster>> monsters,
-                              MapDb.Spot s, List<String> current) {
-        SpotDialog d = new SpotDialog(owner, "地点の編集 #" + s.id(), maps, monsters, s, current, null, 0, 0);
+                              java.util.function.BiFunction<Window, String, String> registrar, MapDb.Spot s, List<String> current) {
+        SpotDialog d = new SpotDialog(owner, "地点の編集 #" + s.id(), maps, monsters, registrar, s, current, null, 0, 0);
         d.setVisible(true);
         return d.result;
     }

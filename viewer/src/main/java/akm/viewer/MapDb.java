@@ -46,7 +46,8 @@ public final class MapDb implements AutoCloseable {
             st.execute("CREATE TABLE IF NOT EXISTS monsters (id INTEGER PRIMARY KEY, name TEXT NOT NULL, level INTEGER, "
                     + "map TEXT NOT NULL DEFAULT '', map_en TEXT NOT NULL DEFAULT '', source TEXT, updated REAL, icon TEXT, "
                     + "note TEXT, hp INTEGER, UNIQUE(name, map))");
-            for (String[] c : new String[][] {{"icon", "TEXT"}, {"note", "TEXT"}, {"hp", "INTEGER"}})
+            for (String[] c : new String[][] {{"icon", "TEXT"}, {"note", "TEXT"}, {"hp", "INTEGER"},
+                    {"atk_min", "INTEGER"}, {"atk_max", "INTEGER"}, {"def", "INTEGER"}, {"def_rate", "INTEGER"}, {"atk_rate", "INTEGER"}})
                 if (!hasColumn("monsters", c[0])) st.execute("ALTER TABLE monsters ADD COLUMN " + c[0] + " " + c[1]);
             try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM monsters")) {
                 if (rs.next() && rs.getInt(1) > 0) return 0;
@@ -185,6 +186,66 @@ public final class MapDb implements AutoCloseable {
             }
         }
         return out;
+    }
+
+    /** 登録されているマップ名 (日本語名・英語名の両方) 一覧。 */
+    public List<String> monsterMaps() throws SQLException {
+        List<String> out = new ArrayList<>();
+        if (!hasTable("monsters")) return out;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT DISTINCT map_en FROM monsters WHERE map_en != '' UNION "
+                     + "SELECT DISTINCT map FROM monsters WHERE map != '' ORDER BY 1")) {
+            while (rs.next()) out.add(rs.getString(1));
+        }
+        return out;
+    }
+
+    /** マップ名 (日本語でも英語でも) をゲーム内の英語名に。分からなければそのまま。 */
+    public String mapEn(String map) throws SQLException {
+        if (hasTable("monsters")) {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT map_en FROM monsters WHERE (map=? OR map_en=?) AND map_en != '' LIMIT 1")) {
+                ps.setString(1, map);
+                ps.setString(2, map);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) return rs.getString(1);
+                }
+            }
+        }
+        return map;
+    }
+
+    /** 手で登録するモンスター。stats = {生命, 最小攻撃力, 最大攻撃力, 防御力, 防御成功率, 攻撃成功率} (null 可)。 */
+    public void saveMonster(String name, Integer level, List<String> maps, String icon, String note, Integer[] stats)
+            throws Exception {
+        ensureBuiltinMonsters(); // 表と列を用意
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO monsters(name, level, map, map_en, source, updated, icon, note, hp, atk_min, atk_max, def, def_rate, atk_rate) "
+                        + "VALUES (?,?,?,?,'manual',?,?,?,?,?,?,?,?,?) ON CONFLICT(name, map) DO UPDATE SET level=excluded.level, "
+                        + "map_en=excluded.map_en, source='manual', updated=excluded.updated, "
+                        + "icon=COALESCE(excluded.icon, monsters.icon), note=excluded.note, hp=excluded.hp, atk_min=excluded.atk_min, "
+                        + "atk_max=excluded.atk_max, def=excluded.def, def_rate=excluded.def_rate, atk_rate=excluded.atk_rate")) {
+            for (String map : maps.isEmpty() ? List.of("") : maps) {
+                ps.setString(1, name);
+                setInt(ps, 2, level);
+                ps.setString(3, map);
+                ps.setString(4, map.isEmpty() ? "" : mapEn(map));
+                ps.setDouble(5, System.currentTimeMillis() / 1000.0);
+                ps.setString(6, icon);
+                ps.setString(7, note);
+                for (int i = 0; i < 6; i++) setInt(ps, 8 + i, stats != null && i < stats.length ? stats[i] : null);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    private static void setInt(PreparedStatement ps, int idx, Integer v) throws SQLException {
+        if (v == null) ps.setNull(idx, java.sql.Types.INTEGER); else ps.setInt(idx, v);
+    }
+
+    /** アイコン画像の保存先 (DB と同じフォルダの monster_icons/)。 */
+    public java.io.File iconDir() {
+        return new java.io.File(new java.io.File(path).getAbsoluteFile().getParentFile(), "monster_icons");
     }
 
     /** 地点ごとの狙うモンスター。 */

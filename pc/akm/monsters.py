@@ -218,7 +218,8 @@ CREATE TABLE IF NOT EXISTS spot_monsters (
 def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
     cols = [r[1] for r in db.execute("PRAGMA table_info(monsters)")]
-    for col, typ in (("icon", "TEXT"), ("note", "TEXT"), ("hp", "INTEGER")):
+    for col, typ in (("icon", "TEXT"), ("note", "TEXT"), ("hp", "INTEGER"), ("atk_min", "INTEGER"),
+                     ("atk_max", "INTEGER"), ("def", "INTEGER"), ("def_rate", "INTEGER"), ("atk_rate", "INTEGER")):
         if col not in cols:  # 古い DB に列を足す
             db.execute(f"ALTER TABLE monsters ADD COLUMN {col} {typ}")
 

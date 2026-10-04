@@ -262,7 +262,8 @@ public final class MapViewer extends JFrame {
     }
 
     private void addSpot(String map, int x, int y) {
-        SpotDialog.Result r = SpotDialog.create(this, mapNames(), this::monstersOf, map, x, y);
+        SpotDialog.Result r = SpotDialog.create(this, mapNames(), this::monstersOf,
+                (owner, m) -> MonsterDialog.open(owner, db, m), map, x, y);
         if (r == null) return;
         try {
             long id = db.addSpot(r.name(), r.map(), r.x(), r.y(), r.radius(), r.kind(), r.note());
@@ -279,7 +280,8 @@ public final class MapViewer extends JFrame {
             JOptionPane.showMessageDialog(this, "一覧から地点を選んでください");
             return;
         }
-        SpotDialog.Result r = SpotDialog.edit(this, mapNames(), this::monstersOf, s,
+        SpotDialog.Result r = SpotDialog.edit(this, mapNames(), this::monstersOf,
+                (owner, m) -> MonsterDialog.open(owner, db, m), s,
                 spotMonsters.getOrDefault(s.id(), List.of()));
         if (r == null) return;
         try {
