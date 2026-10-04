@@ -284,6 +284,61 @@ class WgcCapture:
             pass
 
 
+def is_cloaked(hwnd: int) -> bool:
+    """ウィンドウが別の仮想デスクトップにある (Windows が描画を止めている) か。"""
+    if not IS_WINDOWS:
+        return False
+    v = ctypes.c_int(0)
+    # DWMWA_CLOAKED = 14
+    if ctypes.windll.dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), 14, ctypes.byref(v), ctypes.sizeof(v)) != 0:
+        return False
+    return v.value != 0
+
+
+class CaptureHidden(RuntimeError):
+    """ゲームが別の仮想デスクトップにあり、画面からは撮れない。"""
+
+
+class ObsCapture:
+    """OBS Studio の「ゲームキャプチャ」ソースから画像をもらう (obs-websocket 経由)。
+
+    ゲームキャプチャはゲームの描画そのものを取り出すので、ゲームを別の仮想デスクトップに
+    移しても撮り続けられる。OBS 側で WebSocket サーバーを有効にし、ゲームキャプチャのソースを作っておく。
+    """
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.source = str(cfg.get("source", "MU"))
+        self._local = threading.local()  # 接続はスレッドごと
+
+    def _client(self):
+        c = getattr(self._local, "client", None)
+        if c is None:
+            import obsws_python as obs  # pip install obsws-python
+
+            c = self._local.client = obs.ReqClient(
+                host=self.cfg.get("host", "localhost"), port=int(self.cfg.get("port", 4455)),
+                password=self.cfg.get("password") or "", timeout=3)
+        return c
+
+    def grab(self, width: int | None = None, height: int | None = None) -> np.ndarray:
+        import base64
+
+        import cv2
+
+        try:
+            r = self._client().get_source_screenshot(self.source, "jpg", width, height, 90)
+        except Exception:
+            self._local.client = None  # 次回つなぎ直す
+            raise
+        data = r.image_data
+        data = data.split(",", 1)[1] if data.startswith("data:") else data
+        img = cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise RuntimeError("OBS の画像を展開できません")
+        return img
+
+
 def is_foreground(hwnd: int) -> bool:
     if not IS_WINDOWS:
         return True
@@ -296,7 +351,8 @@ class GameScreen:
     ウィンドウモードで起動すること (排他フルスクリーンだとキャプチャが黒くなることがある)。
     """
 
-    def __init__(self, window_title: str, process: str | None = None, capture: str = "auto"):
+    def __init__(self, window_title: str, process: str | None = None, capture: str = "auto",
+                 obs: dict | None = None):
         # capture: auto   = ウィンドウから直接 (Windows Graphics Capture → PrintWindow)。撮れなければ画面から
         #          wgc / printwindow = その方式だけ / screen = 画面に映っているものを撮る (mss)
         self.capture = "printwindow" if capture == "window" else capture
@@ -306,12 +362,19 @@ class GameScreen:
         self._pw_black = 0
         self._method = ""
         self._wgc_lock = threading.Lock()
+        self._obs = ObsCapture(obs) if obs and obs.get("enabled", True) else None
+        self._obs_err = 0.0
         self._local = threading.local()  # mss はスレッドごとに作る (液晶ミラーが別スレッドで撮る)
         self.window_title = window_title
         self.process = process
         self.hwnd: int | None = None
         self.pid = 0
         self.rect: Rect | None = None
+
+    @classmethod
+    def from_config(cls, cfg: dict) -> "GameScreen":
+        g = cfg["game"]
+        return cls(g["window_title"], g.get("process"), g.get("capture", "auto"), cfg.get("obs"))
 
     def locate(self) -> Rect:
         self.hwnd = find_window(self.window_title, self.process)
@@ -366,7 +429,8 @@ class GameScreen:
     def _use(self, method: str) -> None:
         if method != self._method:
             self._method = method
-            names = {"wgc": "Windows Graphics Capture (ウィンドウから直接)",
+            names = {"obs": "OBS ゲームキャプチャ (仮想デスクトップを切り替えても撮れる)",
+                     "wgc": "Windows Graphics Capture (ウィンドウから直接)",
                      "printwindow": "PrintWindow (ウィンドウから直接)",
                      "screen": "画面から (仮想デスクトップを切り替えると別の画面が映ります)"}
             print(f"[screen] 撮影方式: {names[method]}")
@@ -377,6 +441,17 @@ class GameScreen:
             self.locate()
         hwnd = self.hwnd
         self.rect = client_rect(hwnd)
+        if self._obs is not None and self.capture in ("auto", "obs"):
+            try:
+                img = self._obs.grab()
+                self._use("obs")
+                return img
+            except Exception as e:
+                if self.capture == "obs":
+                    raise RuntimeError(f"OBS から画像を取得できません: {e}") from e
+                if time.monotonic() - self._obs_err > 30:
+                    self._obs_err = time.monotonic()
+                    print(f"[screen] OBS から画像を取得できません (他の方式で撮ります): {e}")
         if IS_WINDOWS and self.capture in ("auto", "wgc"):
             img = self._grab_wgc(hwnd)
             if img is not None:
@@ -393,6 +468,9 @@ class GameScreen:
             if self.capture == "printwindow":
                 raise RuntimeError("PrintWindow でゲーム画面を取得できません (最小化されていませんか)")
             self._pw_black += 1  # このゲームでは真っ黒になる: 3 回続いたら以後は使わない
+        if is_cloaked(hwnd):
+            # 別の仮想デスクトップにある: 画面から撮ると関係ない画面が映るので撮らない
+            raise CaptureHidden("ゲームが別の仮想デスクトップにあります")
         self._use("screen")
         return self._grab_screen(self.rect)
 

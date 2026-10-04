@@ -23,7 +23,9 @@ game:
   # 画面の撮り方
   #   auto        : ウィンドウから直接撮る (他のウィンドウが重なっても、仮想デスクトップを切り替えても撮れる)。
   #                 Windows Graphics Capture (要 pip install windows-capture) → PrintWindow → 画面 の順に試す
+  #   obs         : OBS のゲームキャプチャからもらう (下の obs: を設定。仮想デスクトップを切り替えても撮れる)
   #   wgc / printwindow : その方式だけ / screen : 画面に映っているものを撮る (旧方式)
+  #   auto で obs.enabled: true なら OBS を最優先で使う
   capture: auto
   require_foreground: true # ゲームが前面にないときは操作しない
   # この PC で押すとボット開始 / 停止 (仮想キーコード)。0x21 = PageUp, 0x22 = PageDown
@@ -61,6 +63,19 @@ helper:
   verify_attempts: 3       # 再開を画面で確認できなければ押し直す回数
 
 loop_interval_ms: 50
+
+# OBS Studio のゲームキャプチャから画面をもらう (別の仮想デスクトップにゲームを置いても液晶に映し続けたい場合)
+#   1. OBS で「ソース +」→「ゲームキャプチャ」→ モード「特定のウィンドウをキャプチャ」→ MU (Main.exe) を選ぶ。
+#      ソース名を下の source と同じにする (例: MU)
+#   2. OBS の「ツール」→「WebSocket サーバー設定」→「WebSocket サーバーを有効にする」。パスワードを下に書く
+#   3. pip install obsws-python
+#   OBS は配信・録画しなくてよい (起動しておくだけ)
+obs:
+  enabled: false
+  host: localhost
+  port: 4455
+  password: ""
+  source: MU
 
 # 割り込んでくるダイアログ (パーティ申請など) を自動で断る。
 # ダイアログが出ている状態で tools/grab_templates.py を実行し、

@@ -27,7 +27,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    screen = GameScreen(cfg["game"]["window_title"], cfg["game"].get("process"), cfg["game"].get("capture", "auto"))
+    screen = GameScreen.from_config(cfg)
     device = open_device(cfg, abs_map_from(cfg), dry_run=args.dry_run)
     detectors = build_detectors(cfg.get("vision", {}), PC_DIR)
     helper = HelperControl(cfg.get("helper", {}), device, PC_DIR)

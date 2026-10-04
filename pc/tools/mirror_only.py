@@ -16,8 +16,7 @@ from akm.screen import GameScreen
 
 def main() -> None:
     cfg = load_config("config.yaml")
-    g = cfg["game"]
-    screen = GameScreen(g["window_title"], g.get("process"), g.get("capture", "auto"))
+    screen = GameScreen.from_config(cfg)
     screen.locate()
     mcfg = cfg.get("mirror") or {}
     host = (cfg.get("device") or {}).get("host")

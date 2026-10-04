@@ -8,3 +8,5 @@ pyserial>=3.5
 windows-capture>=1.5; sys_platform == "win32"
 # AI 物体検出 (YOLO) を使う場合のみ:
 # ultralytics>=8.3
+# OBS のゲームキャプチャから画面をもらう場合のみ:
+# obsws-python>=1.7

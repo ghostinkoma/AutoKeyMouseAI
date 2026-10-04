@@ -332,3 +332,19 @@ def test_mirror_thread_captures_and_posts_by_itself():
         time.sleep(0.05)
     srv.shutdown()
     assert len(got) >= 2 and got[0][:2] == b"\xff\xd8" and m.sent >= 2
+
+
+def test_mirror_keeps_last_frame_when_game_on_other_desktop():
+    from akm.mirror import Mirror
+    from akm.screen import CaptureHidden
+
+    frames = [np.full((1050, 1680, 3), 200, np.uint8)]
+
+    def grab():
+        if frames:
+            return frames.pop()
+        raise CaptureHidden("other desktop")
+
+    m = Mirror(None, grab=grab)  # host 無し = 送信スレッドなし
+    assert m._capture()[:2] == b"\xff\xd8"
+    assert m._capture()[:2] == b"\xff\xd8" and m._last_img is not None

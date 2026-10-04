@@ -86,6 +86,7 @@ class Mirror:
         self.jpeg_errors = 0
         self._last_warn = 0.0
         self._ok_once = False
+        self._last_img: np.ndarray | None = None
         if self.enabled:
             threading.Thread(target=self._worker, daemon=True).start()
 
@@ -115,9 +116,18 @@ class Mirror:
             lines = list(self._lines)
         try:
             img = self.grab()
-        except Exception as e:  # ウィンドウが無い等: 黒画面に理由を出す
-            img = np.zeros((H, W, 3), np.uint8)
-            lines = lines + [("NO GAME WINDOW", (0, 0, 255)), (str(e)[:38], (200, 200, 200))]
+            self._last_img = img
+        except Exception as e:
+            from .screen import CaptureHidden
+
+            if isinstance(e, CaptureHidden) and self._last_img is not None:
+                # 別の仮想デスクトップに切り替えた: 最後に撮れた画面を暗くして出し続ける
+                img = (self._last_img * 0.5).astype(np.uint8)
+                lines = lines + [("GAME ON OTHER DESKTOP", (0, 200, 255))]
+            else:  # ウィンドウが無い等: 黒画面に理由を出す
+                img = np.zeros((H, W, 3), np.uint8)
+                label = "GAME ON OTHER DESKTOP" if isinstance(e, CaptureHidden) else "NO GAME WINDOW"
+                lines = lines + [(label, (0, 0, 255)), (str(e)[:38].encode("ascii", "replace").decode(), (200, 200, 200))]
         data = encode(compose(img, lines), self.fmt, self.quality)
         self.last_bytes = len(data)
         return data
