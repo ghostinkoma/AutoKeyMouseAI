@@ -1,0 +1,7 @@
+# ビルド生成物
+firmware/.pio/
+__pycache__/
+*.pyc
+.venv/
+pc/config.yaml
+pc/dataset/
