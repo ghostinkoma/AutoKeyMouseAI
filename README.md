@@ -263,5 +263,8 @@ Windows 標準 OCR が使えない場合は Tesseract (https://github.com/UB-Man
 java -jar D:\hobby\AutoKeyMouseAI\viewer\mapviewer.jar D:\hobby\AutoKeyMouseAI\pc\data\mu_map.db
 ```
 * 緑 = 歩いたマス (明るいほど何度も通った) / 黄線 = 足跡 / 赤丸 = 現在地 / 円 = 登録地点 (橙 = 狩場)
-* ホイールで拡大縮小、ドラッグで移動、右クリックで地点の登録・削除、地点一覧のダブルクリックでその場所へ
+* ホイールで拡大縮小、ドラッグで移動
+* **狩場の登録**: 上の「現在地を狩場に登録…」(map_logger.py が読んだ今いる場所) か、地図を右クリック →「ここを狩場などに登録…」。
+  名前・種類 (狩場 / 薬屋 / 街 / 安全地帯 / その他)・マップ・座標・半径・メモを入力して「登録」
+* 右側の一覧で 追加 / 編集 / 削除 / 地図で見る。地図の右クリックで地点の中心を移すこともできる
 * ビルドし直す場合: `cd viewer` → `mvn package` → `target\mapviewer.jar`

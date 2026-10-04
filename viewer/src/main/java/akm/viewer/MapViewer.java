@@ -55,6 +55,8 @@ public final class MapViewer extends JFrame {
     private final DefaultListModel<String> events = new DefaultListModel<>();
     private final DefaultListModel<String> spotModel = new DefaultListModel<>();
     private List<MapDb.Spot> spotList = List.of();
+    private final JList<String> spotView = new JList<>(spotModel);
+    private MapDb.Pos lastPos;
     private String shownMap;
     private boolean fitted;
     private boolean updatingBox;
@@ -79,32 +81,43 @@ public final class MapViewer extends JFrame {
         JButton fit = new JButton("全体表示");
         fit.addActionListener(e -> panel.fit());
         top.add(fit);
+        JButton here = new JButton("現在地を狩場に登録…");
+        here.addActionListener(e -> addAtCurrent());
+        top.add(here);
         JButton open = new JButton("DB を開く…");
         open.addActionListener(e -> chooseDb());
         top.add(open);
 
-        JList<String> spotView = new JList<>(spotModel);
         spotView.addMouseListener(new java.awt.event.MouseAdapter() {
             @Override public void mouseClicked(java.awt.event.MouseEvent e) {
-                int i = spotView.getSelectedIndex();
-                if (e.getClickCount() == 2 && i >= 0 && i < spotList.size()) {
-                    MapDb.Spot s = spotList.get(i);
-                    follow.setSelected(false);
-                    selectMap(s.map());
-                    refresh();
-                    panel.centerOn(s.x(), s.y());
-                }
+                if (e.getClickCount() == 2) showSpot(selectedSpot());
             }
         });
+        JPanel spotButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        JButton bAdd = new JButton("追加…");
+        bAdd.addActionListener(e -> addAtCurrent());
+        JButton bEdit = new JButton("編集…");
+        bEdit.addActionListener(e -> editSpot(selectedSpot()));
+        JButton bDel = new JButton("削除");
+        bDel.addActionListener(e -> deleteSpot(selectedSpot()));
+        JButton bGo = new JButton("地図で見る");
+        bGo.addActionListener(e -> showSpot(selectedSpot()));
+        spotButtons.add(bAdd);
+        spotButtons.add(bEdit);
+        spotButtons.add(bDel);
+        spotButtons.add(bGo);
+        JPanel spotPane = new JPanel(new BorderLayout());
+        spotPane.add(new JScrollPane(spotView), BorderLayout.CENTER);
+        spotPane.add(spotButtons, BorderLayout.SOUTH);
+        spotPane.setBorder(BorderFactory.createTitledBorder("登録地点 (狩場など)  ※地図の右クリックでも登録できます"));
         JPanel side = new JPanel(new BorderLayout());
-        JScrollPane sp = new JScrollPane(spotView);
-        sp.setBorder(BorderFactory.createTitledBorder("登録地点 (ダブルクリックで移動 / 地図を右クリックで追加・削除)"));
+        JPanel sp = spotPane;
         JScrollPane ep = new JScrollPane(new JList<>(events));
         ep.setBorder(BorderFactory.createTitledBorder("出来事 (マップ移動・ワープ)"));
         JSplitPane sideSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, sp, ep);
         sideSplit.setResizeWeight(0.4);
         side.add(sideSplit, BorderLayout.CENTER);
-        side.setPreferredSize(new Dimension(330, 600));
+        side.setPreferredSize(new Dimension(430, 600));
 
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, panel, side);
         split.setResizeWeight(1.0);
@@ -162,10 +175,18 @@ public final class MapViewer extends JFrame {
             }
             if (center.isSelected() && cur != null && Objects.equals(cur.map(), map)) panel.centerOn(cur.x(), cur.y());
 
-            spotList = db.spots(null);
-            spotModel.clear();
-            for (MapDb.Spot s : spotList)
-                spotModel.addElement(String.format("#%d %s  %s (%d,%d) r%d [%s]", s.id(), s.name(), s.map(), s.x(), s.y(), s.radius(), s.kind()));
+            lastPos = cur;
+            List<MapDb.Spot> spots = db.spots(null);
+            if (!spots.equals(spotList)) {  // 変わったときだけ作り直す (選択を保つ)
+                long selId = selectedSpot() == null ? -1 : selectedSpot().id();
+                spotList = spots;
+                spotModel.clear();
+                for (MapDb.Spot s : spotList)
+                    spotModel.addElement(String.format("#%d [%s] %s  %s (%d, %d) 半径%d%s", s.id(), SpotDialog.kindLabel(s.kind()),
+                            s.name(), s.map(), s.x(), s.y(), s.radius(),
+                            s.note() == null || s.note().isEmpty() ? "" : "  " + s.note()));
+                for (int i = 0; i < spotList.size(); i++) if (spotList.get(i).id() == selId) spotView.setSelectedIndex(i);
+            }
             events.clear();
             for (MapDb.Event e : db.events(200)) {
                 String where = e.map() == null ? "" : e.map() + (e.x() == null ? "" : " (" + e.x() + "," + e.y() + ")");
@@ -183,38 +204,103 @@ public final class MapViewer extends JFrame {
     private void contextMenu(int x, int y, java.awt.event.MouseEvent e) {
         if (shownMap == null) return;
         JPopupMenu menu = new JPopupMenu();
-        JMenuItem add = new JMenuItem(String.format("ここ (%d, %d) を地点として登録…", x, y));
-        add.addActionListener(a -> {
-            String name = JOptionPane.showInputDialog(this, "名前 (例: Atlans 狩場1)", shownMap + " " + x + "," + y);
-            if (name == null || name.isBlank()) return;
-            String[] kinds = {"hunt", "shop", "town", "safe", "other"};
-            Object kind = JOptionPane.showInputDialog(this, "種類 (hunt = 狩場)", "種類", JOptionPane.QUESTION_MESSAGE,
-                    null, kinds, kinds[0]);
-            if (kind == null) return;
-            String r = JOptionPane.showInputDialog(this, "半径 (マス)", "5");
-            if (r == null) return;
-            try {
-                db.addSpot(name.trim(), shownMap, x, y, Integer.parseInt(r.trim()), kind.toString(), "");
-                refresh();
-            } catch (NumberFormatException | SQLException ex) {
-                JOptionPane.showMessageDialog(this, "登録できません: " + ex.getMessage());
-            }
-        });
+        JMenuItem add = new JMenuItem(String.format("ここ (%d, %d) を狩場などに登録…", x, y));
+        add.addActionListener(a -> addSpot(shownMap, x, y));
         menu.add(add);
         for (MapDb.Spot s : spotList) {
             if (!s.map().equals(shownMap) || Math.hypot(s.x() - x, s.y() - y) > Math.max(2, s.radius())) continue;
-            JMenuItem del = new JMenuItem("地点「" + s.name() + "」を削除");
-            del.addActionListener(a -> {
+            menu.addSeparator();
+            JMenuItem ed = new JMenuItem("「" + s.name() + "」を編集…");
+            ed.addActionListener(a -> editSpot(s));
+            menu.add(ed);
+            JMenuItem mv = new JMenuItem("「" + s.name() + "」の中心をここ (" + x + ", " + y + ") に移す");
+            mv.addActionListener(a -> {
                 try {
-                    db.deleteSpot(s.id());
+                    db.updateSpot(s.id(), s.name(), s.map(), x, y, s.radius(), s.kind(), s.note());
                     refresh();
                 } catch (SQLException ex) {
-                    JOptionPane.showMessageDialog(this, "削除できません: " + ex.getMessage());
+                    error("変更できません", ex);
                 }
             });
+            menu.add(mv);
+            JMenuItem del = new JMenuItem("「" + s.name() + "」を削除");
+            del.addActionListener(a -> deleteSpot(s));
             menu.add(del);
         }
         menu.show(e.getComponent(), e.getX(), e.getY());
+    }
+
+    private MapDb.Spot selectedSpot() {
+        int i = spotView.getSelectedIndex();
+        return i >= 0 && i < spotList.size() ? spotList.get(i) : null;
+    }
+
+    private List<String> mapNames() {
+        try {
+            return db.maps();
+        } catch (SQLException e) {
+            return List.of();
+        }
+    }
+
+    /** 今いる場所 (map_logger.py の最新の位置) を登録する。位置がまだ無ければ表示中のマップの中央。 */
+    private void addAtCurrent() {
+        if (lastPos != null) addSpot(lastPos.map(), lastPos.x(), lastPos.y());
+        else addSpot(shownMap, 128, 128);
+    }
+
+    private void addSpot(String map, int x, int y) {
+        SpotDialog.Result r = SpotDialog.create(this, mapNames(), map, x, y);
+        if (r == null) return;
+        try {
+            db.addSpot(r.name(), r.map(), r.x(), r.y(), r.radius(), r.kind(), r.note());
+            status.setText("登録しました: " + r.name() + "  " + r.map() + " (" + r.x() + ", " + r.y() + ")");
+            refresh();
+        } catch (SQLException ex) {
+            error("登録できません", ex);
+        }
+    }
+
+    private void editSpot(MapDb.Spot s) {
+        if (s == null) {
+            JOptionPane.showMessageDialog(this, "一覧から地点を選んでください");
+            return;
+        }
+        SpotDialog.Result r = SpotDialog.edit(this, mapNames(), s);
+        if (r == null) return;
+        try {
+            db.updateSpot(s.id(), r.name(), r.map(), r.x(), r.y(), r.radius(), r.kind(), r.note());
+            refresh();
+        } catch (SQLException ex) {
+            error("保存できません", ex);
+        }
+    }
+
+    private void deleteSpot(MapDb.Spot s) {
+        if (s == null) {
+            JOptionPane.showMessageDialog(this, "一覧から地点を選んでください");
+            return;
+        }
+        if (JOptionPane.showConfirmDialog(this, "「" + s.name() + "」を削除しますか?", "削除",
+                JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
+        try {
+            db.deleteSpot(s.id());
+            refresh();
+        } catch (SQLException ex) {
+            error("削除できません", ex);
+        }
+    }
+
+    private void showSpot(MapDb.Spot s) {
+        if (s == null) return;
+        follow.setSelected(false);
+        selectMap(s.map());
+        refresh();
+        panel.centerOn(s.x(), s.y());
+    }
+
+    private void error(String what, Exception ex) {
+        JOptionPane.showMessageDialog(this, what + ": " + ex.getMessage());
     }
 
     private void chooseDb() {

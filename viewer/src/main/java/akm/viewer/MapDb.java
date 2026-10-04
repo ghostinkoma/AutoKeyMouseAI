@@ -108,6 +108,7 @@ public final class MapDb implements AutoCloseable {
     }
 
     public void addSpot(String name, String map, int x, int y, int radius, String kind, String note) throws SQLException {
+        ensureSpots();
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO spots(name, map, x, y, radius, kind, note, created) VALUES (?,?,?,?,?,?,?,?)")) {
             ps.setString(1, name);
@@ -119,6 +120,30 @@ public final class MapDb implements AutoCloseable {
             ps.setString(7, note);
             ps.setDouble(8, System.currentTimeMillis() / 1000.0);
             ps.executeUpdate();
+        }
+    }
+
+    public void updateSpot(long id, String name, String map, int x, int y, int radius, String kind, String note) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE spots SET name=?, map=?, x=?, y=?, radius=?, kind=?, note=? WHERE id=?")) {
+            ps.setString(1, name);
+            ps.setString(2, map);
+            ps.setInt(3, x);
+            ps.setInt(4, y);
+            ps.setInt(5, radius);
+            ps.setString(6, kind);
+            ps.setString(7, note);
+            ps.setLong(8, id);
+            ps.executeUpdate();
+        }
+    }
+
+    /** 地点の表を用意する (map_logger.py をまだ動かしていない DB でも登録できるように)。 */
+    public void ensureSpots() throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE TABLE IF NOT EXISTS spots (id INTEGER PRIMARY KEY, name TEXT NOT NULL, map TEXT NOT NULL, "
+                    + "x INTEGER NOT NULL, y INTEGER NOT NULL, radius INTEGER NOT NULL DEFAULT 5, "
+                    + "kind TEXT NOT NULL DEFAULT 'hunt', note TEXT, created REAL)");
         }
     }
 
