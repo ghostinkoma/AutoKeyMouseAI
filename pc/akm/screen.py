@@ -439,6 +439,18 @@ class GameScreen:
         if not self._obs_size_logged:
             self._obs_size_logged = True
             print(f"[screen] OBS の画像 {w}x{h} / ゲーム画面 {r.width}x{r.height}" if r else f"[screen] OBS の画像 {w}x{h}")
+            try:  # 確認用に 1 枚保存する
+                import cv2
+                from pathlib import Path
+
+                out = Path(__file__).resolve().parent.parent / "obs_debug.png"
+                cv2.imwrite(str(out), img)
+                print(f"[screen] OBS から受け取った画像を保存しました: {out}")
+            except Exception:
+                pass
+            if float(img.mean()) < 3:
+                print("[screen] OBS の画像が真っ黒です。OBS でソース名が合っているか、ソースが今のシーンで"
+                      "表示 (目のアイコン) になっているか確認してください。obs.source にシーン名を書いても撮れます")
         if crop:
             x, y, cw, ch = (int(v) for v in crop)
             img = img[y : y + ch, x : x + cw]
