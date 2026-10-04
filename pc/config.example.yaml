@@ -41,19 +41,19 @@ helper:
   # MU Helper のオン/オフを切り替えるキー (ゲーム側の割り当てに合わせる)
   # F12 は Windows がデバッガ用に予約しているキーで、ゲームが固まることがあるので使わない
   # PageUp / PageDown (ボットの開始・停止) とも重ねないこと
-  toggle_key: f9
+  toggle_key: home         # Murex では Home キーで MU Helper のオン/オフ
   # MU Helper の開始方法
-  #   auto  : 左上パネルの ▶ ボタンが見えればクリックして開始、見えなければ toggle_key (推奨)
+  #   key   : toggle_key を押す (推奨。押したあと画面で再開を確認し、だめなら押し直す)
+  #   auto  : 左上パネルの ▶ ボタンが見えればクリックして開始、見えなければ toggle_key
   #   click : 常に ▶ ボタンのクリック (見えなければ toggle_key)
-  #   key   : toggle_key だけ (ゲーム側で MU Helper にキーを割り当てている場合)
-  start_method: auto
-  initially_on: false      # ボット開始時に MU Helper が止まっている前提 (PageUp で開始すると F9 で入れる)
-  mouse_stops_helper: true # クリックすると MU Helper が止まる (拾得後に F9 で入れ直す)
+  start_method: key
+  initially_on: false      # ボット開始時に MU Helper が止まっている前提 (PageUp で開始すると Home で入れる)
+  mouse_stops_helper: true # クリックすると MU Helper が止まる (拾得後に Home で入れ直す)
   stop_on_pause: true      # PageDown でボットを止めたら MU Helper も止める
   settle_ms: 800           # 切り替え後の待ち時間
   # 画面表示で ON/OFF を判定する場合 (左上の MU Helper パネルを切り出した画像)。未設定ならボットの操作から推定
   # 左上の MU Helper パネルの ▶ (開始) ボタンが見えていれば停止中、見えなければ動作中と判定する。
-  # これで F9 を押したあと本当に再開したかを画面で確認し、だめなら押し直す
+  # これで Home を押したあと本当に再開したかを画面で確認し、だめなら押し直す
   indicator:
     roi: [0.06, 0.0, 0.14, 0.045]     # 1680x1050 で実測した MU Helper パネル ("MU Helper" の文字と ▶ ボタン)
     on_image: null                    # 動作中の表示の画像があれば指定 (無くても可)
@@ -161,7 +161,7 @@ elf:
     radius: 0.18        # 狙う位置の半径 (画面高さ比)
 
   # 巡回: PageUp を押した地点を中心に、上下左右 range マスを順番に回り、着くたびに 8 方向へ撃つ。
-  # その間は MU Helper が狩りをする。移動・射撃のクリックで止まった MU Helper は毎回 F9 で再開 (画面で確認)
+  # その間は MU Helper が狩りをする。移動・射撃のクリックで止まった MU Helper は毎回 Home で再開 (画面で確認)
   patrol:
     enabled: true
     range: 5            # 中心から何マスまで動くか

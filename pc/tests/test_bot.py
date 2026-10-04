@@ -208,12 +208,12 @@ def test_helper_mode_turns_helper_on_and_restarts_after_pickup():
     jewel = Detection("Jewel of Bless", "item", 470, 330, 80, 12, 0.95)
     bot, rec = make_bot([full_hud_frame()], [[], [jewel], []], mode="helper")
     bot.step()  # 何も落ちていない: MU Helper を入れるだけ
-    assert rec.sent == ["k:f9"]
+    assert rec.sent == ["k:home"]
     assert bot.helper.is_on()
     rec.sent.clear()
-    bot.step()  # 宝石: クリックで拾う (MU Helper は止まる) → 戻る → F9 で再開
+    bot.step()  # 宝石: クリックで拾う (MU Helper は止まる) → 戻る → Home で再開
     assert rec.sent[0].endswith("c:L")
-    assert rec.sent[-1] == "k:f9"
+    assert rec.sent[-1] == "k:home"
     assert not any(s.startswith("bd:R") or "bd:R" in s for s in rec.sent)  # 自分では攻撃しない
     assert bot.picked["Jewel of Bless"] == 1 and bot.helper.is_on()
 
@@ -235,10 +235,10 @@ def test_patrol_moves_then_volleys_8_directions_and_restarts_helper():
     bot, rec = make_bot([full_hud_frame()], [[]], mode="helper", patrol=True)
     bot.helper.believed_on = True
     bot.step()
-    move, volley, f9 = rec.sent[0], rec.sent[1], rec.sent[2]
+    move, volley, toggle = rec.sent[0], rec.sent[1], rec.sent[2]
     assert move.endswith(move.split(";")[-1]) and ";c:L;" in move  # 上へ 5 マス移動
     assert volley.startswith("k:1") and volley.count("c:R,2") == 8  # 45 度ずつ 8 方向
-    assert f9 == "k:f9"  # クリックで止まった MU Helper を再開
+    assert toggle == "k:home"  # クリックで止まった MU Helper を再開
     assert bot.nav_pos[1] < 0  # 上 (画面の上方向) に動いた
     assert bot.helper.is_on()
 
@@ -265,6 +265,7 @@ def test_helper_starts_by_clicking_play_button():
 
     cfg = yaml.safe_load((PC / "config.example.yaml").read_text(encoding="utf-8"))
     cfg["helper"]["settle_ms"] = 0
+    cfg["helper"]["start_method"] = "click"
     rec = Recorder()
     hc = HelperControl(cfg["helper"], Device(rec, AbsMap.for_screen(1920, 1080)), PC)
     hc.to_screen = lambda x, y: (x + 100, y + 10)
@@ -274,7 +275,7 @@ def test_helper_starts_by_clicking_play_button():
     frame[6:6 + tpl.shape[0], 276:276 + tpl.shape[1]] = tpl
     assert hc.find_start_button(frame) == (276 + tpl.shape[1] / 2, 6 + tpl.shape[0] / 2)
     hc.ensure_on(frame)
-    assert rec.sent and "c:L" in rec.sent[-1] and "k:f9" not in rec.sent[-1]
+    assert rec.sent and "c:L" in rec.sent[-1] and "k:home" not in rec.sent[-1]
     assert hc.is_on()
 
 

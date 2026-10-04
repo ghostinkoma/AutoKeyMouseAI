@@ -25,9 +25,9 @@ class HelperControl:
     def __init__(self, cfg: dict, dev: Device, base_dir: Path):
         self.cfg = cfg or {}
         self.dev = dev
-        self.key = str(self.cfg.get("toggle_key", "f9"))
+        self.key = str(self.cfg.get("toggle_key", "home"))
         # click: パネルの ▶ ボタンをクリックして開始 / key: 切替キー / auto: ▶ が見えればクリック、無ければキー
-        self.start_method = str(self.cfg.get("start_method", "auto"))
+        self.start_method = str(self.cfg.get("start_method", "key"))
         self.to_screen = None  # クライアント座標 → スクリーン座標 (ElfBot が設定する)
         self.mouse_stops = bool(self.cfg.get("mouse_stops_helper", True))
         self.settle_s = float(self.cfg.get("settle_ms", 800)) / 1000
