@@ -364,6 +364,7 @@ class GameScreen:
         self._wgc_lock = threading.Lock()
         self._obs = ObsCapture(obs) if obs and obs.get("enabled", True) else None
         self._obs_err = 0.0
+        self._obs_size_logged = False
         self._local = threading.local()  # mss はスレッドごとに作る (液晶ミラーが別スレッドで撮る)
         self.window_title = window_title
         self.process = process
@@ -426,6 +427,34 @@ class GameScreen:
             time.sleep(0.05)
         return None
 
+    def _fit_client(self, img: np.ndarray) -> np.ndarray:
+        """OBS の画像をゲームのクライアント領域の大きさに合わせる。
+
+        ゲームキャプチャはゲームの描画バッファの大きさで返すので、ウィンドウより大きく
+        余白 (黒) が付くことがある。左上を基準に切り取り、大きさが違えば縮小して合わせる。
+        """
+        r = self.rect
+        crop = (self._obs.cfg.get("crop") if self._obs else None)  # [x, y, w, h] (ピクセル) で手動指定も可
+        h, w = img.shape[:2]
+        if not self._obs_size_logged:
+            self._obs_size_logged = True
+            print(f"[screen] OBS の画像 {w}x{h} / ゲーム画面 {r.width}x{r.height}" if r else f"[screen] OBS の画像 {w}x{h}")
+        if crop:
+            x, y, cw, ch = (int(v) for v in crop)
+            img = img[y : y + ch, x : x + cw]
+        elif r is not None and r.width > 0 and r.height > 0 and (w, h) != (r.width, r.height):
+            if w >= r.width and h >= r.height:
+                img = img[: r.height, : r.width]  # 右・下の余白を落とす
+            else:
+                # 縮小されている: 横幅を基準に、ゲーム画面の縦横比になるよう下を落とす
+                eh = min(h, round(w * r.height / r.width))
+                img = img[:eh, :]
+        if r is not None and r.width > 0 and img.shape[:2] != (r.height, r.width):
+            import cv2
+
+            img = cv2.resize(img, (r.width, r.height), interpolation=cv2.INTER_AREA)
+        return np.ascontiguousarray(img)
+
     def _use(self, method: str) -> None:
         if method != self._method:
             self._method = method
@@ -443,7 +472,7 @@ class GameScreen:
         self.rect = client_rect(hwnd)
         if self._obs is not None and self.capture in ("auto", "obs"):
             try:
-                img = self._obs.grab()
+                img = self._fit_client(self._obs.grab())
                 self._use("obs")
                 return img
             except Exception as e:

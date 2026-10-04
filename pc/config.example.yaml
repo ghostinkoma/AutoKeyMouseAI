@@ -76,6 +76,9 @@ obs:
   port: 4455
   password: ""
   source: MU
+  # 液晶やボットの画面に余白が出る場合、OBS の画像から切り出す範囲 [x, y, 幅, 高さ] (ピクセル) を指定する。
+  # 起動時に出る "[screen] OBS の画像 WxH / ゲーム画面 WxH" を見て決める。null なら自動
+  crop: null
 
 # 割り込んでくるダイアログ (パーティ申請など) を自動で断る。
 # ダイアログが出ている状態で tools/grab_templates.py を実行し、

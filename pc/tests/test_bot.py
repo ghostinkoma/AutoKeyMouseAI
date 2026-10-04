@@ -348,3 +348,16 @@ def test_mirror_keeps_last_frame_when_game_on_other_desktop():
     m = Mirror(None, grab=grab)  # host 無し = 送信スレッドなし
     assert m._capture()[:2] == b"\xff\xd8"
     assert m._capture()[:2] == b"\xff\xd8" and m._last_img is not None
+
+
+def test_obs_image_is_cropped_to_client_area():
+    from akm.screen import GameScreen, Rect
+
+    gs = GameScreen("MU", obs={"enabled": True})
+    gs.rect = Rect(0, 0, 1680, 1050)
+    img = np.zeros((1274, 1680, 3), np.uint8)
+    img[:1050] = 100
+    out = gs._fit_client(img)
+    assert out.shape == (1050, 1680, 3) and out.min() == 100
+    small = np.full((637, 840, 3), 50, np.uint8)  # 半分に縮小された画像 + 下に余白
+    assert gs._fit_client(small).shape == (1050, 1680, 3)
