@@ -243,10 +243,14 @@ class WgcCapture:
         self.closed = False
         kw = dict(cursor_capture=False, window_hwnd=hwnd, minimum_update_interval=50)
         try:
-            cap = WindowsCapture(draw_border=False, **kw)
-        except Exception:  # 枠の非表示は Windows 11 のみ対応
-            cap = WindowsCapture(**kw)
+            self.control = self._start(WindowsCapture(draw_border=False, **kw))
+        except Exception as e:
+            # 枠の非表示は Windows 11 のみ対応 (Windows 10 では開始時に例外になる): 枠ありでやり直す
+            if "border" not in str(e).lower():
+                raise
+            self.control = self._start(WindowsCapture(**kw))
 
+    def _start(self, cap):
         @cap.event
         def on_frame_arrived(frame, control):
             if self.closed:
@@ -261,7 +265,7 @@ class WgcCapture:
         def on_closed():
             self.closed = True
 
-        self.control = cap.start_free_threaded()
+        return cap.start_free_threaded()
 
     def latest(self, max_age_s: float = 3.0) -> np.ndarray | None:
         """クライアント領域だけを切り出した最新画像。古い / 無ければ None。"""
@@ -513,7 +517,13 @@ class GameScreen:
                     raise RuntimeError(f"OBS から画像を取得できません: {e}") from e
                 if time.monotonic() - self._obs_err > 30:
                     self._obs_err = time.monotonic()
-                    print(f"[screen] OBS から画像を取得できません (他の方式で撮ります): {e}")
+                    hint = ""
+                    if "identify" in str(e):
+                        hint = ("\n         → OBS のパスワードが違います。OBS の WebSocket サーバー設定の「接続情報を表示」で"
+                                "確認するか、「認証を有効にする」を外して config.yaml の obs.password を \"\" にしてください")
+                    elif "refused" in str(e).lower() or "10061" in str(e):
+                        hint = "\n         → OBS が起動していないか、WebSocket サーバーが有効になっていません"
+                    print(f"[screen] OBS から画像を取得できません (他の方式で撮ります): {e}{hint}")
         if IS_WINDOWS and self.capture in ("auto", "wgc"):
             img = self._grab_wgc(hwnd)
             if img is not None:
