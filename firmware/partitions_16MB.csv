@@ -1,4 +1,4 @@
-# Arduino-ESP32 の tools/partitions/default_16MB.csv と同じ内容 (esp32_bigwnd 用。ESP-IDF でビルドするとプロジェクト内のファイルしか見ないため)
+# Same as Arduino-ESP32 tools/partitions/default_16MB.csv (for esp32_bigwnd: ESP-IDF build looks for it in the project)
 # Name,   Type, SubType, Offset,  Size, Flags
 nvs,      data, nvs,     0x9000,  0x5000,
 otadata,  data, ota,     0xe000,  0x2000,
