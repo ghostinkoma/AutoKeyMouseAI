@@ -84,6 +84,13 @@ class Mirror:
         self.sent = 0
         self.errors = 0
         self.jpeg_errors = 0
+        # 計測 (直近の平均, ms)
+        self.t_capture = 0.0
+        self.t_encode = 0.0
+        self.t_post = 0.0
+        self._fps_t0 = time.monotonic()
+        self._fps_n = 0
+        self.fps = 0.0
         self._last_warn = 0.0
         self._ok_once = False
         self._last_img: np.ndarray | None = None
@@ -114,6 +121,7 @@ class Mirror:
     def _capture(self) -> bytes:
         with self._lock:
             lines = list(self._lines)
+        t0 = time.perf_counter()
         try:
             img = self.grab()
             self._last_img = img
@@ -128,7 +136,11 @@ class Mirror:
                 img = np.zeros((H, W, 3), np.uint8)
                 label = "GAME ON OTHER DESKTOP" if isinstance(e, CaptureHidden) else "NO GAME WINDOW"
                 lines = lines + [(label, (0, 0, 255)), (str(e)[:38].encode("ascii", "replace").decode(), (200, 200, 200))]
+        t1 = time.perf_counter()
         data = encode(compose(img, lines), self.fmt, self.quality)
+        t2 = time.perf_counter()
+        self.t_capture = 0.8 * self.t_capture + 0.2 * (t1 - t0) * 1000
+        self.t_encode = 0.8 * self.t_encode + 0.2 * (t2 - t1) * 1000
         self.last_bytes = len(data)
         return data
 
@@ -165,10 +177,18 @@ class Mirror:
                     time.sleep(0.05)
                     continue
             try:
+                tp = time.perf_counter()
                 r = s.post(self.url, data=data, headers={"Content-Type": "application/octet-stream"}, timeout=5)
+                self.t_post = 0.8 * self.t_post + 0.2 * (time.perf_counter() - tp) * 1000
                 if r.status_code == 200:
                     self.sent += 1
                     self.errors = 0
+                    self._fps_n += 1
+                    dt = time.monotonic() - self._fps_t0
+                    if dt >= 5:
+                        self.fps = self._fps_n / dt
+                        self._fps_n = 0
+                        self._fps_t0 = time.monotonic()
                     if not self._ok_once:
                         self._ok_once = True
                         print(f"[mirror] 液晶への表示に成功 ({self.fmt}, {len(data)} バイト)")

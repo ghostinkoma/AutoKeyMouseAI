@@ -15,6 +15,7 @@
 
 #include "ble_hid.h"
 #include "config.h"
+#include <esp_heap_caps.h>
 #include "display.h"
 #include "macro.h"
 #include "net.h"
@@ -226,6 +227,8 @@ void handleLine(String line) {
                   (unsigned)hid::connectedPeers(), (unsigned)hid::sendRetries(), (unsigned)hid::droppedReports(), macro::busy(), net::staConnected(),
                   net::ssid().c_str(), net::staIp().c_str(), net::apIp().c_str(),
                   macro::lastResult().c_str());
+    Serial.printf("   %s heapMin=%u heapBlock=%u\n", display::frameStatsLine().c_str(), (unsigned)ESP.getMinFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   } else if (line == "wifi") {
     wifiWizard();
   } else if (line == "wifi clear") {

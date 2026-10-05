@@ -1,5 +1,7 @@
 #include "net.h"
 
+#include <esp_heap_caps.h>
+
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -236,6 +238,11 @@ void handleStatus() {
   j += ",\"delay\":" + String(macro::eventDelayMs());
   j += ",\"layout\":\"" + String(macro::layout() == keymap::Layout::JP ? "jp" : "us") + "\"";
   j += ",\"uptime\":" + String(millis() / 1000);
+  j += ",\"heap\":" + String(ESP.getFreeHeap());
+  j += ",\"heapMin\":" + String(ESP.getMinFreeHeap());
+  j += ",\"heapBlock\":" + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  j += ",\"cpuMHz\":" + String(getCpuFrequencyMhz());
+  j += ",\"mirror\":" + display::frameStatsJson();
   j += "}";
   sendJson(j);
 }
@@ -308,10 +315,12 @@ uint8_t gJpegBuf[kJpegMax];
 size_t gFrameLen = 0;
 enum class FrameMode { None, Jpeg, Raw } gFrameMode = FrameMode::None;
 String gFrameErr;
+uint32_t gRecvStart = 0;
 
 void handleFrameBody() {
   HTTPRaw& raw = gServer.raw();
   if (raw.status == RAW_START) {
+    gRecvStart = micros();
     gFrameMode = FrameMode::None;
     gFrameLen = 0;
     gFrameErr = HAS_TFT ? "" : "no display";
@@ -335,6 +344,7 @@ void handleFrameBody() {
     }
     gFrameLen += raw.currentSize;
   } else if (raw.status == RAW_END) {
+    display::noteReceive(micros() - gRecvStart, gFrameLen);
     if (!gFrameErr.isEmpty()) return;
     if (gFrameMode == FrameMode::Jpeg) {
       if (!display::showFrame(gJpegBuf, gFrameLen)) gFrameErr = "jpeg decode failed (see serial log)";

@@ -107,7 +107,7 @@ popups:
 # ゲーム画面を縮小して ESP32 (T-Display) の液晶に映す。状態 (STANDBY / RUN)・HP/MP・拾得数も重ねて表示
 mirror:
   enabled: true
-  interval_s: 1.0          # 送る間隔。短くすると ESP32 の HTTP が混んでキー操作が遅れるので 0.5 以上推奨
+  interval_s: 0.1          # 送る間隔 (0.1 = 毎秒 10 枚)。ESP32 の負荷は mirror_only.py の表示 (CPU %) で確認
   format: jpeg             # jpeg (5〜10KB/枚, 推奨) | raw (64.8KB/枚)
   quality: 70              # JPEG 画質 (1-100)
 

@@ -41,8 +41,8 @@ def main() -> None:
     host = (cfg.get("device") or {}).get("host")
     mirror = None
     if mcfg.get("enabled", True) and not args.dry_run:
-        mirror = Mirror(host, float(mcfg.get("interval_s", 1.0)), fmt=mcfg.get("format", "jpeg"),
-                        quality=int(mcfg.get("quality", 70)), grab=screen.grab)
+        mirror = Mirror(host, float(mcfg.get("interval_s", 0.1)), fmt=mcfg.get("format", "jpeg"),
+                        quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview)
         if mirror.enabled:
             print(f"[mirror] ESP32 ({host}) の液晶にゲーム画面を {mirror.interval:.1f} 秒ごとに送ります ({mirror.fmt})")
     popups = PopupGuard(cfg.get("popups"), device, PC_DIR)

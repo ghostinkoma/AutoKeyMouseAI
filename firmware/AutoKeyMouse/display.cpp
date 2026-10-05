@@ -94,10 +94,32 @@ size_t jpegIn(JDEC* jd, uint8_t* buf, size_t n) {
   return n;
 }
 
+// ---- 負荷計測 ----
+struct Stats {
+  uint32_t frames = 0;
+  uint64_t recvUs = 0, decodeUs = 0, drawUs = 0, bytes = 0;
+};
+Stats gCur, gLast;
+uint32_t gWinStart = 0, gLastWinMs = 0;
+uint32_t gDrawUsFrame = 0;  // 今のフレームで液晶描画に使った時間
+
+void rollStats() {
+  uint32_t now = millis();
+  if (gWinStart == 0) gWinStart = now;
+  if (now - gWinStart >= 5000) {
+    gLast = gCur;
+    gLastWinMs = now - gWinStart;
+    gCur = Stats();
+    gWinStart = now;
+  }
+}
+
 int jpegOut(JDEC* jd, void* bitmap, JRECT* r) {
   // RGB565 (ホストのバイト順) のブロックが来るのでそのまま液晶へ
   if (r->left >= FRAME_W || r->top >= FRAME_H) return 1;
+  uint32_t t0 = micros();
   gTft.drawRGBBitmap(r->left, r->top, (uint16_t*)bitmap, r->right - r->left + 1, r->bottom - r->top + 1);
+  gDrawUsFrame += micros() - t0;
   return 1;
 }
 
@@ -138,8 +160,16 @@ bool drawRaw(const uint8_t* data, size_t len) {
 
 bool showFrame(const uint8_t* data, size_t len) {
   bool ok;
-  if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) ok = drawJpeg(data, len);  // JPEG
-  else ok = drawRaw(data, len);                                                 // RGB565 BE
+  gDrawUsFrame = 0;
+  uint32_t t0 = micros();
+  bool jpeg = len > 2 && data[0] == 0xFF && data[1] == 0xD8;
+  if (jpeg) ok = drawJpeg(data, len);  // JPEG
+  else ok = drawRaw(data, len);        // RGB565 BE
+  uint32_t total = micros() - t0;
+  if (!jpeg) gDrawUsFrame = total;
+  rollStats();
+  gCur.drawUs += gDrawUsFrame;
+  gCur.decodeUs += total > gDrawUsFrame ? total - gDrawUsFrame : 0;
   if (ok) {
     gLastFrame = millis();
     gFrameShown = true;
@@ -149,6 +179,46 @@ bool showFrame(const uint8_t* data, size_t len) {
 }
 
 uint32_t framesShown() { return gFrames; }
+
+void noteReceive(uint32_t us, size_t bytes) {
+  rollStats();
+  gCur.frames++;
+  gCur.recvUs += us;
+  gCur.bytes += bytes;
+}
+
+namespace {
+void statsValues(float& fps, float& recv, float& dec, float& draw, float& cpu, float& kbps) {
+  rollStats();
+  const Stats& s = gLast;
+  uint32_t win = gLastWinMs ? gLastWinMs : 1;
+  uint32_t n = s.frames ? s.frames : 1;
+  fps = s.frames * 1000.0f / win;
+  recv = s.recvUs / 1000.0f / n;
+  dec = s.decodeUs / 1000.0f / n;
+  draw = s.drawUs / 1000.0f / n;
+  cpu = (s.decodeUs + s.drawUs) / 10.0f / win;  // % (展開 + 描画が 1 コアの時間に占める割合)
+  kbps = s.bytes * 8.0f / win;
+}
+}  // namespace
+
+String frameStatsJson() {
+  float fps, recv, dec, draw, cpu, kbps;
+  statsValues(fps, recv, dec, draw, cpu, kbps);
+  char b[200];
+  snprintf(b, sizeof(b), "{\"fps\":%.1f,\"recv_ms\":%.1f,\"decode_ms\":%.1f,\"draw_ms\":%.1f,\"cpu_pct\":%.1f,\"kbps\":%.0f}",
+           fps, recv, dec, draw, cpu, kbps);
+  return String(b);
+}
+
+String frameStatsLine() {
+  float fps, recv, dec, draw, cpu, kbps;
+  statsValues(fps, recv, dec, draw, cpu, kbps);
+  char b[160];
+  snprintf(b, sizeof(b), "mirror %.1ffps recv=%.1fms decode=%.1fms draw=%.1fms cpu=%.0f%% %.0fkbps",
+           fps, recv, dec, draw, cpu, kbps);
+  return String(b);
+}
 
 namespace {
 bool gRawActive = false;
@@ -195,6 +265,7 @@ bool rawEnd() {
   rawFlush();
   gTft.endWrite();
   gRawActive = false;
+  rollStats();  // raw は受信しながら描くので、描画時間は受信時間に含まれる
   bool ok = gRawPx == (uint32_t)FRAME_W * FRAME_H && gRawCarry < 0;
   if (ok) {
     gLastFrame = millis();
@@ -271,6 +342,9 @@ void begin() {}
 void loop() {}
 bool showFrame(const uint8_t*, size_t) { return false; }
 uint32_t framesShown() { return 0; }
+void noteReceive(uint32_t, size_t) {}
+String frameStatsJson() { return "{}"; }
+String frameStatsLine() { return "no display"; }
 bool rawBegin() { return false; }
 bool rawWrite(const uint8_t*, size_t) { return false; }
 bool rawEnd() { return false; }

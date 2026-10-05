@@ -390,6 +390,7 @@ class GameScreen:
         self._obs = ObsCapture(obs) if obs and obs.get("enabled", True) else None
         self._obs_err = 0.0
         self._obs_size_logged = False
+        self._obs_full_w = 0  # OBS が返す全体画像の横幅 (縮小画像の切り出しに使う)
         self._local = threading.local()  # mss はスレッドごとに作る (液晶ミラーが別スレッドで撮る)
         self.window_title = window_title
         self.process = process
@@ -461,6 +462,7 @@ class GameScreen:
         r = self.rect
         crop = (self._obs.cfg.get("crop") if self._obs else None)  # [x, y, w, h] (ピクセル) で手動指定も可
         h, w = img.shape[:2]
+        self._obs_full_w = w
         if not self._obs_size_logged:
             self._obs_size_logged = True
             print(f"[screen] OBS の画像 {w}x{h} / ゲーム画面 {r.width}x{r.height}" if r else f"[screen] OBS の画像 {w}x{h}")
@@ -545,6 +547,29 @@ class GameScreen:
             raise CaptureHidden("ゲームが別の仮想デスクトップにあります")
         self._use("screen")
         return self._grab_screen(self.rect)
+
+    def grab_preview(self, width: int = 480) -> np.ndarray:
+        """液晶ミラー用の小さい画像。OBS を使っているときは OBS に縮小して返してもらう (全画面の転送を省いて速くする)。"""
+        if self._obs is not None and self._method == "obs":
+            if self.hwnd is None or (IS_WINDOWS and not user32.IsWindow(self.hwnd)):
+                self.locate()
+            r = client_rect(self.hwnd)
+            try:
+                img = self._obs.grab(width, 4096)  # 横幅を合わせて縮小 (縦横比は保たれる)
+            except Exception:
+                return self.grab()
+            if r.width > 0 and r.height > 0:
+                crop = self._obs.cfg.get("crop")
+                h, w = img.shape[:2]
+                if crop and self._obs_full_w:  # 全画面での切り出し指定を縮小後の座標に直す
+                    sc = w / self._obs_full_w
+                    x, y, cw, ch = (int(round(float(v) * sc)) for v in crop)
+                    img = img[y : y + ch, x : x + cw]
+                else:  # 下に余白が付くことがあるので、ゲーム画面の縦横比で上から切る
+                    eh = min(h, round(w * r.height / r.width))
+                    img = img[:eh]
+            return np.ascontiguousarray(img)
+        return self.grab()
 
     def to_screen(self, x: float, y: float) -> tuple[float, float]:
         """クライアント座標 → スクリーン座標"""
