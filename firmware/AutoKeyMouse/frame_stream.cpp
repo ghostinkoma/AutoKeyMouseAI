@@ -31,6 +31,43 @@ bool readAll(WiFiClient& c, uint8_t* dst, size_t n, uint32_t timeoutMs) {
   return true;
 }
 
+// 受信しながら読む (BadCodec-C 用)。1 フレーム分 (len) を超えては読まない
+struct Reader {
+  WiFiClient* c;
+  uint32_t left;      // このフレームの残りバイト
+  uint32_t waitUs;    // データ待ちに使った時間
+  uint8_t buf[512];
+  size_t pos = 0, n = 0;
+};
+
+bool readFn(void* ctx, uint8_t* dst, size_t want) {
+  Reader* r = (Reader*)ctx;
+  while (want) {
+    if (r->pos == r->n) {
+      if (!r->left) return false;
+      uint32_t w0 = micros(), t0 = millis();
+      int a;
+      while ((a = r->c->available()) <= 0) {
+        if (!r->c->connected() || millis() - t0 > 3000) return false;
+        vTaskDelay(1);
+      }
+      size_t get = min((size_t)a, min(sizeof(r->buf), (size_t)r->left));
+      int got = r->c->read(r->buf, get);
+      r->waitUs += micros() - w0;
+      if (got <= 0) return false;
+      r->pos = 0;
+      r->n = got;
+      r->left -= got;
+    }
+    size_t k = min(want, r->n - r->pos);
+    memcpy(dst, r->buf + r->pos, k);
+    r->pos += k;
+    dst += k;
+    want -= k;
+  }
+  return true;
+}
+
 void task(void*) {
   WiFiServer server(FRAME_STREAM_PORT);
   bool started = false;
@@ -56,6 +93,7 @@ void task(void*) {
       }
       client.setNoDelay(true);
       gClient = true;
+      display::requestKeyframe();  // つなぎ直したら全体から
       Serial.printf("[STREAM] client %s connected\n", client.remoteIP().toString().c_str());
     }
     uint8_t hdr[8];
@@ -69,8 +107,45 @@ void task(void*) {
       continue;
     }
     uint32_t len = hdr[4] | hdr[5] << 8 | hdr[6] << 16 | (uint32_t)hdr[7] << 24;
-    if (len == 0 || len > kMax) {
-      Serial.printf("[STREAM] frame too large: %lu\n", (unsigned long)len);
+    // 先頭 2 バイトで形式を見分ける: FF D8 = JPEG / 'B' 'C' = BadCodec-C
+    Reader rd;
+    rd.c = &client;
+    rd.left = len;
+    rd.waitUs = 0;
+    uint8_t head[2];
+    if (len < 2 || !readFn(&rd, head, 2)) {
+      client.stop();
+      continue;
+    }
+    if (head[0] == 'B' && head[1] == 'C') {
+      // 受信しながら描く (バッファ不要)。描き終わったら返事: 'K' / 'R' (次はキーフレームが欲しい)
+      struct Pre {
+        Reader* r;
+        uint8_t h[2];
+        int used;
+      } pre{&rd, {head[0], head[1]}, 0};
+      auto readPre = [](void* ctx, uint8_t* dst, size_t n) -> bool {
+        Pre* p = (Pre*)ctx;
+        while (n && p->used < 2) {
+          *dst++ = p->h[p->used++];
+          --n;
+        }
+        return n == 0 || readFn(p->r, dst, n);
+      };
+      int res = display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
+      if (res == 0) {
+        Serial.println("[STREAM] badcodec frame failed");
+        client.stop();
+        continue;
+      }
+      rd.pos = rd.n;  // 念のため、このフレームの残りを捨てる
+      uint8_t junk[64];
+      while (rd.left && readFn(&rd, junk, min((uint32_t)sizeof(junk), rd.left))) rd.pos = rd.n;
+      client.write((uint8_t)(display::needKeyframe() ? 'R' : 'K'));
+      continue;
+    }
+    if (len > kMax) {
+      Serial.printf("[STREAM] jpeg too large: %lu\n", (unsigned long)len);
       client.stop();
       continue;
     }
@@ -80,7 +155,9 @@ void task(void*) {
       continue;
     }
     uint32_t t0 = micros();
-    if (!readAll(client, buf, len, 3000)) {
+    buf[0] = head[0];
+    buf[1] = head[1];
+    if (!readFn(&rd, buf + 2, len - 2)) {
       display::releaseFrameBuffer();
       client.stop();
       continue;

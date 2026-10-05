@@ -8,7 +8,8 @@
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
 
-#include "akm_tjpgd.h"  // 同梱の JPEG デコーダ (外部ライブラリ不要)
+#include "akm_tjpgd.h"
+#include "bc_decode.h"  // 同梱の JPEG デコーダ (外部ライブラリ不要)
 
 #include "ble_hid.h"
 #include "macro.h"
@@ -37,6 +38,7 @@ constexpr uint32_t kFrameHoldMs = 5000;  // 最後のフレームからこの時
 uint32_t gLastFrame = 0;
 bool gFrameShown = false;
 uint32_t gFrames = 0;
+volatile bool gNeedKey = true;  // 液晶が上書きされたので次は全体 (キーフレーム) が欲しい
 
 // 液晶の内蔵フォントは ASCII のみなので、それ以外は '?' にする
 String ascii(const String& s, size_t maxLen) {
@@ -63,6 +65,7 @@ void line(int y, uint8_t size, uint16_t color, const String& text) {
 
 void test() {
   TftLock lock;
+  gNeedKey = true;
   // 赤 → 緑 → 青 の順に全面を塗る (配線・初期化の確認用)
   const uint16_t colors[] = {ST77XX_RED, ST77XX_GREEN, ST77XX_BLUE};
   for (uint16_t c : colors) {
@@ -199,11 +202,62 @@ bool showFrame(const uint8_t* data, size_t len) {
     gLastFrame = millis();
     gFrameShown = true;
     ++gFrames;
+    gNeedKey = false;  // JPEG は全面を描くのでキーフレームと同じ
   }
   return ok;
 }
 
 uint32_t framesShown() { return gFrames; }
+
+bool needKeyframe() { return gNeedKey; }
+void requestKeyframe() { gNeedKey = true; }
+
+namespace {
+struct TftSink {
+  uint32_t drawUs = 0;
+  void fill(int x, int y, int h, uint16_t c) {
+    uint32_t d0 = micros();
+    gTft.writeFillRect(x, y, 8, h, c);
+    drawUs += micros() - d0;
+  }
+  void block(int x, int y, int h, const uint16_t* px) {
+    uint32_t d0 = micros();
+    gTft.setAddrWindow(x, y, 8, h);
+    gTft.writePixels(const_cast<uint16_t*>(px), 8 * h);
+    drawUs += micros() - d0;
+  }
+};
+}  // namespace
+
+int drawBadCodec(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
+  TftLock lock;
+  uint32_t t0 = micros();
+  uint32_t recv0 = recvUs ? *recvUs : 0;
+  TftSink sink;
+  gTft.startWrite();
+  int res = len >= 4 ? bc::decode(read, ctx, sink) : 0;
+  bool ok = res != 0;
+  bool key = res == 2;
+  uint32_t drawUs = sink.drawUs;
+  gTft.endWrite();
+  uint32_t total = micros() - t0;
+  uint32_t waited = recvUs ? *recvUs - recv0 : 0;
+  rollStats();
+  gCur.frames++;
+  gCur.bytes += len;
+  gCur.recvUs += waited;
+  gCur.drawUs += drawUs;
+  gCur.decodeUs += total > waited + drawUs ? total - waited - drawUs : 0;
+  if (!ok) {
+    gNeedKey = true;
+    return 0;
+  }
+  if (key) gNeedKey = false;
+  gLastFrame = millis();
+  gFrameShown = true;
+  ++gFrames;
+  return key ? 2 : 1;
+}
 
 void noteReceive(uint32_t us, size_t bytes) {
   rollStats();
@@ -335,6 +389,7 @@ void loop() {
   TftLock lock;
   if (gFrameShown) return;  // 待っている間にミラーが始まった
   gShown = state;
+  gNeedKey = true;  // 状態画面で上書きするので、ミラーを再開するときは全体を描き直してもらう
 
   gTft.fillScreen(ST77XX_BLACK);
   line(4, 2, ST77XX_CYAN, "AutoKeyMouse");
@@ -373,6 +428,9 @@ void loop() {}
 bool showFrame(const uint8_t*, size_t) { return false; }
 uint32_t framesShown() { return 0; }
 void noteReceive(uint32_t, size_t) {}
+int drawBadCodec(ReadFn, void*, uint32_t, const uint32_t*) { return 0; }
+bool needKeyframe() { return false; }
+void requestKeyframe() {}
 uint8_t* acquireFrameBuffer(uint32_t) { return nullptr; }
 void releaseFrameBuffer() {}
 String frameStatsJson() { return "{}"; }

@@ -87,6 +87,10 @@ class Mirror:
             self.hostname = urlparse(host if host.startswith("http") else f"http://{host}").hostname or host
         self._sock = None
         self._tcp_fail = 0
+        # fmt="bc": BadCodec-C (変わった 8x8 ブロックだけ送る)。画面全体が変わって大きくなるフレームは JPEG で送る
+        self._bc = None
+        self.bc_tolerance = 16
+        self.sent_kinds = {"bc": 0, "jpeg": 0}
         self.last_bytes = 0
         self._lock = threading.Lock()
         self._pending: bytes | None = None
@@ -129,6 +133,22 @@ class Mirror:
         with self._lock:
             self._pending = data
 
+    def _encode_bc(self, frame: np.ndarray) -> bytes:
+        """BadCodec-C で圧縮。JPEG の 1.5 倍を超えるなら JPEG にして、エンコーダの基準絵も JPEG の絵にする。"""
+        from .bcodec import Encoder, _pad, blocks, to565
+
+        if self._bc is None:
+            self._bc = Encoder(self.bc_tolerance)
+        data = self._bc.encode(frame)
+        jpg = encode(frame, "jpeg", self.quality)
+        if len(data) > len(jpg) * 1.5:
+            dec = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+            self._bc.ref = blocks(to565(_pad(dec)))  # ESP32 には JPEG の絵が出る
+            self.sent_kinds["jpeg"] += 1
+            return jpg
+        self.sent_kinds["bc"] += 1
+        return data
+
     def _ok(self, n: int) -> None:
         self.sent += 1
         self.errors = 0
@@ -161,7 +181,11 @@ class Mirror:
                 label = "GAME ON OTHER DESKTOP" if isinstance(e, CaptureHidden) else "NO GAME WINDOW"
                 lines = lines + [(label, (0, 0, 255)), (str(e)[:38].encode("ascii", "replace").decode(), (200, 200, 200))]
         t1 = time.perf_counter()
-        data = encode(compose(img, lines), self.fmt, self.quality)
+        frame = compose(img, lines)
+        if self.fmt == "bc" and self.transport in ("tcp", "auto"):
+            data = self._encode_bc(frame)
+        else:
+            data = encode(frame, "jpeg" if self.fmt == "bc" else self.fmt, self.quality)
         t2 = time.perf_counter()
         self.t_capture = 0.8 * self.t_capture + 0.2 * (t1 - t0) * 1000
         self.t_encode = 0.8 * self.t_encode + 0.2 * (t2 - t1) * 1000
@@ -181,13 +205,17 @@ class Mirror:
         try:
             self._sock.sendall(b"AKMF" + struct.pack("<I", len(data)) + data)
             ack = self._sock.recv(1)
-            if ack != b"K":
+            if ack == b"R" and self._bc is not None:
+                self._bc.request_key()  # 液晶が上書きされた: 次は全体を送る
+            elif ack != b"K" and ack != b"R":
                 raise ConnectionError("ESP32 が切断しました")
         except Exception:
             try:
                 self._sock.close()
             finally:
                 self._sock = None
+                if self._bc is not None:
+                    self._bc.request_key()  # つなぎ直したら全体から
             raise
 
     def _warn(self, msg: str) -> None:
@@ -222,7 +250,7 @@ class Mirror:
                 if data is None:
                     time.sleep(0.05)
                     continue
-            if self.transport in ("tcp", "auto") and self.fmt == "jpeg":
+            if self.transport in ("tcp", "auto") and self.fmt in ("jpeg", "bc"):
                 try:
                     tp = time.perf_counter()
                     self._send_tcp(data)
@@ -239,6 +267,8 @@ class Mirror:
                         print(f"[mirror] 専用ポートに接続できないので HTTP で送ります ({e})。"
                               "ファームウェアを frame-stream-3 以降にすると速くなります")
                         self.transport = "http"
+                        if self.fmt == "bc":
+                            self.fmt = "jpeg"  # BadCodec-C は専用ポートでしか送れない
                     else:
                         self._warn(f"専用ポート: {e}")
                     time.sleep(0.5)

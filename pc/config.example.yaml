@@ -108,7 +108,9 @@ popups:
 mirror:
   enabled: true
   interval_s: 0.1          # 送る間隔 (0.1 = 毎秒 10 枚)。ESP32 の負荷は mirror_only.py の表示 (CPU %) で確認
-  format: jpeg             # jpeg (5〜10KB/枚, 推奨) | raw (64.8KB/枚)
+  # bc  : BadCodec-C (変わった 8x8 ブロックだけ送る。ESP32 は展開不要で軽い。画面全体が変わる時だけ JPEG)
+  # jpeg: 毎回 JPEG (5〜10KB/枚, ESP32 の展開が重い) / raw: 非圧縮 (64.8KB/枚)
+  format: bc
   quality: 70              # JPEG 画質 (1-100)
   transport: auto          # tcp = 専用ポートに接続しっぱなし (速い) / http = 1 枚ずつ POST / auto = tcp を試して http
   port: 5005

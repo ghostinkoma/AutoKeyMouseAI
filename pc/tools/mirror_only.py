@@ -19,6 +19,8 @@ def main() -> None:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--fps", type=float, default=10.0, help="送る枚数/秒 (既定 10。config の mirror.interval_s より優先)")
+    ap.add_argument("--format", choices=["bc", "jpeg", "raw"], help="bc = BadCodec-C (変わったブロックだけ) / jpeg / raw")
+    ap.add_argument("--tolerance", type=int, default=16, help="BadCodec-C の許容誤差 (大きいほど小さく粗い)")
     args = ap.parse_args()
     cfg = load_config("config.yaml")
     ask_obs_password(cfg, "config.yaml")
@@ -32,9 +34,10 @@ def main() -> None:
     host = (cfg.get("device") or {}).get("host")
     if not host:
         raise SystemExit("config.yaml の device.host に ESP32 の IP を書いてください")
-    m = Mirror(host, 1.0 / max(0.5, args.fps), fmt=mcfg.get("format", "jpeg"),
+    m = Mirror(host, 1.0 / max(0.5, args.fps), fmt=args.format or mcfg.get("format", "bc"),
                quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview,
                transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)))
+    m.bc_tolerance = args.tolerance
     m.set_lines([("MIRROR ONLY", (0, 200, 255))])
     print(f"[mirror] {host} に毎秒 {1 / m.interval:.0f} 枚で送信中 ({m.fmt}) Ctrl+C で終了  (--fps で変更)")
     import requests
@@ -43,7 +46,8 @@ def main() -> None:
     try:
         while True:
             time.sleep(5)
-            print(f"[mirror] 送信 {m.sent} 枚  失敗 {m.errors}  {m.fps:.1f}fps  形式 {m.fmt}  {m.last_bytes} バイト/枚  "
+            kinds = f" (bc {m.sent_kinds['bc']} / jpeg {m.sent_kinds['jpeg']})" if m.fmt == "bc" else ""
+            print(f"[mirror] 送信 {m.sent} 枚  失敗 {m.errors}  {m.fps:.1f}fps  形式 {m.fmt}{kinds}  {m.last_bytes} バイト/枚  "
                   f"(PC: 撮影 {m.t_capture:.0f}ms 圧縮 {m.t_encode:.0f}ms 送信 {m.t_post:.0f}ms)")
             try:
                 st = requests.get(status_url, timeout=2).json()

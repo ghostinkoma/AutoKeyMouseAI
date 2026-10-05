@@ -23,6 +23,14 @@ void noteReceive(uint32_t us, size_t bytes);  // 1 フレームの受信にか�
 String frameStatsJson();                      // {"fps":..,"recv_ms":..,"decode_ms":..,"draw_ms":..,"cpu_pct":..}
 String frameStatsLine();                      // シリアル表示用
 
+// BadCodec-C (8x8 ブロック差分のカラー版, pc/akm/bcodec.py) を受信しながら描く。
+// read(dst, n) は n バイト読めたら true。recvUs には受信待ちに使った時間を足していく。
+// 戻り値: 0 = 失敗, 1 = 差分フレーム, 2 = キーフレーム
+typedef bool (*ReadFn)(void* ctx, uint8_t* dst, size_t n);  // bc::ReadFn と同じ型
+int drawBadCodec(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs);
+bool needKeyframe();    // 液晶が上書きされた (状態画面など) ので次は全体 (キーフレーム) が欲しい
+void requestKeyframe();
+
 // 受信した JPEG を置く共用バッファ (Web サーバーの /frame と専用 TCP の両方で使う。メモリ節約のため 1 つだけ)
 // 取れなければ nullptr。使い終わったら releaseFrameBuffer()。
 constexpr size_t FRAME_BUF_SIZE = 24 * 1024;

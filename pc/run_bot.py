@@ -41,7 +41,7 @@ def main() -> None:
     host = (cfg.get("device") or {}).get("host")
     mirror = None
     if mcfg.get("enabled", True) and not args.dry_run:
-        mirror = Mirror(host, float(mcfg.get("interval_s", 0.1)), fmt=mcfg.get("format", "jpeg"),
+        mirror = Mirror(host, float(mcfg.get("interval_s", 0.1)), fmt=mcfg.get("format", "bc"),
                         quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview,
                transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)))
         if mirror.enabled:

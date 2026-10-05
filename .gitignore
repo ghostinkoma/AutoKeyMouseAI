@@ -9,3 +9,4 @@ pc/obs_debug.png
 pc/data/
 pc/maplog_*.png
 viewer/target/
+pc/tests/_bc_decode_test

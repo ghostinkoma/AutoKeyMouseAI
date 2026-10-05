@@ -536,3 +536,97 @@ def test_mirror_tcp_stream_sends_framed_jpeg_and_waits_ack():
     while len(got) < 3 and time.monotonic() - t < 5:
         time.sleep(0.05)
     assert len(got) == 3 and all(g[:2] == b"\xff\xd8" for g in got) and m.sent >= 3
+
+
+def test_badcodec_roundtrip_python_and_esp32_decoder():
+    """PC のエンコーダ → Python の参照デコーダ / ESP32 と同じ C++ デコーダ で同じ絵になる。"""
+    import shutil
+    import struct
+    import subprocess
+
+    import cv2
+
+    from akm.bcodec import Encoder, decode, rgb_of565, to565, unblocks
+
+    rng = np.random.default_rng(3)
+    base = rng.integers(0, 255, (135, 240, 3), dtype=np.uint8)
+    base = cv2.GaussianBlur(base, (0, 0), 3)  # ゲーム画面らしい滑らかさ
+    base[100:, :] = (30, 40, 50)  # 単色の帯 (FILL)
+    enc = Encoder(16)
+    frames, refs = [], []
+    prev = None
+    for f in range(4):
+        img = base.copy()
+        cv2.circle(img, (60 + 30 * f, 60), 20, (0, 0, 255), -1)  # 動く物
+        if f == 2:
+            img = cv2.add(img, 25)  # 全体が変わる
+        data = enc.encode(img)
+        dec = decode(data, prev)
+        prev = dec
+        assert (dec == unblocks(enc.ref)[:135]).all()
+        assert np.abs(rgb_of565(dec) - rgb_of565(to565(img))).max() <= 16
+        frames.append(data)
+        refs.append(dec)
+    assert frames[0][3] == 1 and frames[1][3] == 0  # 1 枚目はキーフレーム
+    assert len(frames[1]) < len(frames[0]) // 5  # 変化が小さいフレームは小さい
+
+    gxx = shutil.which("g++")
+    if not gxx:
+        return
+    exe = PC / "tests" / "_bc_decode_test"
+    subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(PC / "tests" / "bc_decode_test.cpp")], check=True)
+    try:
+        stdin = b"".join(struct.pack("<I", len(d)) + d for d in frames)
+        out = subprocess.run([str(exe)], input=stdin, capture_output=True, check=True).stdout
+        n = 240 * 135 * 2
+        for i, ref in enumerate(refs):
+            fb = np.frombuffer(out[i * n:(i + 1) * n], "<u2").reshape(135, 240)
+            assert (fb == ref).all(), f"frame {i}"
+    finally:
+        exe.unlink(missing_ok=True)
+
+
+def test_mirror_bc_over_tcp_falls_back_to_jpeg_for_big_changes_and_honors_keyframe_request():
+    import socket
+    import struct
+    import threading
+    import time
+
+    from akm.mirror import Mirror
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    got = []
+
+    def esp():
+        c, _ = srv.accept()
+        f = c.makefile("rb")
+        while len(got) < 6:
+            n = struct.unpack("<I", f.read(8)[4:])[0]
+            got.append(f.read(n))
+            c.sendall(b"R" if len(got) == 3 else b"K")  # 3 枚目のあと「全体をください」
+        c.close()
+
+    threading.Thread(target=esp, daemon=True).start()
+    rng = np.random.default_rng(1)
+    frames = [np.full((1050, 1680, 3), 70, np.uint8)]
+    calls = {"n": 0}
+
+    def grab():
+        calls["n"] += 1
+        img = frames[0].copy()
+        if calls["n"] == 2:  # 2 枚目は全体がノイズで変わる → JPEG
+            img = rng.integers(0, 255, img.shape, dtype=np.uint8)
+        return img
+
+    m = Mirror("127.0.0.1", 0.02, fmt="bc", grab=grab, transport="tcp", port=port)
+    t = time.monotonic()
+    while len(got) < 6 and time.monotonic() - t < 5:
+        time.sleep(0.05)
+    assert got[0][:2] == b"BC" and got[0][3] == 1  # 最初はキーフレーム
+    assert got[1][:2] == b"\xff\xd8"               # 大きな変化は JPEG
+    assert got[2][:2] == b"BC"
+    assert got[3][:2] == b"BC" and got[3][3] == 1  # R を受けたので次はキーフレーム
+    assert m.sent_kinds["jpeg"] >= 1
