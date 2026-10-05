@@ -47,6 +47,10 @@ def main() -> None:
                   f"(PC: 撮影 {m.t_capture:.0f}ms 圧縮 {m.t_encode:.0f}ms 送信 {m.t_post:.0f}ms)")
             try:
                 st = requests.get(status_url, timeout=2).json()
+                if "mirror" not in st:
+                    print(f"         ESP32: ファームウェアが古いので計測値がありません (fw={st.get('fw', 'なし')})。"
+                          "frame-stream-3 を書き込んでください")
+                    continue
                 e = st.get("mirror") or {}
                 print(f"         ESP32: {e.get('fps', 0)}fps 受信 {e.get('recv_ms', 0)}ms 展開 {e.get('decode_ms', 0)}ms "
                       f"描画 {e.get('draw_ms', 0)}ms → CPU {e.get('cpu_pct', 0)}% (1 コア, {st.get('cpuMHz', '?')}MHz)  "
