@@ -108,7 +108,7 @@ class ElfBot:
         self.holding_attack = False
         self.dir_index = 0
         self.last_dir_change = 0.0
-        self.last_buff = 0.0  # 起動直後にバフを掛ける
+        self.last_buff = float("-inf")  # 起動直後にバフを掛ける (PC 起動直後で monotonic が小さくても)
         self.last_potion = 0.0
         self.last_heal = 0.0
         self.hp_zero_since: float | None = None
@@ -168,7 +168,7 @@ class ElfBot:
             self.helper.believed_on = False  # 死亡で MU Helper は止まる
             self.helper.ensure_on(self.screen.grab(), self.screen.grab)
         self.hp_zero_since = None
-        self.last_buff = 0.0  # 復帰後にバフを掛け直す
+        self.last_buff = float("-inf")  # 復帰後にバフを掛け直す
         return True
 
     def handle_recovery(self, st: Status, now: float) -> None:
@@ -440,7 +440,7 @@ class ElfBot:
                             pass
                     if key_pressed(start_vk):
                         running = True
-                        self.last_buff = 0.0
+                        self.last_buff = float("-inf")
                         print(f"[bot] 開始 ({self.mode} モード / PageDown で停止)")
                         start_script = g.get("start_script")
                         if start_script and self.screen.is_active():
