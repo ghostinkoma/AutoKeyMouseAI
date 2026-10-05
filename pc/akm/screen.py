@@ -390,7 +390,8 @@ class GameScreen:
         self._obs = ObsCapture(obs) if obs and obs.get("enabled", True) else None
         self._obs_err = 0.0
         self._obs_size_logged = False
-        self._obs_full_w = 0  # OBS が返す全体画像の横幅 (縮小画像の切り出しに使う)
+        self._obs_full_w = 0  # OBS が返す全体画像の大きさ (縮小を頼むときの縦横比・切り出しに使う)
+        self._obs_full_h = 0
         self._local = threading.local()  # mss はスレッドごとに作る (液晶ミラーが別スレッドで撮る)
         self.window_title = window_title
         self.process = process
@@ -462,7 +463,7 @@ class GameScreen:
         r = self.rect
         crop = (self._obs.cfg.get("crop") if self._obs else None)  # [x, y, w, h] (ピクセル) で手動指定も可
         h, w = img.shape[:2]
-        self._obs_full_w = w
+        self._obs_full_w, self._obs_full_h = w, h
         if not self._obs_size_logged:
             self._obs_size_logged = True
             print(f"[screen] OBS の画像 {w}x{h} / ゲーム画面 {r.width}x{r.height}" if r else f"[screen] OBS の画像 {w}x{h}")
@@ -554,8 +555,14 @@ class GameScreen:
             if self.hwnd is None or (IS_WINDOWS and not user32.IsWindow(self.hwnd)):
                 self.locate()
             r = client_rect(self.hwnd)
+            if not self._obs_full_w:
+                self.grab()  # 一度全体を撮って OBS の画像の大きさを知る
+            if not self._obs_full_w:
+                return self.grab()
+            # OBS は指定した大きさにそのまま引き伸ばすので、元の縦横比で高さを決める
+            height = max(8, round(width * self._obs_full_h / self._obs_full_w))
             try:
-                img = self._obs.grab(width, 4096)  # 横幅を合わせて縮小 (縦横比は保たれる)
+                img = self._obs.grab(width, height)
             except Exception:
                 return self.grab()
             if r.width > 0 and r.height > 0:

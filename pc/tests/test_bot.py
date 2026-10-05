@@ -476,3 +476,29 @@ def test_builtin_monsters_and_pasted_text():
     assert [m["map"] for m in p if m["name"] == "デスキング"] == ["ロレンシア", "ノリア", "ロストタワー"]
     assert [m["map"] for m in p if m["name"] == "福袋"] == ["アイダ", "ロストタワー"]
     assert all(m["note"] == "レアキャラ" for m in p if m["name"] == "デスキング")
+
+
+def test_obs_preview_keeps_aspect_ratio(monkeypatch):
+    from akm.screen import GameScreen, Rect
+
+    gs = GameScreen("MU", obs={"enabled": True})
+    calls = []
+    full = np.zeros((1274, 1680, 3), np.uint8)
+    full[:1050] = 100
+
+    def fake_grab(width=None, height=None):
+        calls.append((width, height))
+        if width is None:
+            return full
+        import cv2
+        return cv2.resize(full, (width, height), interpolation=cv2.INTER_AREA)  # OBS は指定の大きさに引き伸ばす
+
+    gs._obs.grab = fake_grab
+    gs._method = "obs"
+    gs.hwnd = 1
+    import akm.screen as scr
+    monkeypatch.setattr(scr, "client_rect", lambda hwnd: Rect(0, 0, 1680, 1050))
+    gs.rect = Rect(0, 0, 1680, 1050)
+    img = gs.grab_preview(480)
+    assert calls[-1] == (480, round(480 * 1274 / 1680))  # 縦横比どおりに頼む
+    assert img.shape[:2] == (300, 480) and img.min() == 100  # 下の余白を落としてゲーム画面だけ
