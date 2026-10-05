@@ -78,6 +78,19 @@ def bits_of_drop(drop_bits: int) -> tuple[int, int, int]:
     return (max(1, 5 - d), max(1, 6 - d), max(1, 5 - d))
 
 
+def gray565(img: np.ndarray, bits: tuple[int, int, int]) -> np.ndarray:
+    """各色の送る上位ビットを Gray 符号にする (下位の捨てたビットは 0 のまま)。
+    隣り合う明るさで変わるビットが 1 つになり、下位のビット面のノイズが減る (可逆)。"""
+    img = img.astype(np.uint16)
+    out = np.zeros_like(img)
+    for shift, width, n in ((11, 5, bits[0]), (5, 6, bits[1]), (0, 5, bits[2])):
+        v = (img >> shift) & ((1 << width) - 1)
+        v >>= width - n
+        v ^= v >> 1
+        out |= (v << (width - n)) << shift
+    return out
+
+
 def parse_color(s) -> tuple[int, int, int]:
     """'343' → (3, 4, 3)。R 1-5, G 1-6, B 1-5。"""
     s = str(s).strip()
@@ -105,9 +118,11 @@ class Encoder:
     prev_free=False: ver 2。面ごとに BadCodec のフレームを送る (前フレームを使う命令も使えて小さいが、
     受信側に (面の数 + 1) x 4KB 要る)。"""
 
-    def __init__(self, drop_bits: int = 0, bits: tuple[int, int, int] | None = None, prev_free: bool = True):
+    def __init__(self, drop_bits: int = 0, bits: tuple[int, int, int] | None = None, prev_free: bool = True,
+                 gray: bool = False):
         self.bits = tuple(bits) if bits else bits_of_drop(drop_bits)
         self.prev_free = prev_free
+        self.gray = gray and prev_free  # Gray 符号は ver 3 だけ (frame-stream-10 以降)
         self.prev: list[np.ndarray] | None = None
         self.prev565: np.ndarray | None = None
         self.force_key = True
@@ -124,6 +139,8 @@ class Encoder:
         mask = self._mask()
         img = to565(np.concatenate([bgr, bgr[-1:]], axis=0)) & mask
         if self.prev_free:
+            if self.gray:
+                img = gray565(img, self.bits)
             return self._encode_abs(np.ascontiguousarray(img, np.uint16), mask)
         planes = planes_of(img)
         key = self.force_key or self.prev is None
@@ -149,7 +166,8 @@ class Encoder:
             raise RuntimeError("bad16_encode_abs failed")
         self.changed_blocks = ch.value
         self.prev565 = img
-        return b"B6\x03" + bytes([1 if key else 0]) + struct.pack("<H", mask) + out[:n].tobytes()
+        flags = (1 if key else 0) | (2 if self.gray else 0)
+        return b"B6\x03" + bytes([flags]) + struct.pack("<H", mask) + out[:n].tobytes()
 
 
 # ------------------------------------------------------------- 参照デコーダ (テスト用) --

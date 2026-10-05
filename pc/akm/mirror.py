@@ -67,7 +67,8 @@ class Mirror:
 
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
                  fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005,
-                 pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5)):
+                 pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5),
+                 b16_gray: bool = False):
         self.enabled = enabled and bool(host)
         self.url = None
         if self.enabled:
@@ -102,6 +103,7 @@ class Mirror:
         # True: 前フレーム不要版 (ver 3)。ESP32 は変わったブロックを直接液晶へ描くのでメモリ不足にならない。
         # False: 面ごとのフレーム (ver 2)。少し小さいが ESP32 に (面の数 + 1) x 4KB 要る
         self.b16_prev_free = b16_prev_free
+        self.b16_gray = b16_gray  # 各色を Gray 符号にしてからビット面に分ける (1 割強小さくなる。frame-stream-10 以降)
         # 返事を待たずに先に送ってよい枚数 (bc / bad16)。ESP32 が展開・描画している間に次のフレームを
         # 送っておけるので、送信と展開が重なって速くなる。1 = 1 枚ずつ返事を待つ
         self.pipeline = pipeline
@@ -221,7 +223,7 @@ class Mirror:
             if self._b16 is None:
                 from .bad16 import Encoder
 
-                self._b16 = Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free)
+                self._b16 = Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free, gray=self.b16_gray)
             data = self._b16.encode(frame)
         else:
             data = encode(frame, "jpeg" if self.fmt in ("bc", "bad16") else self.fmt, self.quality)
@@ -308,7 +310,7 @@ class Mirror:
                 import re
 
                 m = re.match(r"frame-stream-(\d+)", fw)
-                need = 9 if self.b16_prev_free else 7
+                need = (10 if self.b16_gray else 9) if self.b16_prev_free else 7
                 if self.fmt == "bad16" and (not m or int(m.group(1)) < need):
                     print(f"[mirror] BadCodec 16bit 版{'(前フレーム不要版)' if self.b16_prev_free else ''}には "
                           f"frame-stream-{need} 以降が必要です。ファームウェアを書き込み直してください")

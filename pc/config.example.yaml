@@ -115,6 +115,7 @@ mirror:
   format: bad16
   # bad16 の色のビット数 R G B。565 = 可逆 (16 面, 1 枚 30KB 前後) / 343 = 10 面 (既定) / 332 = 8 面 (一番小さい)
   color: "343"
+  gray: false              # true: 各色を Gray 符号にして送る (可逆のまま 1 割強小さい。firmware frame-stream-10 以降)
   with_prev: false         # true: 面ごとのフレーム (少し小さいが ESP32 に面の数 x 4KB 要る。S3 + PSRAM 向け)
   quality: 70              # JPEG 画質 (1-100)
   transport: auto          # tcp = 専用ポートに接続しっぱなし (速い) / http = 1 枚ずつ POST / auto = tcp を試して http

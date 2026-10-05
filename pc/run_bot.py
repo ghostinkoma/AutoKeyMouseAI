@@ -47,7 +47,8 @@ def main() -> None:
                         quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview,
                         transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)),
                         b16_bits=parse_color(mcfg.get("color", "343")),
-                        b16_prev_free=not mcfg.get("with_prev", False))
+                        b16_prev_free=not mcfg.get("with_prev", False),
+                        b16_gray=bool(mcfg.get("gray", False)))
         if mirror.enabled:
             print(f"[mirror] ESP32 ({host}) の液晶にゲーム画面を {mirror.interval:.1f} 秒ごとに送ります ({mirror.fmt})")
     popups = PopupGuard(cfg.get("popups"), device, PC_DIR)

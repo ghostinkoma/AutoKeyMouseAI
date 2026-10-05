@@ -26,6 +26,8 @@ def main() -> None:
     ap.add_argument("--with-prev", action="store_true",
                     help="bad16 を面ごとのフレーム (ver 2) で送る。少し小さいが ESP32 に面の数 x 4KB 要る "
                          "(既定は前フレーム不要版: メモリ不足にならない)")
+    ap.add_argument("--gray", action="store_true",
+                    help="bad16 で各色を Gray 符号にしてから送る (可逆のまま 1 割強小さい。firmware frame-stream-10 以降)")
     ap.add_argument("--color", help="bad16 の色のビット数 R G B を 3 桁で (例 343 = 10 面, 342 = 9 面, 332 = 8 面)。"
                                     "--drop-bits より優先")
     ap.add_argument("--tolerance", type=int, default=16, help="ブロック差分方式の許容誤差 (大きいほど小さく粗い)")
@@ -60,7 +62,8 @@ def main() -> None:
     m = Mirror(host, 1.0 / max(0.5, args.fps), fmt=args.format or mcfg.get("format", "bad16"),
                quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview,
                transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)),
-               b16_bits=bits, b16_prev_free=not (args.with_prev or mcfg.get("with_prev", False)))
+               b16_bits=bits, b16_prev_free=not (args.with_prev or mcfg.get("with_prev", False)),
+               b16_gray=args.gray or bool(mcfg.get("gray", False)))
     m.bc_tolerance = args.tolerance
     m.bc_max_ratio = args.max_ratio
     m.set_lines([("MIRROR ONLY", (0, 200, 255))])

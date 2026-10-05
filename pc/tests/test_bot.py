@@ -637,7 +637,7 @@ def test_mirror_bc_over_tcp_falls_back_to_jpeg_for_big_changes_and_honors_keyfra
     m.stop()
 
 
-def _bad16_frames(bits, prev_free=False):
+def _bad16_frames(bits, prev_free=False, gray=False):
     """ゲーム画面らしい絵 → 小さな変化 / 全体ノイズ / 変化なし / 左右反転 / ずらし / 反転。
     6 枚目から色のビット数を変える (ESP32 で面が足りずに減らしたときと同じ)。"""
     import cv2
@@ -663,19 +663,19 @@ def _bad16_frames(bits, prev_free=False):
             img = 255 - prev
         prev = img
         imgs.append(img)
-    enc = Encoder(bits=bits, prev_free=prev_free)
+    enc = Encoder(bits=bits, prev_free=prev_free, gray=gray)
     frames, expect = [], []
     for f, img in enumerate(imgs):
         if f == 6:  # 途中で面の組み合わせを変える (次はキーフレーム)
-            enc = Encoder(bits=(2, 3, 2), prev_free=prev_free)
+            enc = Encoder(bits=(2, 3, 2), prev_free=prev_free, gray=gray)
         frames.append(enc.encode(img))
         expect.append(to565(img) & enc._mask())
     return frames, expect
 
 
-@pytest.mark.parametrize("prev_free", [False, True])
+@pytest.mark.parametrize("prev_free,gray", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("bits", [(5, 6, 5), (4, 5, 4), (3, 4, 2), (2, 3, 2)])
-def test_bad16_esp32_decoder_matches_encoder(bits, prev_free):
+def test_bad16_esp32_decoder_matches_encoder(bits, prev_free, gray):
     """BadCodec 16bit 版: C エンコーダ → ESP32 と同じ C++ デコーダ (公式 bad_decode.cpp + bad16.h) で元の絵に戻る。"""
     import shutil
     import struct
@@ -686,15 +686,16 @@ def test_bad16_esp32_decoder_matches_encoder(bits, prev_free):
     gxx = shutil.which("g++")
     if not gxx or (sys.platform != "win32" and not shutil.which("gcc")):
         pytest.skip("g++ / gcc が無い")
-    frames, expect = _bad16_frames(bits, prev_free)
+    frames, expect = _bad16_frames(bits, prev_free, gray)
     ver = 3 if prev_free else 2
-    assert frames[0][:4] == b"B6" + bytes([ver, 1]) and frames[1][3] == 0  # 1 枚目はキーフレーム
+    g = 2 if gray else 0
+    assert frames[0][:4] == b"B6" + bytes([ver, 1 | g]) and frames[1][3] == g  # 1 枚目はキーフレーム
     assert struct.unpack_from("<H", frames[0], 4)[0] == mask_of(bits)
     assert bin(mask_of(bits)).count("1") == sum(bits)
-    assert frames[6][3] == 1                       # 面を変えたらキーフレーム
+    assert frames[6][3] & 1                         # 面を変えたらキーフレーム
     assert len(frames[1]) < len(frames[0]) // 10  # 変化が小さいフレームは小さい
     assert len(frames[4]) < 100                    # 変化なしはほぼ 0
-    exe = PC / "tests" / ("_bad16_decode_test_" + "".join(map(str, bits)) + str(ver))
+    exe = PC / "tests" / ("_bad16_decode_test_" + "".join(map(str, bits)) + str(ver) + str(g))
     fw = PC.parent / "firmware" / "AutoKeyMouse"
     subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(PC / "tests" / "bad16_decode_test.cpp"),
                     str(fw / "bad_decode.cpp")], check=True)

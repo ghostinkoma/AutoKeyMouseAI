@@ -74,12 +74,32 @@ inline void makeHeader() {
 }
 }  // namespace detail
 
+namespace detail {
+// 1 バイト (8 画素ぶんの 1 ビット面) → 8 バイト (各画素 0/1, LSB = 左)。2KB の定数表 (ESP32 ではフラッシュに置かれる)
+struct Spread {
+  uint64_t t[256];
+  constexpr Spread() : t() {
+    for (int v = 0; v < 256; v++) {
+      uint64_t x = 0;
+      for (int k = 0; k < 8; k++)
+        if (v >> k & 1) x |= (uint64_t)1 << (8 * k);
+      t[v] = x;
+    }
+  }
+};
+inline const uint64_t* spread() {
+  static constexpr Spread s;
+  return s.t;
+}
+}  // namespace detail
+
 // コンテナの先頭
 //   ver 1: 'B' '6' 1 flags                … 16 面すべて、面ごとの BadCodec フレーム (前フレームが要る)
 //   ver 2: 'B' '6' 2 flags mask(u16 LE)   … mask の面だけ、面ごとの BadCodec フレーム (前フレームが要る)
 //   ver 3: 'B' '6' 3 flags mask(u16 LE)   … 前フレーム不要のブロックストリーム (decodeAbs)
 struct Header {
   bool key = false;
+  bool gray = false;       // flags bit1 (ver 3): 各色を Gray 符号にしてからビット面に分けてある
   bool abs = false;        // ver 3
   uint16_t mask = 0xFFFF;  // 送られてくるビット面 (bit b = RGB565 の bit b)。無い面は常に 0
 };
@@ -94,6 +114,7 @@ inline bool readHeader(ReadFn read, void* ctx, Header& h) {
   uint8_t b[4];
   if (!read(ctx, b, 4) || b[0] != 'B' || b[1] != '6') return false;
   h.key = b[3] & 1;
+  h.gray = b[3] & 2;
   if (b[2] == 1) {
     h.mask = 0xFFFF;
     return true;
@@ -208,7 +229,7 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       ptr += BAD_SKIP_COUNT(op);
       continue;
     }
-    memset(px, 0, sizeof(px));
+    uint8_t rowsAll[16][8];  // 面ごとの 8 行 (1 行 1 バイト)
     bool first = true;
     for (int b = 0; b < 16; b++) {
       if (!(h.mask >> b & 1)) continue;
@@ -221,15 +242,28 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       }
       uint8_t n = bad_block_abs_len(d[0]);
       if (n == 0 || (n > 1 && !read(ctx, d + 1, n - 1))) return -1;
-      uint8_t rows[8];
-      if (bad_block_abs_rows(d, rows) != BAD_OK) return -1;
-      uint16_t bit = (uint16_t)(1u << b);
-      for (int y = 0; y < 8; y++) {
-        uint8_t v = rows[y];
-        if (!v) continue;
-        for (int x = 0; x < 8; x++)
-          if (v >> x & 1) px[y * 8 + x] |= bit;
-      }
+      if (bad_block_abs_rows(d, rowsAll[b]) != BAD_OK) return -1;
+    }
+    if (h.gray) {
+      // Gray 符号 → 2 進: 各色の上の桁から「1 つ上の桁 (2 進に戻した後) と XOR」。面の 1 行 = 1 バイトのまま計算できる
+      // (B = bit0-4, G = bit5-10, R = bit11-15。送られていない下位の面は 0 のまま)
+      static const uint8_t lo[3] = {0, 5, 11}, hi[3] = {4, 10, 15};
+      for (int c = 0; c < 3; c++)
+        for (int b = hi[c] - 1; b >= lo[c]; b--) {
+          if (!(h.mask >> b & 1)) break;
+          for (int y = 0; y < 8; y++) rowsAll[b][y] ^= rowsAll[b + 1][y];
+        }
+    }
+    // 16 面の 1 行 (各 1 バイト) から 8 画素を表引きでまとめて組む (ビットの数に関係なく一定の速さ)
+    const uint64_t* sp = detail::spread();
+    for (int y = 0; y < 8; y++) {
+      uint64_t lo = 0, hi = 0;
+      for (int b = 0; b < 8; b++)
+        if (h.mask >> b & 1) lo |= sp[rowsAll[b][y]] << b;
+      for (int b = 8; b < 16; b++)
+        if (h.mask >> b & 1) hi |= sp[rowsAll[b][y]] << (b - 8);
+      uint16_t* p = px + y * 8;
+      for (int k = 0; k < 8; k++) p[k] = (uint16_t)((lo >> (8 * k)) & 0xFF) | (uint16_t)(((hi >> (8 * k)) & 0xFF) << 8);
     }
     int bx = ptr % NBX, by = ptr / NBX;
     int rows = ROWS - by * 8;
@@ -247,24 +281,6 @@ inline int decode(State& s, ReadFn read, void* ctx) {
   return decodeBody(s, h, read, ctx);
 }
 
-namespace detail {
-// 1 バイト (8 画素ぶんの 1 ビット面) → 8 バイト (各画素 0/1, LSB = 左)。2KB の定数表 (ESP32 ではフラッシュに置かれる)
-struct Spread {
-  uint64_t t[256];
-  constexpr Spread() : t() {
-    for (int v = 0; v < 256; v++) {
-      uint64_t x = 0;
-      for (int k = 0; k < 8; k++)
-        if (v >> k & 1) x |= (uint64_t)1 << (8 * k);
-      t[v] = x;
-    }
-  }
-};
-inline const uint64_t* spread() {
-  static constexpr Spread s;
-  return s.t;
-}
-}  // namespace detail
 
 // 16 面から RGB565 の行を組み立てて sink(y, row) に渡す (y = y0..y1, row は 240 画素)
 template <typename Sink>
