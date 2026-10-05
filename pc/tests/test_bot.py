@@ -625,6 +625,7 @@ def test_mirror_bc_over_tcp_falls_back_to_jpeg_for_big_changes_and_honors_keyfra
         return img
 
     m = Mirror("127.0.0.1", 0.02, fmt="bc", grab=grab, transport="tcp", port=port)
+    m.pipeline = 1  # 1 枚ずつ返事を待つ (R の次がキーフレームになる)
     t = time.monotonic()
     while len(got) < 6 and time.monotonic() - t < 5:
         time.sleep(0.05)
@@ -760,6 +761,7 @@ def test_mirror_bad16_over_tcp_shrinks_planes_on_E_then_jpeg():
     threading.Thread(target=esp, daemon=True).start()
     m = Mirror("127.0.0.1", 0.02, fmt="bad16", grab=lambda: np.full((1050, 1680, 3), 70, np.uint8),
                transport="tcp", port=port)
+    m.pipeline = 1  # 1 枚ずつ返事を待つ (送る順番を決まったものにする)
     t = time.monotonic()
     while len(got) < 12 and time.monotonic() - t < 15:
         time.sleep(0.05)
@@ -770,3 +772,61 @@ def test_mirror_bad16_over_tcp_shrinks_planes_on_E_then_jpeg():
     assert got[7][:3] == b"B6\x02" and got[7][3] == 1  # R のあとはキーフレーム
     assert any(d[:2] == b"\xff\xd8" for d in got[9:])  # もう入らない → JPEG
     assert m.fmt == "jpeg"
+
+
+def test_mirror_bad16_pipeline_sends_ahead_and_shrinks_one_level_at_a_time():
+    """返事を待たずに 1 枚先に送る。先に送った分の 'E' で段階を飛ばさない。"""
+    import shutil
+    import socket
+    import struct
+    import threading
+    import time
+
+    from akm.mirror import Mirror
+
+    if sys.platform != "win32" and not shutil.which("gcc") and not (PC / "native" / "libbad_encode.so").exists():
+        pytest.skip("gcc が無い")
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    got = []
+    ahead = []  # 返事を出す前に次のフレームが届いていたか
+
+    def planes(d):
+        return bin(struct.unpack_from("<H", d, 4)[0]).count("1")
+
+    def esp():
+        c, _ = srv.accept()
+        f = c.makefile("rb")
+        state = None  # 用意できている面の数
+        while len(got) < 14:
+            n = struct.unpack("<I", f.read(8)[4:])[0]
+            d = f.read(n)
+            got.append(d)
+            time.sleep(0.05)  # 展開・描画している間
+            c.setblocking(False)
+            try:
+                ahead.append(len(c.recv(1, socket.MSG_PEEK)) == 1)
+            except BlockingIOError:
+                ahead.append(False)
+            c.setblocking(True)
+            p, key = planes(d), d[3] & 1
+            if key:
+                state = p if p <= 9 else None
+                c.sendall(b"K" if state else b"E")
+            else:
+                c.sendall(b"K" if state == p else b"R")
+        c.close()
+
+    threading.Thread(target=esp, daemon=True).start()
+    m = Mirror("127.0.0.1", 0.01, fmt="bad16", grab=lambda: np.full((1050, 1680, 3), 70, np.uint8),
+               transport="tcp", port=port)
+    t = time.monotonic()
+    while len(got) < 14 and time.monotonic() - t < 15:
+        time.sleep(0.05)
+    m.stop()
+    keys = [planes(d) for d in got if d[3] & 1]
+    assert keys[:4] == [16, 13, 10, 9], keys  # 段階を飛ばさない
+    assert m.b16_bits == (3, 4, 2)
+    assert any(ahead[4:]), ahead               # 返事の前に次のフレームが届いている (重なっている)

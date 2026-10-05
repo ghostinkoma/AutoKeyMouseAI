@@ -98,6 +98,11 @@ class Mirror:
         # 色のビット数を 1 段ずつ下げて (面を減らして) 送り直し、最後は JPEG に戻す
         self._b16 = None
         self.b16_bits: tuple[int, int, int] = (5, 6, 5)  # R, G, B のビット数 (5, 6, 5 = 可逆)
+        # 返事を待たずに先に送ってよい枚数 (bc / bad16)。ESP32 が展開・描画している間に次のフレームを
+        # 送っておけるので、送信と展開が重なって速くなる。1 = 1 枚ずつ返事を待つ
+        self.pipeline = 2
+        self._inflight: list[tuple] = []  # 返事待ちのフレーム (形式, bad16 の色, キーフレームの世代)
+        self._key_gen = 0  # 送ったキーフレームの数
         self.last_bytes = 0
         self._lock = threading.Lock()
         self._pending: bytes | None = None
@@ -234,18 +239,31 @@ class Mirror:
             print(f"[mirror] 専用ポート {self.hostname}:{self.port} に接続しました (TCP で連続送信)")
         try:
             self._sock.sendall(b"AKMF" + struct.pack("<I", len(data)) + data)
-            ack = self._sock.recv(1)
-            if ack == b"R":
-                self._request_key()  # 液晶が上書きされた: 次は全体を送る
-            elif ack == b"E":
-                self._b16_shrink()
-            elif ack != b"K":
-                raise ConnectionError("ESP32 が切断しました")
+            kind = "bad16" if data[:2] == b"B6" else ("bc" if data[:2] == b"BC" else "jpeg")
+            if kind == "jpeg" or data[3] & 1:  # JPEG も全体を描くのでキーフレームと同じ
+                self._key_gen += 1
+            self._inflight.append((kind, self.b16_bits, self._key_gen))
+            depth = self.pipeline if kind != "jpeg" else 1
+            while len(self._inflight) >= max(1, depth):
+                ack = self._sock.recv(1)
+                sent_kind, sent_bits, gen = self._inflight.pop(0)
+                if ack == b"R":
+                    # 液晶が上書きされた / 展開できなかった: 次は全体を送る。
+                    # その後に送ったキーフレームが既に向かっているなら要らない
+                    if gen == self._key_gen:
+                        self._request_key()
+                elif ack == b"E":
+                    # 先に送っていた分の 'E' で 2 段下げないよう、今の色で送ったフレームのときだけ下げる
+                    if sent_kind == "bad16" and sent_bits == self.b16_bits:
+                        self._b16_shrink()
+                elif ack != b"K":
+                    raise ConnectionError("ESP32 が切断しました")
         except Exception:
             try:
                 self._sock.close()
             finally:
                 self._sock = None
+                self._inflight.clear()
                 self._request_key()  # つなぎ直したら全体から
             raise
 

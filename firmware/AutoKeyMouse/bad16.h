@@ -23,6 +23,7 @@ struct State {
   uint8_t* scratch = nullptr;
   uint16_t mask = 0;
   bool ready = false;
+  int dirtyTop = 0, dirtyBottom = -1;  // 直前の decodeBody で変わった行 (y の範囲。無ければ top > bottom)
 };
 
 namespace detail {
@@ -129,6 +130,7 @@ inline bool init(State& s, void* (*alloc)(size_t)) {
 inline int decodeBody(State& s, const Header& h, ReadFn read, void* ctx) {
   if (!s.ready || s.mask != h.mask) return 0;
   bool all_skip = !h.key;
+  int top = ROWS, bottom = -1;
   bad_ctx_t bc;
   memset(&bc, 0, sizeof(bc));
   bc.read = detail::readCb;
@@ -160,8 +162,26 @@ inline int decodeBody(State& s, const Header& h, ReadFn read, void* ctx) {
       if (!read(ctx, junk, k)) return 0;
       src.left -= k;
     }
-    if (all_skip && memcmp(s.scratch, s.planes[b], PLANE) != 0) all_skip = false;
+    // 変わった行の範囲 (scratch = 前フレームのこの面)
+    if (h.key) {
+      top = 0;
+      bottom = ROWS - 1;
+    } else {
+      const uint8_t* a = s.scratch;
+      const uint8_t* c = s.planes[b];
+      constexpr int RB = W / 8;
+      int y0 = 0, y1 = ROWS - 1;
+      while (y0 < top && memcmp(a + y0 * RB, c + y0 * RB, RB) == 0) y0++;
+      if (y0 < top) top = y0;
+      if (y0 < ROWS) {
+        while (y1 > bottom && memcmp(a + y1 * RB, c + y1 * RB, RB) == 0) y1--;
+        if (y1 > bottom) bottom = y1;
+      }
+    }
   }
+  s.dirtyTop = top;
+  s.dirtyBottom = bottom;
+  if (bottom >= 0) all_skip = false;
   return h.key ? 2 : (all_skip ? 3 : 1);
 }
 
@@ -172,26 +192,49 @@ inline int decode(State& s, ReadFn read, void* ctx) {
   return decodeBody(s, h, read, ctx);
 }
 
-// 16 面から RGB565 の行を組み立てて sink(y, row) に渡す (y = 0..rows-1, row は 240 画素)
+namespace detail {
+// 1 バイト (8 画素ぶんの 1 ビット面) → 8 バイト (各画素 0/1, LSB = 左)。2KB の定数表 (ESP32 ではフラッシュに置かれる)
+struct Spread {
+  uint64_t t[256];
+  constexpr Spread() : t() {
+    for (int v = 0; v < 256; v++) {
+      uint64_t x = 0;
+      for (int k = 0; k < 8; k++)
+        if (v >> k & 1) x |= (uint64_t)1 << (8 * k);
+      t[v] = x;
+    }
+  }
+};
+inline const uint64_t* spread() {
+  static constexpr Spread s;
+  return s.t;
+}
+}  // namespace detail
+
+// 16 面から RGB565 の行を組み立てて sink(y, row) に渡す (y = y0..y1, row は 240 画素)
 template <typename Sink>
-inline void compose(const State& s, int rows, Sink sink) {
+inline void compose(const State& s, int y0, int y1, Sink sink) {
   static uint16_t row[W];
-  for (int y = 0; y < rows; y++) {
+  const uint64_t* sp = detail::spread();
+  for (int y = y0; y <= y1; y++) {
     int base = y * (W / 8);
     for (int xb = 0; xb < W / 8; xb++) {
-      uint16_t px[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-      for (int b = 0; b < 16; b++) {
-        if (!s.planes[b]) continue;
-        uint8_t v = s.planes[b][base + xb];  // LSB = 左 (公式デコーダの並び)
-        if (!v) continue;
-        uint16_t bit = (uint16_t)(1u << b);
-        for (int k = 0; k < 8; k++)
-          if (v >> k & 1) px[k] |= bit;
-      }
-      memcpy(row + xb * 8, px, sizeof(px));
+      // 下位 8 面と上位 8 面を、それぞれ 8 画素ぶん (1 画素 1 バイト) まとめて組む
+      uint64_t lo = 0, hi = 0;
+      for (int b = 0; b < 8; b++)
+        if (s.planes[b]) lo |= sp[s.planes[b][base + xb]] << b;
+      for (int b = 8; b < 16; b++)
+        if (s.planes[b]) hi |= sp[s.planes[b][base + xb]] << (b - 8);
+      uint16_t* px = row + xb * 8;
+      for (int k = 0; k < 8; k++) px[k] = (uint16_t)((lo >> (8 * k)) & 0xFF) | (uint16_t)(((hi >> (8 * k)) & 0xFF) << 8);
     }
     sink(y, row);
   }
+}
+
+template <typename Sink>
+inline void compose(const State& s, int rows, Sink sink) {
+  compose(s, 0, rows - 1, sink);
 }
 
 }  // namespace bad16

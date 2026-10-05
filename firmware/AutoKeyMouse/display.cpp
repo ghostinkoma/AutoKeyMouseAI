@@ -341,12 +341,20 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
   uint32_t drawUs = 0;
   // 差分フレームでも、液晶が状態画面で上書きされていたら全体を描き直す
   if (res == 1 || res == 2 || (res == 3 && gNeedKey)) {
-    uint32_t d0 = micros();
-    gTft.startWrite();
-    gTft.setAddrWindow(0, 0, FRAME_W, FRAME_H);
-    bad16::compose(gB16, FRAME_H, [](int, uint16_t* row) { gTft.writePixels(row, FRAME_W); });
-    gTft.endWrite();
-    drawUs = micros() - d0;
+    // 変わった行だけ描く (キーフレーム・液晶が上書きされていたときは全体)
+    int y0 = gB16.dirtyTop, y1 = gB16.dirtyBottom;
+    if (res != 1 || gNeedKey) {
+      y0 = 0;
+      y1 = FRAME_H - 1;
+    }
+    if (y0 <= y1) {
+      uint32_t d0 = micros();
+      gTft.startWrite();
+      gTft.setAddrWindow(0, y0, FRAME_W, y1 - y0 + 1);
+      bad16::compose(gB16, y0, y1, [](int, uint16_t* row) { gTft.writePixels(row, FRAME_W); });
+      gTft.endWrite();
+      drawUs = micros() - d0;
+    }
   }
   uint32_t total = micros() - t0;
   rollStats();

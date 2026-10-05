@@ -19,6 +19,7 @@
  */
 
 #include "bad_decode.h"
+#include <string.h>
 
 /* ============================================================
  * Internal: memset / memcpy  (no <string.h>)
@@ -31,7 +32,7 @@ static void bad_memset(uint8_t *dst, uint8_t val, uint16_t len)
 
 static void bad_memcpy(uint8_t *dst, const uint8_t *src, uint16_t len)
 {
-    while (len--) { *dst++ = *src++; }
+    memcpy(dst, src, len);  /* [AutoKeyMouse 高速化] 1 バイトずつのループを標準関数に */
 }
 
 /* ============================================================
@@ -101,6 +102,13 @@ BAD_STATIC_INLINE uint16_t blk_bit(const bad_ctx_t *ctx,
                     + ((uint16_t)(bx<<3U)+px));
 }
 
+/* [AutoKeyMouse 高速化] 幅は 8 の倍数・ブロックは 8 画素境界なので、ブロックの 1 行は gram の 1 バイト
+ * (bit c = 列 c, LSB-first)。ブロック単位の命令はビットごとではなくバイトで読み書きする (結果は同じ)。 */
+BAD_STATIC_INLINE uint16_t blk_row(const bad_ctx_t *ctx, uint8_t bx, uint8_t by, uint8_t py)
+{
+    return (uint16_t)((((uint16_t)(by<<3U)+py)*ctx->width >> 3U) + bx);
+}
+
 /* ============================================================
  * Internal: scan-path RLE apply
  * Places runs[] into gram block (bx,by) using scan pattern p_idx.
@@ -131,6 +139,7 @@ static void apply_rle_runs(bad_ctx_t *ctx,
         remain = runs[ri];
     }
 
+    uint8_t rows[BAD_BLOCK_SIZE] = {0U,0U,0U,0U,0U,0U,0U,0U};
     uint8_t outer;
     for (outer = 0U; outer < BAD_BLOCK_SIZE; outer++) {
         uint8_t inner;
@@ -143,7 +152,7 @@ static void apply_rle_runs(bad_ctx_t *ctx,
                 px = (uint8_t)(sx + (int8_t)outer * dx);
                 py = (uint8_t)(sy + (int8_t)inner * dy);
             }
-            gp_set(ctx->gram, blk_bit(ctx, bx, by, px, py), color);
+            if (color) rows[py] |= (uint8_t)(1U << px);
 
             if (remain > 0U) remain--;
             if (remain == 0U) {
@@ -153,6 +162,8 @@ static void apply_rle_runs(bad_ctx_t *ctx,
             }
         }
     }
+    for (outer = 0U; outer < BAD_BLOCK_SIZE; outer++)
+        ctx->gram[blk_row(ctx, bx, by, outer)] = rows[outer];
 }
 
 /* ============================================================
@@ -183,9 +194,8 @@ static bad_result_t decode_master_block(bad_ctx_t *ctx,
         if (ctx->read(ctx->stream_offset, &byte_buf, 1U) != 1U)
             return BAD_ERR_DATA;
         ctx->stream_offset++;
-        for (col = 0U; col < BAD_BLOCK_SIZE; col++)
-            gp_set(ctx->gram, blk_bit(ctx, bx, by, col, row),
-                   (byte_buf >> col) & 1U);
+        (void)col;
+        ctx->gram[blk_row(ctx, bx, by, row)] = byte_buf;
     }
     return BAD_OK;
 }
@@ -253,6 +263,7 @@ static bad_result_t decode_xor_block(bad_ctx_t *ctx,
     uint8_t xor_len = bad_read1(ctx);
     uint8_t bit_idx = 0U;
     uint8_t i;
+    uint8_t mask[BAD_BLOCK_SIZE] = {0U,0U,0U,0U,0U,0U,0U,0U};
 
     for (i = 0U; i < xor_len && bit_idx < BAD_BLOCK_PIXELS; i++) {
         uint8_t b       = bad_read1(ctx);
@@ -261,10 +272,14 @@ static bad_result_t decode_xor_block(bad_ctx_t *ctx,
         uint8_t k;
         for (k = 0U; k < run_len && bit_idx < BAD_BLOCK_PIXELS; k++, bit_idx++) {
             uint8_t py = bit_idx >> 3U;
-            uint8_t px = bit_idx &  7U;
-            uint16_t gi = blk_bit(ctx, bx, by, px, py);
-            gp_set(ctx->gram, gi, gp_get(ctx->prev, gi) ^ mask_v);
+            if (mask_v) mask[py] |= (uint8_t)(1U << (bit_idx & 7U));
         }
+    }
+    /* 元の実装はマスクが届いた画素だけ書くが、gram は bad_next_frame の最初に prev と同じにしてあるので
+     * 残りの画素を prev ^ 0 で書いても結果は同じ */
+    for (i = 0U; i < BAD_BLOCK_SIZE; i++) {
+        uint16_t r = blk_row(ctx, bx, by, i);
+        ctx->gram[r] = (uint8_t)(ctx->prev[r] ^ mask[i]);
     }
     return BAD_OK;
 }
@@ -280,13 +295,9 @@ static void decode_shift_bit(bad_ctx_t *ctx,
     uint8_t rows[BAD_BLOCK_SIZE];
     uint8_t r, c;
 
-    for (r = 0U; r < BAD_BLOCK_SIZE; r++) {
-        rows[r] = 0U;
-        for (c = 0U; c < BAD_BLOCK_SIZE; c++) {
-            if (gp_get(ctx->prev, blk_bit(ctx, bx, by, c, r)))
-                rows[r] |= (uint8_t)(1U << c);
-        }
-    }
+    for (r = 0U; r < BAD_BLOCK_SIZE; r++)
+        rows[r] = ctx->prev[blk_row(ctx, bx, by, r)];
+    (void)c;
 
     /* [AutoKeyMouse 修正] Codec.py apply_shift は 1px ずつ「反対側の端」を
      * 取り込んで進めるため、結果は端値パディングではなく巡回シフト(回転)になる。
@@ -320,8 +331,7 @@ static void decode_shift_bit(bad_ctx_t *ctx,
     }
 
     for (r = 0U; r < BAD_BLOCK_SIZE; r++)
-        for (c = 0U; c < BAD_BLOCK_SIZE; c++)
-            gp_set(ctx->gram, blk_bit(ctx,bx,by,c,r), (rows[r]>>c)&1U);
+        ctx->gram[blk_row(ctx, bx, by, r)] = rows[r];
 }
 
 /* ============================================================
@@ -330,30 +340,27 @@ static void decode_shift_bit(bad_ctx_t *ctx,
 
 static void fill_block(bad_ctx_t *ctx, uint8_t bx, uint8_t by, uint8_t color)
 {
-    uint8_t px, py;
+    uint8_t py, v = color ? 0xFFU : 0x00U;
     for (py=0U; py<BAD_BLOCK_SIZE; py++)
-        for (px=0U; px<BAD_BLOCK_SIZE; px++)
-            gp_set(ctx->gram, blk_bit(ctx,bx,by,px,py), color);
+        ctx->gram[blk_row(ctx,bx,by,py)] = v;
 }
 
 static void copy_block(bad_ctx_t *ctx, uint8_t bx, uint8_t by)
 {
-    uint8_t px, py;
-    for (py=0U; py<BAD_BLOCK_SIZE; py++)
-        for (px=0U; px<BAD_BLOCK_SIZE; px++) {
-            uint16_t idx = blk_bit(ctx,bx,by,px,py);
-            gp_set(ctx->gram, idx, gp_get(ctx->prev, idx));
-        }
+    uint8_t py;
+    for (py=0U; py<BAD_BLOCK_SIZE; py++) {
+        uint16_t r = blk_row(ctx,bx,by,py);
+        ctx->gram[r] = ctx->prev[r];
+    }
 }
 
 static void invert_block(bad_ctx_t *ctx, uint8_t bx, uint8_t by)
 {
-    uint8_t px, py;
-    for (py=0U; py<BAD_BLOCK_SIZE; py++)
-        for (px=0U; px<BAD_BLOCK_SIZE; px++) {
-            uint16_t idx = blk_bit(ctx,bx,by,px,py);
-            gp_set(ctx->gram, idx, gp_get(ctx->prev,idx)^1U);
-        }
+    uint8_t py;
+    for (py=0U; py<BAD_BLOCK_SIZE; py++) {
+        uint16_t r = blk_row(ctx,bx,by,py);
+        ctx->gram[r] = (uint8_t)~ctx->prev[r];
+    }
 }
 
 /* ============================================================
