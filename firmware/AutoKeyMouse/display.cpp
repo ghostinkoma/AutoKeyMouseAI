@@ -262,39 +262,81 @@ int drawBadCodec(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
 }
 
 namespace {
+// BadCodec 16bit 版の面の置き場所。
+// 無印 ESP32 (PSRAM 無し) は JPEG 用の共用バッファ (24KB = 6 面) を借り、足りない分だけヒープから取る。
+// ヒープは Wi-Fi / BLE 用に BAD16_HEAP_RESERVE は必ず残す。
 bad16::State gB16;
-bool gB16Failed = false;
+bool gB16HasBuf = false;            // 共用バッファを借りている
+uint8_t* gB16Heap[17] = {};         // ヒープから取った面 (解放用)
+constexpr int kBufSlots = FRAME_BUF_SIZE / bad16::PLANE;  // 6
 
-void* b16Alloc(size_t n) {
-  void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);  // S3 + PSRAM
-  if (p) return p;
-  // PSRAM が無い (無印 ESP32 など): Wi-Fi / BLE の分を残せるときだけ内蔵 RAM から取る
-  if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < n + 48 * 1024) return nullptr;
-  return heap_caps_malloc(n, MALLOC_CAP_8BIT);
+void b16Free() {
+  for (auto& p : gB16Heap) {
+    heap_caps_free(p);
+    p = nullptr;
+  }
+  if (gB16HasBuf) {
+    releaseFrameBuffer();
+    gB16HasBuf = false;
+  }
+  gB16 = bad16::State();
 }
 
-bool b16Ready() {
-  if (gB16.ready) return true;
-  if (gB16Failed) return false;
-  if (bad16::init(gB16, b16Alloc)) {
-    Serial.printf("[TFT] bad16 buffers ready (psram free %u)\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+uint8_t* b16Slot(int i) {
+  // PSRAM があればすべて PSRAM へ (S3)
+  if (void* p = heap_caps_malloc(bad16::PLANE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) return gB16Heap[i] = (uint8_t*)p;
+  if (i < kBufSlots) {
+    if (!gB16HasBuf) {
+      if (!acquireFrameBuffer(1000)) return nullptr;
+      gB16HasBuf = true;
+    }
+    return gFrameBuf + i * bad16::PLANE;
+  }
+  if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < bad16::PLANE + BAD16_HEAP_RESERVE) return nullptr;
+  return gB16Heap[i] = (uint8_t*)heap_caps_malloc(bad16::PLANE, MALLOC_CAP_8BIT);
+}
+
+// mask の面を置けるようにする。足りなければ全部返して false
+bool b16Setup(uint16_t mask) {
+  if (gB16.ready && gB16.mask == mask) return true;
+  b16Free();
+  if (bad16::setup(gB16, mask, b16Slot)) {
+    Serial.printf("[TFT] bad16: %d planes ready (mask %04x, free heap %u)\n", bad16::planesIn(mask), mask,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
     return true;
   }
-  for (auto& p : gB16.planes) { heap_caps_free(p); p = nullptr; }
-  heap_caps_free(gB16.scratch);
-  gB16.scratch = nullptr;
-  gB16Failed = true;
-  Serial.println("[TFT] bad16: not enough memory (needs ~69KB, PSRAM recommended)");
+  b16Free();
+  Serial.printf("[TFT] bad16: not enough memory for %d planes (mask %04x, needs %u bytes)\n", bad16::planesIn(mask),
+                mask, (unsigned)((bad16::planesIn(mask) + 1) * bad16::PLANE));
   return false;
 }
 }  // namespace
 
+void releaseBad16() {
+  TftLock lock;
+  if (gB16.ready || gB16HasBuf) {
+    b16Free();
+    Serial.println("[TFT] bad16: buffers released");
+  }
+}
+
 int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
-  if (!b16Ready()) return -1;
   TftLock lock;
   uint32_t t0 = micros();
   uint32_t recv0 = recvUs ? *recvUs : 0;
-  int res = len >= 4 ? bad16::decode(gB16, read, ctx) : 0;
+  bad16::Header h;
+  if (len < 4 || !bad16::readHeader(read, ctx, h)) {
+    gNeedKey = true;
+    return 0;
+  }
+  if (!(gB16.ready && gB16.mask == h.mask)) {
+    if (!h.key) {  // 面の組み合わせが変わった / まだ無い: キーフレームから
+      gNeedKey = true;
+      return 4;
+    }
+    if (!b16Setup(h.mask)) return -1;
+  }
+  int res = bad16::decodeBody(gB16, h, read, ctx);
   uint32_t waited = recvUs ? *recvUs - recv0 : 0;
   uint32_t drawUs = 0;
   // 差分フレームでも、液晶が状態画面で上書きされていたら全体を描き直す
@@ -496,6 +538,7 @@ uint32_t framesShown() { return 0; }
 void noteReceive(uint32_t, size_t) {}
 int drawBadCodec(ReadFn, void*, uint32_t, const uint32_t*) { return 0; }
 int drawBad16(ReadFn, void*, uint32_t, const uint32_t*) { return -1; }
+void releaseBad16() {}
 bool needKeyframe() { return false; }
 void requestKeyframe() {}
 uint8_t* acquireFrameBuffer(uint32_t) { return nullptr; }

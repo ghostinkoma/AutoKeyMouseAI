@@ -636,8 +636,9 @@ def test_mirror_bc_over_tcp_falls_back_to_jpeg_for_big_changes_and_honors_keyfra
     m.stop()
 
 
-def _bad16_frames(drop_bits):
-    """ゲーム画面らしい絵 → 小さな変化 / 全体ノイズ / 変化なし / 左右反転 / ずらし / 反転。"""
+def _bad16_frames(bits):
+    """ゲーム画面らしい絵 → 小さな変化 / 全体ノイズ / 変化なし / 左右反転 / ずらし / 反転。
+    6 枚目から色のビット数を変える (ESP32 で面が足りずに減らしたときと同じ)。"""
     import cv2
 
     from akm.bad16 import Encoder, to565
@@ -645,9 +646,8 @@ def _bad16_frames(drop_bits):
     rng = np.random.default_rng(5)
     base = cv2.GaussianBlur(rng.integers(0, 255, (135, 240, 3), dtype=np.uint8), (0, 0), 3)
     base[100:, :] = (30, 40, 50)
-    enc = Encoder(drop_bits)
     imgs, prev = [], None
-    for f in range(8):
+    for f in range(9):
         img = base.copy()
         cv2.circle(img, (60 + 10 * f, 60), 20, (0, 0, 255), -1)
         if f == 3:
@@ -662,26 +662,36 @@ def _bad16_frames(drop_bits):
             img = 255 - prev
         prev = img
         imgs.append(img)
-    frames = [enc.encode(i) for i in imgs]
-    expect = [to565(i) & enc._mask() for i in imgs]
+    enc = Encoder(bits=bits)
+    frames, expect = [], []
+    for f, img in enumerate(imgs):
+        if f == 6:  # 途中で面の組み合わせを変える (次はキーフレーム)
+            enc = Encoder(bits=(2, 3, 2))
+        frames.append(enc.encode(img))
+        expect.append(to565(img) & enc._mask())
     return frames, expect
 
 
-@pytest.mark.parametrize("drop_bits", [0, 2])
-def test_bad16_esp32_decoder_matches_encoder(drop_bits):
+@pytest.mark.parametrize("bits", [(5, 6, 5), (4, 5, 4), (3, 4, 2), (2, 3, 2)])
+def test_bad16_esp32_decoder_matches_encoder(bits):
     """BadCodec 16bit 版: C エンコーダ → ESP32 と同じ C++ デコーダ (公式 bad_decode.cpp + bad16.h) で元の絵に戻る。"""
     import shutil
     import struct
     import subprocess
 
+    from akm.bad16 import mask_of
+
     gxx = shutil.which("g++")
     if not gxx or (sys.platform != "win32" and not shutil.which("gcc")):
         pytest.skip("g++ / gcc が無い")
-    frames, expect = _bad16_frames(drop_bits)
-    assert frames[0][:4] == b"B6\x01\x01" and frames[1][3] == 0  # 1 枚目はキーフレーム
+    frames, expect = _bad16_frames(bits)
+    assert frames[0][:4] == b"B6\x02\x01" and frames[1][3] == 0  # 1 枚目はキーフレーム
+    assert struct.unpack_from("<H", frames[0], 4)[0] == mask_of(bits)
+    assert bin(mask_of(bits)).count("1") == sum(bits)
+    assert frames[6][3] == 1                       # 面を変えたらキーフレーム
     assert len(frames[1]) < len(frames[0]) // 10  # 変化が小さいフレームは小さい
     assert len(frames[4]) < 100                    # 変化なしはほぼ 0
-    exe = PC / "tests" / f"_bad16_decode_test_{drop_bits}"
+    exe = PC / "tests" / ("_bad16_decode_test_" + "".join(map(str, bits)))
     fw = PC.parent / "firmware" / "AutoKeyMouse"
     subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(PC / "tests" / "bad16_decode_test.cpp"),
                     str(fw / "bad_decode.cpp")], check=True)
@@ -703,15 +713,15 @@ def test_bad16_matches_official_python_decoder():
 
     if official_tools() is None:
         pytest.skip("公式 BadCodec (tools/Codec.py) が無い")
-    frames, expect = _bad16_frames(0)
+    frames, expect = _bad16_frames((3, 4, 2))
     planes = None
     for i, (d, e) in enumerate(zip(frames[:3], expect[:3])):
         img, planes = decode(d, planes)
         assert (img == e).all(), f"frame {i}"
 
 
-def test_mirror_bad16_over_tcp_falls_back_to_jpeg_on_E():
-    """ESP32 がメモリ不足 ('E') を返したら JPEG に切り替える。'R' ではキーフレームを送り直す。"""
+def test_mirror_bad16_over_tcp_shrinks_planes_on_E_then_jpeg():
+    """ESP32 がメモリ不足 ('E') を返したら面を減らして送り直し、もう減らせなければ JPEG。'R' でキーフレーム。"""
     import shutil
     import socket
     import struct
@@ -727,25 +737,36 @@ def test_mirror_bad16_over_tcp_falls_back_to_jpeg_on_E():
     srv.listen(1)
     port = srv.getsockname()[1]
     got = []
+    limit = {"planes": 9}  # この ESP32 には 9 面までしか入らない
+
+    def planes(d):
+        return bin(struct.unpack_from("<H", d, 4)[0]).count("1") if d[:3] == b"B6\x02" else 0
 
     def esp():
         c, _ = srv.accept()
         f = c.makefile("rb")
-        while len(got) < 5:
+        while len(got) < 12:
             n = struct.unpack("<I", f.read(8)[4:])[0]
-            got.append(f.read(n))
-            c.sendall({2: b"R", 4: b"E"}.get(len(got), b"K"))
+            d = f.read(n)
+            got.append(d)
+            if len(got) == 9:
+                limit["planes"] = 0  # 途中でメモリがさらに減った → JPEG へ
+            if d[:2] == b"B6" and planes(d) > limit["planes"]:
+                c.sendall(b"E")
+            else:
+                c.sendall(b"R" if len(got) == 7 else b"K")
         c.close()
 
     threading.Thread(target=esp, daemon=True).start()
     m = Mirror("127.0.0.1", 0.02, fmt="bad16", grab=lambda: np.full((1050, 1680, 3), 70, np.uint8),
                transport="tcp", port=port)
     t = time.monotonic()
-    while len(got) < 5 and time.monotonic() - t < 10:
+    while len(got) < 12 and time.monotonic() - t < 15:
         time.sleep(0.05)
-    assert got[0][:4] == b"B6\x01\x01"   # 最初はキーフレーム
-    assert got[1][:4] == b"B6\x01\x00"
-    assert got[2][:4] == b"B6\x01\x01"   # R のあとはキーフレーム
     m.stop()
-    assert got[4][:2] == b"\xff\xd8"     # E のあとは JPEG
+    seq = [planes(d) for d in got[:6]]
+    assert seq == [16, 13, 10, 9, 9, 9], seq       # 16 → 13 → 10 → 9 面で入った
+    assert got[3][3] == 1 and got[4][3] == 0         # 入ったキーフレームの次は差分
+    assert got[7][:3] == b"B6\x02" and got[7][3] == 1  # R のあとはキーフレーム
+    assert any(d[:2] == b"\xff\xd8" for d in got[9:])  # もう入らない → JPEG
     assert m.fmt == "jpeg"

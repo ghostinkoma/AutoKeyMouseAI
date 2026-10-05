@@ -94,9 +94,10 @@ class Mirror:
         self.bc_max_ratio = 1.5  # BlockDiff が JPEG のこの倍数を超えたら JPEG で送る
         self.cand_bytes = {"bc": 0.0, "jpeg": 0.0}  # 直近の平均サイズ (比較用)
         # fmt="bad16": BadCodec 16bit 版 (RGB565 の 16 ビット面を公式 BadCodec の命令で送る。akm/bad16.py)
-        # ESP32 側に約 69KB 要る (S3 + PSRAM)。足りない基板は 'E' を返すので JPEG に戻す
+        # ESP32 側に (面の数 + 1) x 4KB 要る (16 面で約 69KB)。足りないと 'E' が返るので、
+        # 色のビット数を 1 段ずつ下げて (面を減らして) 送り直し、最後は JPEG に戻す
         self._b16 = None
-        self.b16_drop_bits = 0  # 各色の下位ビットを捨てる数 (0 = 可逆, 2 で約半分)
+        self.b16_bits: tuple[int, int, int] = (5, 6, 5)  # R, G, B のビット数 (5, 6, 5 = 可逆)
         self.last_bytes = 0
         self._lock = threading.Lock()
         self._pending: bytes | None = None
@@ -211,7 +212,7 @@ class Mirror:
             if self._b16 is None:
                 from .bad16 import Encoder
 
-                self._b16 = Encoder(self.b16_drop_bits)
+                self._b16 = Encoder(bits=self.b16_bits)
             data = self._b16.encode(frame)
         else:
             data = encode(frame, "jpeg" if self.fmt in ("bc", "bad16") else self.fmt, self.quality)
@@ -237,10 +238,7 @@ class Mirror:
             if ack == b"R":
                 self._request_key()  # 液晶が上書きされた: 次は全体を送る
             elif ack == b"E":
-                print("[mirror] ESP32 のメモリが足りず BadCodec 16bit 版を展開できません "
-                      "(PSRAM 付きの ESP32-S3 が必要)。JPEG に切り替えます")
-                self.fmt = "jpeg"
-                self._b16 = None
+                self._b16_shrink()
             elif ack != b"K":
                 raise ConnectionError("ESP32 が切断しました")
         except Exception:
@@ -250,6 +248,22 @@ class Mirror:
                 self._sock = None
                 self._request_key()  # つなぎ直したら全体から
             raise
+
+    def _b16_shrink(self) -> None:
+        """ESP32 にメモリが足りないと言われた: 面を減らす。もう減らせなければ JPEG にする。"""
+        from .bad16 import LEVELS, planes_needed
+
+        n = planes_needed(self.b16_bits)
+        smaller = [lv for lv in LEVELS if planes_needed(lv) < n]
+        self._b16 = None
+        if self.fmt != "bad16" or not smaller:
+            print("[mirror] ESP32 のメモリが足りず BadCodec 16bit 版を展開できません。JPEG に切り替えます")
+            self.fmt = "jpeg"
+            return
+        self.b16_bits = smaller[0]
+        r, g, b = self.b16_bits
+        print(f"[mirror] ESP32 のメモリが足りないので面を減らします: {n} 面 → {sum(self.b16_bits)} 面 "
+              f"(色 R{r}G{g}B{b} ビット)")
 
     def _request_key(self) -> None:
         for enc in (self._bc, self._b16):

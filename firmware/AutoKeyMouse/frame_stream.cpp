@@ -85,6 +85,7 @@ void task(void*) {
       Serial.printf("[STREAM] mirror stream on tcp port %d\n", FRAME_STREAM_PORT);
     }
     if (!client || !client.connected()) {
+      if (gClient) display::releaseBad16();  // 切れたら面のメモリと共用バッファを返す
       gClient = false;
       client = server.available();
       if (!client) {
@@ -146,8 +147,12 @@ void task(void*) {
         size_t k = min((size_t)sizeof(junk), (size_t)(rd.n - rd.pos + rd.left));
         if (!readFn(&rd, junk, k)) break;
       }
-      if (res < 0) client.write((uint8_t)'E');
-      else client.write((uint8_t)(display::needKeyframe() ? 'R' : 'K'));
+      if (res < 0) {
+        display::releaseBad16();
+        client.write((uint8_t)'E');  // 入らない: PC は面を減らして (最後は JPEG で) 送り直す
+      } else {
+        client.write((uint8_t)(display::needKeyframe() || res == 4 ? 'R' : 'K'));
+      }
       continue;
     }
     if (len > kMax) {
@@ -155,6 +160,7 @@ void task(void*) {
       client.stop();
       continue;
     }
+    display::releaseBad16();  // JPEG に戻った: 共用バッファを返してもらう
     uint8_t* buf = display::acquireFrameBuffer(1000);
     if (!buf) {
       client.stop();

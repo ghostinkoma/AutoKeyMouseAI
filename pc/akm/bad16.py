@@ -5,10 +5,12 @@
 (pc/native/bad_encode.c) を使う。ESP32 側は公式 bad_decode.cpp をそのまま 16 面分使って展開する。
 
 コンテナ (1 フレーム)
-  'B' '6' ver(=1) flags(bit0: キーフレーム = 全面を 0 から)
-  16 回: 長さ (u16 LE) + そのビット面の BadCodec フレームデータ (FRAME_DELIMITER なし)
-  面の順番は RGB565 の bit0 (青の最下位) → bit15 (赤の最上位)
-可逆 (drop_bits=0)。drop_bits を 1, 2 にすると各色の下位ビットを捨てて (常に 0) 小さくする。
+  'B' '6' ver(=2) flags(bit0: キーフレーム = 全面を 0 から) mask(u16 LE: 送る面。bit b = RGB565 の bit b)
+  mask の立っている面の数だけ: 長さ (u16 LE) + そのビット面の BadCodec フレームデータ (FRAME_DELIMITER なし)
+  面の順番は RGB565 の bit0 (青の最下位) → bit15 (赤の最上位)。送らない面は常に 0
+  (ver 1 は mask 無しで 16 面すべて)
+bits=(5, 6, 5) で可逆。各色の上位ビットだけ送ると面が減り、ESP32 のメモリ (面ごとに 4080B) も小さくなる。
+PSRAM の無い無印 ESP32 は (3, 4, 2) = 9 面あたりまでしか入らない (LEVELS 参照)。
 """
 from __future__ import annotations
 
@@ -63,9 +65,28 @@ def planes_of(img565: np.ndarray) -> list[np.ndarray]:
     return [((img565 >> b) & 1).astype(np.uint8) for b in range(16)]
 
 
+# 色の細かさ (R, G, B のビット数) の段階。ESP32 にメモリが足りないと言われたら次へ下げる
+LEVELS = [(5, 6, 5), (4, 5, 4), (3, 4, 3), (3, 4, 2), (3, 3, 2), (2, 3, 2)]
+
+
+def bits_of_drop(drop_bits: int) -> tuple[int, int, int]:
+    d = max(0, int(drop_bits))
+    return (max(1, 5 - d), max(1, 6 - d), max(1, 5 - d))
+
+
+def mask_of(bits: tuple[int, int, int]) -> int:
+    """RGB565 のうち送るビット (各色の上位 r, g, b ビット)。"""
+    r, g, b = bits
+    return (((0x1F << (5 - r)) & 0x1F) << 11) | (((0x3F << (6 - g)) & 0x3F) << 5) | ((0x1F << (5 - b)) & 0x1F)
+
+
+def planes_needed(bits: tuple[int, int, int]) -> int:
+    return sum(bits)
+
+
 class Encoder:
-    def __init__(self, drop_bits: int = 0):
-        self.drop_bits = int(drop_bits)
+    def __init__(self, drop_bits: int = 0, bits: tuple[int, int, int] | None = None):
+        self.bits = tuple(bits) if bits else bits_of_drop(drop_bits)
         self.prev: list[np.ndarray] | None = None
         self.force_key = True
 
@@ -73,25 +94,21 @@ class Encoder:
         self.force_key = True
 
     def _mask(self) -> int:
-        d = self.drop_bits
-        if d <= 0:
-            return 0xFFFF
-        # R(5) G(6) B(5) それぞれ下位 d ビットを 0 にする
-        rb = (0x1F >> d) << d
-        g = (0x3F >> d) << d
-        return (rb << 11) | (g << 5) | rb
+        return mask_of(self.bits)
 
     def encode(self, bgr: np.ndarray) -> bytes:
         assert bgr.shape[:2] == (135, W), bgr.shape
-        img = to565(np.concatenate([bgr, bgr[-1:]], axis=0)) & self._mask()
+        mask = self._mask()
+        img = to565(np.concatenate([bgr, bgr[-1:]], axis=0)) & mask
         planes = planes_of(img)
         key = self.force_key or self.prev is None
         self.force_key = False
         prev = [np.zeros((H, W), np.uint8)] * 16 if key else self.prev
-        out = bytearray(b"B6\x01" + bytes([1 if key else 0]))
+        out = bytearray(b"B6\x02" + bytes([1 if key else 0]) + struct.pack("<H", mask))
         for b in range(16):
-            data = encode_plane(planes[b], prev[b])
-            out += struct.pack("<H", len(data)) + data
+            if mask >> b & 1:
+                data = encode_plane(planes[b], prev[b])
+                out += struct.pack("<H", len(data)) + data
         self.prev = planes
         return bytes(out)
 
@@ -119,11 +136,14 @@ def decode(data: bytes, prev_planes: list[np.ndarray] | None) -> tuple[np.ndarra
         sys.path.insert(0, str(tools))
     import Codec  # 公式
 
-    assert data[:3] == b"B6\x01"
+    assert data[:2] == b"B6" and data[2] in (1, 2)
     key = data[3] & 1
-    pos = 4
+    mask, pos = (0xFFFF, 4) if data[2] == 1 else (struct.unpack_from("<H", data, 4)[0], 6)
     planes = []
     for b in range(16):
+        if not mask >> b & 1:
+            planes.append(np.zeros((H, W), np.uint8))
+            continue
         n = struct.unpack_from("<H", data, pos)[0]
         pos += 2
         prev = np.zeros((H, W), np.uint8) if key or prev_planes is None else prev_planes[b]

@@ -29,9 +29,12 @@ String frameStatsLine();                      // シリアル表示用
 typedef bool (*ReadFn)(void* ctx, uint8_t* dst, size_t n);  // bc::ReadFn と同じ型
 int drawBadCodec(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs);
 // BadCodec 16bit 版 (pc/akm/bad16.py, 公式 BadCodec Protocol 514 を RGB565 の 16 面に使う) を受信しながら展開して描く。
-// 前フレーム 16 面 + 作業用 = 約 69KB を最初の 1 回で確保する (PSRAM 優先)。
-// 戻り値: -1 = メモリ不足 (この基板では使えない), 0 = 失敗, 1 = 差分, 2 = キーフレーム, 3 = 変化なし
+// 送られてくる面 + 作業用 1 面 (各 4080B) をキーフレームのときに用意する。PSRAM があれば PSRAM、
+// 無ければ JPEG 用の共用バッファ (6 面ぶん) + ヒープ。使っている間は共用バッファを借りたままにする。
+// 戻り値: -1 = メモリ不足 (面を減らせば入るかも), 0 = 失敗, 1 = 差分, 2 = キーフレーム, 3 = 変化なし,
+//         4 = 展開できない差分 (面の用意が無い。読み捨ててキーフレームを頼む)
 int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs);
+void releaseBad16();  // 面のメモリと共用バッファを返す (接続が切れた / JPEG に戻ったとき)
 bool needKeyframe();    // 液晶が上書きされた (状態画面など) ので次は全体 (キーフレーム) が欲しい
 void requestKeyframe();
 
