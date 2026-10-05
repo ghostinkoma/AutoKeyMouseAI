@@ -6,7 +6,7 @@
 // ---- デバイス名 -----------------------------------------------------------
 #define DEVICE_NAME      "AutoKeyMouse"     // BLE 表示名 / mDNS 名 (autokeymouse.local)
 // ファームウェアの版 (/status と起動ログに出る。PC 側で書き込み済みか確認する)
-#define FW_VERSION "frame-stream-2"
+#define FW_VERSION "frame-stream-3"
 #define BLE_MANUFACTURER "ghostinkoma"
 
 // ---- Wi-Fi SoftAP ---------------------------------------------------------
@@ -44,6 +44,14 @@
 #define TFT_PIN_DC   16
 #define TFT_PIN_RST  23
 #define TFT_PIN_BL   4
+
+// ---- 液晶ミラーの専用 TCP 受信 (PC の mirror が接続しっぱなしで JPEG を流す) ----
+#define FRAME_STREAM_PORT 5005
+// ---- BLE 接続間隔 (1.25ms 単位) -----------------------------------------------
+// ESP32 は Wi-Fi と BLE が 1 つのアンテナを時分割で使う。間隔が短いほど BLE が電波を占有し、
+// Wi-Fi (画面の受信) が遅くなる。24-40 = 30-50ms (キー・マウス操作には十分)
+#define BLE_CONN_INTERVAL_MIN 24
+#define BLE_CONN_INTERVAL_MAX 40
 
 // ---- マクロ実行 -----------------------------------------------------------
 #define MACRO_SLOTS            10

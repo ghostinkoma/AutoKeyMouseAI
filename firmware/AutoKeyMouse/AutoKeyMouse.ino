@@ -17,6 +17,7 @@
 #include "config.h"
 #include <esp_heap_caps.h>
 #include "display.h"
+#include "frame_stream.h"
 #include "macro.h"
 #include "net.h"
 
@@ -315,6 +316,7 @@ void setup() {
   led(0, 0, 255);
 
   display::begin();
+  frame_stream::begin();  // 受信バッファ 32KB を BLE / Wi-Fi より先に確保する
   macro::begin();
   hid::begin(DEVICE_NAME, BLE_MANUFACTURER);
   net::begin();

@@ -33,7 +33,8 @@ def main() -> None:
     if not host:
         raise SystemExit("config.yaml の device.host に ESP32 の IP を書いてください")
     m = Mirror(host, 1.0 / max(0.5, args.fps), fmt=mcfg.get("format", "jpeg"),
-               quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview)
+               quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview,
+               transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)))
     m.set_lines([("MIRROR ONLY", (0, 200, 255))])
     print(f"[mirror] {host} に毎秒 {1 / m.interval:.0f} 枚で送信中 ({m.fmt}) Ctrl+C で終了  (--fps で変更)")
     import requests

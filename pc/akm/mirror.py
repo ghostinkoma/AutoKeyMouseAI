@@ -66,7 +66,7 @@ class Mirror:
     """
 
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
-                 fmt: str = "jpeg", quality: int = 70, grab=None):
+                 fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005):
         self.enabled = enabled and bool(host)
         self.url = None
         if self.enabled:
@@ -76,6 +76,17 @@ class Mirror:
         self.fmt = fmt
         self.quality = quality
         self.grab = grab
+        # tcp : 専用ポートに接続しっぱなしで流す (速い。ファームウェア frame-stream-3 以降)
+        # http: 1 枚ずつ POST /frame (古いファームウェア) / auto: tcp を試し、だめなら http
+        self.transport = transport
+        self.port = port
+        self.hostname = ""
+        if host:
+            from urllib.parse import urlparse
+
+            self.hostname = urlparse(host if host.startswith("http") else f"http://{host}").hostname or host
+        self._sock = None
+        self._tcp_fail = 0
         self.last_bytes = 0
         self._lock = threading.Lock()
         self._pending: bytes | None = None
@@ -118,6 +129,19 @@ class Mirror:
         with self._lock:
             self._pending = data
 
+    def _ok(self, n: int) -> None:
+        self.sent += 1
+        self.errors = 0
+        self._fps_n += 1
+        dt = time.monotonic() - self._fps_t0
+        if dt >= 5:
+            self.fps = self._fps_n / dt
+            self._fps_n = 0
+            self._fps_t0 = time.monotonic()
+        if not self._ok_once:
+            self._ok_once = True
+            print(f"[mirror] 液晶への表示に成功 ({self.fmt}, {n} バイト)")
+
     def _capture(self) -> bytes:
         with self._lock:
             lines = list(self._lines)
@@ -143,6 +167,28 @@ class Mirror:
         self.t_encode = 0.8 * self.t_encode + 0.2 * (t2 - t1) * 1000
         self.last_bytes = len(data)
         return data
+
+    def _send_tcp(self, data: bytes) -> None:
+        """専用ポートへ送り、受信完了の 1 バイト ('K') を待つ。失敗したら例外。"""
+        import socket
+        import struct
+
+        if self._sock is None:
+            self._sock = socket.create_connection((self.hostname, self.port), timeout=3)
+            self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self._sock.settimeout(3)
+            print(f"[mirror] 専用ポート {self.hostname}:{self.port} に接続しました (TCP で連続送信)")
+        try:
+            self._sock.sendall(b"AKMF" + struct.pack("<I", len(data)) + data)
+            ack = self._sock.recv(1)
+            if ack != b"K":
+                raise ConnectionError("ESP32 が切断しました")
+        except Exception:
+            try:
+                self._sock.close()
+            finally:
+                self._sock = None
+            raise
 
     def _warn(self, msg: str) -> None:
         if time.monotonic() - self._last_warn > 30:  # 失敗は 30 秒に 1 回だけ表示し、送り続ける
@@ -175,6 +221,27 @@ class Mirror:
                     data, self._pending = self._pending, None
                 if data is None:
                     time.sleep(0.05)
+                    continue
+            if self.transport in ("tcp", "auto") and self.fmt == "jpeg":
+                try:
+                    tp = time.perf_counter()
+                    self._send_tcp(data)
+                    self.t_post = 0.8 * self.t_post + 0.2 * (time.perf_counter() - tp) * 1000
+                    self._ok(len(data))
+                    self._tcp_fail = 0
+                    if self.grab is not None:
+                        time.sleep(max(0.0, self.interval - (time.monotonic() - t0)))
+                    continue
+                except Exception as e:
+                    self.errors += 1
+                    self._tcp_fail += 1
+                    if self.transport == "auto" and self._tcp_fail >= 3:
+                        print(f"[mirror] 専用ポートに接続できないので HTTP で送ります ({e})。"
+                              "ファームウェアを frame-stream-3 以降にすると速くなります")
+                        self.transport = "http"
+                    else:
+                        self._warn(f"専用ポート: {e}")
+                    time.sleep(0.5)
                     continue
             try:
                 tp = time.perf_counter()

@@ -21,6 +21,13 @@ Adafruit_ST7789 gTft(&SPI, TFT_PIN_CS, TFT_PIN_DC, TFT_PIN_RST);
 String gShown;
 uint32_t gLastCheck = 0;
 
+// 液晶は loop() (状態画面) とミラー受信タスクの両方から描くので排他する
+SemaphoreHandle_t gLock = nullptr;
+struct TftLock {
+  TftLock() { if (gLock) xSemaphoreTakeRecursive(gLock, portMAX_DELAY); }
+  ~TftLock() { if (gLock) xSemaphoreGiveRecursive(gLock); }
+};
+
 // PC から送られてくる縮小画面 (ミラー)
 constexpr uint32_t kFrameHoldMs = 5000;  // 最後のフレームからこの時間は状態画面に戻さない
 uint32_t gLastFrame = 0;
@@ -51,6 +58,7 @@ void line(int y, uint8_t size, uint16_t color, const String& text) {
 }  // namespace
 
 void test() {
+  TftLock lock;
   // 赤 → 緑 → 青 の順に全面を塗る (配線・初期化の確認用)
   const uint16_t colors[] = {ST77XX_RED, ST77XX_GREEN, ST77XX_BLUE};
   for (uint16_t c : colors) {
@@ -62,6 +70,8 @@ void test() {
 }
 
 void begin() {
+  if (!gLock) gLock = xSemaphoreCreateRecursiveMutex();
+  TftLock lock;
   Serial.printf("[TFT] ST7789 135x240  MOSI=%d SCLK=%d CS=%d DC=%d RST=%d BL=%d\n", TFT_PIN_MOSI,
                 TFT_PIN_SCLK, TFT_PIN_CS, TFT_PIN_DC, TFT_PIN_RST, TFT_PIN_BL);
   pinMode(TFT_PIN_BL, OUTPUT);
@@ -69,7 +79,7 @@ void begin() {
   SPI.begin(TFT_PIN_SCLK, -1, TFT_PIN_MOSI, TFT_PIN_CS);
   // ST7789 は MODE3 なら CS の有無に関係なく動く (T-Display 公式設定と同じ)
   gTft.init(135, 240, SPI_MODE3);
-  gTft.setSPISpeed(27000000);
+  gTft.setSPISpeed(40000000);  // ST7789 は 40MHz で書き込める (T-Display 公式と同じ)
   gTft.setRotation(1);  // 横向き 240x135
   test();
   gTft.fillScreen(ST77XX_BLACK);
@@ -159,6 +169,7 @@ bool drawRaw(const uint8_t* data, size_t len) {
 }  // namespace
 
 bool showFrame(const uint8_t* data, size_t len) {
+  TftLock lock;
   bool ok;
   gDrawUsFrame = 0;
   uint32_t t0 = micros();
@@ -234,6 +245,7 @@ void rawFlush() {
 }  // namespace
 
 bool rawBegin() {
+  if (gLock) xSemaphoreTakeRecursive(gLock, portMAX_DELAY);  // rawEnd / rawAbort で返す
   gTft.startWrite();
   gTft.setAddrWindow(0, 0, FRAME_W, FRAME_H);
   gRawActive = true;
@@ -265,6 +277,7 @@ bool rawEnd() {
   rawFlush();
   gTft.endWrite();
   gRawActive = false;
+  if (gLock) xSemaphoreGiveRecursive(gLock);
   rollStats();  // raw は受信しながら描くので、描画時間は受信時間に含まれる
   bool ok = gRawPx == (uint32_t)FRAME_W * FRAME_H && gRawCarry < 0;
   if (ok) {
@@ -282,6 +295,7 @@ void rawAbort() {
   rawFlush();
   gTft.endWrite();
   gRawActive = false;
+  if (gLock) xSemaphoreGiveRecursive(gLock);
 }
 
 void loop() {
@@ -304,6 +318,8 @@ void loop() {
   String cur = macro::busy() ? ascii(macro::currentLabel(), 30) : "";
   String state = String(sta) + ip + "|" + ssid + "|" + ap + "|" + ble + hid::connectedPeers() + "|" + cur;
   if (state == gShown) return;
+  TftLock lock;
+  if (gFrameShown) return;  // 待っている間にミラーが始まった
   gShown = state;
 
   gTft.fillScreen(ST77XX_BLACK);

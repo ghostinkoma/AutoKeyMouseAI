@@ -326,7 +326,7 @@ def test_mirror_thread_captures_and_posts_by_itself():
     srv = http.server.HTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     frame = np.full((1050, 1680, 3), 80, np.uint8)
-    m = Mirror(f"127.0.0.1:{srv.server_port}", 0.05, fmt="jpeg", grab=lambda: frame)
+    m = Mirror(f"127.0.0.1:{srv.server_port}", 0.05, fmt="jpeg", grab=lambda: frame, transport="http")
     m.set_lines([("RUN", (0, 255, 0))])
     t = time.monotonic()
     while len(got) < 2 and time.monotonic() - t < 5:
@@ -502,3 +502,37 @@ def test_obs_preview_keeps_aspect_ratio(monkeypatch):
     img = gs.grab_preview(480)
     assert calls[-1] == (480, round(480 * 1274 / 1680))  # 縦横比どおりに頼む
     assert img.shape[:2] == (300, 480) and img.min() == 100  # 下の余白を落としてゲーム画面だけ
+
+
+def test_mirror_tcp_stream_sends_framed_jpeg_and_waits_ack():
+    import socket
+    import struct
+    import threading
+    import time
+
+    from akm.mirror import Mirror
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    got = []
+
+    def esp():
+        c, _ = srv.accept()
+        f = c.makefile("rb")
+        while len(got) < 3:
+            hdr = f.read(8)
+            assert hdr[:4] == b"AKMF"
+            n = struct.unpack("<I", hdr[4:])[0]
+            got.append(f.read(n))
+            c.sendall(b"K")
+        c.close()
+
+    threading.Thread(target=esp, daemon=True).start()
+    frame = np.full((1050, 1680, 3), 60, np.uint8)
+    m = Mirror("127.0.0.1", 0.02, fmt="jpeg", grab=lambda: frame, transport="tcp", port=port)
+    t = time.monotonic()
+    while len(got) < 3 and time.monotonic() - t < 5:
+        time.sleep(0.05)
+    assert len(got) == 3 and all(g[:2] == b"\xff\xd8" for g in got) and m.sent >= 3

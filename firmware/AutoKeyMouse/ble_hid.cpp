@@ -101,8 +101,8 @@ uint8_t gButtons = 0;
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* server, NimBLEConnInfo& info) override {
     gPeers = gPeers + 1;
-    // 7.5ms - 15ms 間隔を要求 (最終的な値はホストが決める)
-    server->updateConnParams(info.getConnHandle(), 6, 12, 0, 200);
+    // 接続間隔を要求 (最終的な値はホストが決める)。短すぎると Wi-Fi の受信が遅くなる (config.h 参照)
+    server->updateConnParams(info.getConnHandle(), BLE_CONN_INTERVAL_MIN, BLE_CONN_INTERVAL_MAX, 0, 400);
     Serial.printf("[BLE] connected: %s\n", info.getAddress().toString().c_str());
     // ホスト任せにせず、こちらから暗号化 (ペアリング / ボンド復元) を要求する
     NimBLEDevice::startSecurity(info.getConnHandle());

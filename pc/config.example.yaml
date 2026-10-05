@@ -110,6 +110,8 @@ mirror:
   interval_s: 0.1          # 送る間隔 (0.1 = 毎秒 10 枚)。ESP32 の負荷は mirror_only.py の表示 (CPU %) で確認
   format: jpeg             # jpeg (5〜10KB/枚, 推奨) | raw (64.8KB/枚)
   quality: 70              # JPEG 画質 (1-100)
+  transport: auto          # tcp = 専用ポートに接続しっぱなし (速い) / http = 1 枚ずつ POST / auto = tcp を試して http
+  port: 5005
 
 hud:
   # 1680x1050 のウィンドウで実測 (Murex S6)。比率なので他のサイズでも概ね合う

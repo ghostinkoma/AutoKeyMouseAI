@@ -14,7 +14,7 @@ void test();  // 赤・緑・青で全面を塗る (表示確認用)
 //   * RGB565 ビッグエンディアン 240x135 = 64800 バイト
 constexpr uint16_t FRAME_W = 240;
 constexpr uint16_t FRAME_H = 135;
-bool showFrame(const uint8_t* data, size_t len);  // 液晶が無い / 形式不正なら false
+bool showFrame(const uint8_t* data, size_t len);  // 液晶が無い / 形式不正なら false (別タスクから呼んでよい)
 uint32_t framesShown();
 
 // ミラー表示の負荷計測 (5 秒ごとに集計)。PC から 10fps などで送ったとき、
