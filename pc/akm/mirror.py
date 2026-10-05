@@ -283,6 +283,12 @@ class Mirror:
             fw = s.get(self.url.replace("/frame", "/status"), timeout=5).json().get("fw")
             if fw:
                 print(f"[mirror] ESP32 ファームウェア: {fw}")
+                import re
+
+                m = re.match(r"frame-stream-(\d+)", fw)
+                if self.fmt == "bad16" and (not m or int(m.group(1)) < 7):
+                    print("[mirror] BadCodec 16bit 版 (面を減らす方式) には frame-stream-7 以降が必要です。"
+                          "ファームウェアを書き込み直してください (古いままだと JPEG に戻ります)")
             else:
                 print("[mirror] ESP32 のファームウェアが古いです。画面が映らない場合は書き込み直してください (README 参照)")
         except Exception as e:
