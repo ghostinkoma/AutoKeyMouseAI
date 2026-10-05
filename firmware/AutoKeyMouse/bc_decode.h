@@ -1,5 +1,5 @@
 #pragma once
-// BadCodec-C のデコード本体 (液晶にもテスト用の配列にも描けるよう、描画先をテンプレートにしている)。
+// BlockDiff のデコード本体 (液晶にもテスト用の配列にも描けるよう、描画先をテンプレートにしている)。
 // 形式は pc/akm/bcodec.py を参照。PC の単体テスト (pc/tests/bc_decode_test.cpp) でも同じものを使う。
 #include <stddef.h>
 #include <stdint.h>

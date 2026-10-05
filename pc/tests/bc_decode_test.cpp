@@ -1,4 +1,4 @@
-// ESP32 の BadCodec-C デコーダ (firmware/AutoKeyMouse/bc_decode.h) を PC で動かすテスト用プログラム。
+// ESP32 の BlockDiff デコーダ (firmware/AutoKeyMouse/bc_decode.h) を PC で動かすテスト用プログラム。
 // 標準入力: [長さ u32 LE][フレーム] の並び。フレームごとに 240x135 の RGB565 (LE) を標準出力へ書く。
 #include <cstdio>
 #include <cstring>

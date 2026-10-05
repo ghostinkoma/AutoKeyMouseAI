@@ -31,7 +31,7 @@ bool readAll(WiFiClient& c, uint8_t* dst, size_t n, uint32_t timeoutMs) {
   return true;
 }
 
-// 受信しながら読む (BadCodec-C 用)。1 フレーム分 (len) を超えては読まない
+// 受信しながら読む (ブロック形式用)。1 フレーム分 (len) を超えては読まない
 struct Reader {
   WiFiClient* c;
   uint32_t left;      // このフレームの残りバイト
@@ -107,7 +107,7 @@ void task(void*) {
       continue;
     }
     uint32_t len = hdr[4] | hdr[5] << 8 | hdr[6] << 16 | (uint32_t)hdr[7] << 24;
-    // 先頭 2 バイトで形式を見分ける: FF D8 = JPEG / 'B' 'C' = BadCodec-C
+    // 先頭 2 バイトで形式を見分ける: FF D8 = JPEG / 'B' 'C' = ブロック差分 / 'B' '6' = BadCodec 16bit
     Reader rd;
     rd.c = &client;
     rd.left = len;
@@ -117,8 +117,9 @@ void task(void*) {
       client.stop();
       continue;
     }
-    if (head[0] == 'B' && head[1] == 'C') {
-      // 受信しながら描く (バッファ不要)。描き終わったら返事: 'K' / 'R' (次はキーフレームが欲しい)
+    if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6')) {
+      // 受信しながら描く (フレームバッファ不要)。描き終わったら返事:
+      //   'K' = OK / 'R' = 次はキーフレームが欲しい / 'E' = この形式は使えない (メモリ不足。PC は JPEG に戻す)
       struct Pre {
         Reader* r;
         uint8_t h[2];
@@ -132,16 +133,21 @@ void task(void*) {
         }
         return n == 0 || readFn(p->r, dst, n);
       };
-      int res = display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
+      int res = head[1] == '6' ? display::drawBad16(readPre, &pre, len, &rd.waitUs)
+                               : display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
       if (res == 0) {
-        Serial.println("[STREAM] badcodec frame failed");
+        Serial.println("[STREAM] block frame failed");
         client.stop();
         continue;
       }
-      rd.pos = rd.n;  // 念のため、このフレームの残りを捨てる
+      // このフレームの残りを捨てる (メモリ不足で展開しなかったときは全部)
       uint8_t junk[64];
-      while (rd.left && readFn(&rd, junk, min((uint32_t)sizeof(junk), rd.left))) rd.pos = rd.n;
-      client.write((uint8_t)(display::needKeyframe() ? 'R' : 'K'));
+      while (rd.pos < rd.n || rd.left) {
+        size_t k = min((size_t)sizeof(junk), (size_t)(rd.n - rd.pos + rd.left));
+        if (!readFn(&rd, junk, k)) break;
+      }
+      if (res < 0) client.write((uint8_t)'E');
+      else client.write((uint8_t)(display::needKeyframe() ? 'R' : 'K'));
       continue;
     }
     if (len > kMax) {

@@ -19,7 +19,10 @@ def main() -> None:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--fps", type=float, default=10.0, help="送る枚数/秒 (既定 10。config の mirror.interval_s より優先)")
-    ap.add_argument("--format", choices=["bc", "jpeg", "raw"], help="bc = BadCodec-C (変わったブロックだけ) / jpeg / raw")
+    ap.add_argument("--format", choices=["bc", "bad16", "jpeg", "raw"],
+                    help="bc = ブロック差分 (変わったブロックだけ) / bad16 = BadCodec 16bit 版 (ESP32-S3 + PSRAM) / jpeg / raw")
+    ap.add_argument("--drop-bits", type=int, default=0, choices=[0, 1, 2, 3],
+                    help="bad16 で各色の下位ビットを捨てる数 (0 = 可逆。2 で約半分の大きさ)")
     ap.add_argument("--tolerance", type=int, default=16, help="ブロック差分方式の許容誤差 (大きいほど小さく粗い)")
     ap.add_argument("--max-ratio", type=float, default=1.5,
                     help="ブロック差分が JPEG の何倍までならそのまま送るか (大きくすると JPEG を使わない。99 で常にブロック差分)")
@@ -41,6 +44,7 @@ def main() -> None:
                transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)))
     m.bc_tolerance = args.tolerance
     m.bc_max_ratio = args.max_ratio
+    m.b16_drop_bits = args.drop_bits
     m.set_lines([("MIRROR ONLY", (0, 200, 255))])
     print(f"[mirror] {host} に毎秒 {1 / m.interval:.0f} 枚で送信中 ({m.fmt}) Ctrl+C で終了  (--fps で変更)")
     import requests

@@ -9,7 +9,9 @@
 #include <SPI.h>
 
 #include "akm_tjpgd.h"
-#include "bc_decode.h"  // 同梱の JPEG デコーダ (外部ライブラリ不要)
+#include "bc_decode.h"
+#include "bad16.h"
+#include <esp_heap_caps.h>
 
 #include "ble_hid.h"
 #include "macro.h"
@@ -259,6 +261,70 @@ int drawBadCodec(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
   return key ? 2 : 1;
 }
 
+namespace {
+bad16::State gB16;
+bool gB16Failed = false;
+
+void* b16Alloc(size_t n) {
+  void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);  // S3 + PSRAM
+  if (p) return p;
+  // PSRAM が無い (無印 ESP32 など): Wi-Fi / BLE の分を残せるときだけ内蔵 RAM から取る
+  if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < n + 48 * 1024) return nullptr;
+  return heap_caps_malloc(n, MALLOC_CAP_8BIT);
+}
+
+bool b16Ready() {
+  if (gB16.ready) return true;
+  if (gB16Failed) return false;
+  if (bad16::init(gB16, b16Alloc)) {
+    Serial.printf("[TFT] bad16 buffers ready (psram free %u)\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    return true;
+  }
+  for (auto& p : gB16.planes) { heap_caps_free(p); p = nullptr; }
+  heap_caps_free(gB16.scratch);
+  gB16.scratch = nullptr;
+  gB16Failed = true;
+  Serial.println("[TFT] bad16: not enough memory (needs ~69KB, PSRAM recommended)");
+  return false;
+}
+}  // namespace
+
+int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
+  if (!b16Ready()) return -1;
+  TftLock lock;
+  uint32_t t0 = micros();
+  uint32_t recv0 = recvUs ? *recvUs : 0;
+  int res = len >= 4 ? bad16::decode(gB16, read, ctx) : 0;
+  uint32_t waited = recvUs ? *recvUs - recv0 : 0;
+  uint32_t drawUs = 0;
+  // 差分フレームでも、液晶が状態画面で上書きされていたら全体を描き直す
+  if (res == 1 || res == 2 || (res == 3 && gNeedKey)) {
+    uint32_t d0 = micros();
+    gTft.startWrite();
+    gTft.setAddrWindow(0, 0, FRAME_W, FRAME_H);
+    bad16::compose(gB16, FRAME_H, [](int, uint16_t* row) { gTft.writePixels(row, FRAME_W); });
+    gTft.endWrite();
+    drawUs = micros() - d0;
+  }
+  uint32_t total = micros() - t0;
+  rollStats();
+  gCur.frames++;
+  gCur.bytes += len;
+  gCur.recvUs += waited;
+  gCur.drawUs += drawUs;
+  gCur.decodeUs += total > waited + drawUs ? total - waited - drawUs : 0;
+  if (res == 0) {
+    gNeedKey = true;  // 面がずれた可能性があるので、次はキーフレームから
+    return 0;
+  }
+  // 全面を描き直したので液晶の上書きは解消 (面の内容はキーフレーム以外でも連続している)
+  gNeedKey = false;
+  gLastFrame = millis();
+  gFrameShown = true;
+  ++gFrames;
+  return res;
+}
+
 void noteReceive(uint32_t us, size_t bytes) {
   rollStats();
   gCur.frames++;
@@ -429,6 +495,7 @@ bool showFrame(const uint8_t*, size_t) { return false; }
 uint32_t framesShown() { return 0; }
 void noteReceive(uint32_t, size_t) {}
 int drawBadCodec(ReadFn, void*, uint32_t, const uint32_t*) { return 0; }
+int drawBad16(ReadFn, void*, uint32_t, const uint32_t*) { return -1; }
 bool needKeyframe() { return false; }
 void requestKeyframe() {}
 uint8_t* acquireFrameBuffer(uint32_t) { return nullptr; }

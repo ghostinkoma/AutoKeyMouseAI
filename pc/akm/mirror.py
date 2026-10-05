@@ -87,12 +87,16 @@ class Mirror:
             self.hostname = urlparse(host if host.startswith("http") else f"http://{host}").hostname or host
         self._sock = None
         self._tcp_fail = 0
-        # fmt="bc": BadCodec-C (変わった 8x8 ブロックだけ送る)。画面全体が変わって大きくなるフレームは JPEG で送る
+        # fmt="bc": BlockDiff (変わった 8x8 ブロックだけ送る)。画面全体が変わって大きくなるフレームは JPEG で送る
         self._bc = None
         self.bc_tolerance = 16
         self.sent_kinds = {"bc": 0, "jpeg": 0}
-        self.bc_max_ratio = 1.5  # BadCodec-C が JPEG のこの倍数を超えたら JPEG で送る
+        self.bc_max_ratio = 1.5  # BlockDiff が JPEG のこの倍数を超えたら JPEG で送る
         self.cand_bytes = {"bc": 0.0, "jpeg": 0.0}  # 直近の平均サイズ (比較用)
+        # fmt="bad16": BadCodec 16bit 版 (RGB565 の 16 ビット面を公式 BadCodec の命令で送る。akm/bad16.py)
+        # ESP32 側に約 69KB 要る (S3 + PSRAM)。足りない基板は 'E' を返すので JPEG に戻す
+        self._b16 = None
+        self.b16_drop_bits = 0  # 各色の下位ビットを捨てる数 (0 = 可逆, 2 で約半分)
         self.last_bytes = 0
         self._lock = threading.Lock()
         self._pending: bytes | None = None
@@ -111,8 +115,23 @@ class Mirror:
         self._last_warn = 0.0
         self._ok_once = False
         self._last_img: np.ndarray | None = None
+        self._stop = threading.Event()
+        self._thread = None
         if self.enabled:
-            threading.Thread(target=self._worker, daemon=True).start()
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """送信スレッドを止める。"""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
 
     def due(self) -> bool:
         return self.enabled and time.monotonic() - self._last_put >= self.interval
@@ -136,7 +155,7 @@ class Mirror:
             self._pending = data
 
     def _encode_bc(self, frame: np.ndarray) -> bytes:
-        """BadCodec-C で圧縮。JPEG の 1.5 倍を超えるなら JPEG にして、エンコーダの基準絵も JPEG の絵にする。"""
+        """BlockDiff で圧縮。JPEG の 1.5 倍を超えるなら JPEG にして、エンコーダの基準絵も JPEG の絵にする。"""
         from .bcodec import Encoder, _pad, blocks, to565
 
         if self._bc is None:
@@ -188,8 +207,14 @@ class Mirror:
         frame = compose(img, lines)
         if self.fmt == "bc" and self.transport in ("tcp", "auto"):
             data = self._encode_bc(frame)
+        elif self.fmt == "bad16" and self.transport in ("tcp", "auto"):
+            if self._b16 is None:
+                from .bad16 import Encoder
+
+                self._b16 = Encoder(self.b16_drop_bits)
+            data = self._b16.encode(frame)
         else:
-            data = encode(frame, "jpeg" if self.fmt == "bc" else self.fmt, self.quality)
+            data = encode(frame, "jpeg" if self.fmt in ("bc", "bad16") else self.fmt, self.quality)
         t2 = time.perf_counter()
         self.t_capture = 0.8 * self.t_capture + 0.2 * (t1 - t0) * 1000
         self.t_encode = 0.8 * self.t_encode + 0.2 * (t2 - t1) * 1000
@@ -209,18 +234,27 @@ class Mirror:
         try:
             self._sock.sendall(b"AKMF" + struct.pack("<I", len(data)) + data)
             ack = self._sock.recv(1)
-            if ack == b"R" and self._bc is not None:
-                self._bc.request_key()  # 液晶が上書きされた: 次は全体を送る
-            elif ack != b"K" and ack != b"R":
+            if ack == b"R":
+                self._request_key()  # 液晶が上書きされた: 次は全体を送る
+            elif ack == b"E":
+                print("[mirror] ESP32 のメモリが足りず BadCodec 16bit 版を展開できません "
+                      "(PSRAM 付きの ESP32-S3 が必要)。JPEG に切り替えます")
+                self.fmt = "jpeg"
+                self._b16 = None
+            elif ack != b"K":
                 raise ConnectionError("ESP32 が切断しました")
         except Exception:
             try:
                 self._sock.close()
             finally:
                 self._sock = None
-                if self._bc is not None:
-                    self._bc.request_key()  # つなぎ直したら全体から
+                self._request_key()  # つなぎ直したら全体から
             raise
+
+    def _request_key(self) -> None:
+        for enc in (self._bc, self._b16):
+            if enc is not None:
+                enc.request_key()
 
     def _warn(self, msg: str) -> None:
         if time.monotonic() - self._last_warn > 30:  # 失敗は 30 秒に 1 回だけ表示し、送り続ける
@@ -239,7 +273,7 @@ class Mirror:
                 print("[mirror] ESP32 のファームウェアが古いです。画面が映らない場合は書き込み直してください (README 参照)")
         except Exception as e:
             print(f"[mirror] ESP32 の状態を取得できません: {e}")
-        while True:
+        while not self._stop.is_set():
             t0 = time.monotonic()
             if self.grab is not None:
                 try:
@@ -254,7 +288,7 @@ class Mirror:
                 if data is None:
                     time.sleep(0.05)
                     continue
-            if self.transport in ("tcp", "auto") and self.fmt in ("jpeg", "bc"):
+            if self.transport in ("tcp", "auto") and self.fmt in ("jpeg", "bc", "bad16"):
                 try:
                     tp = time.perf_counter()
                     self._send_tcp(data)
@@ -271,8 +305,8 @@ class Mirror:
                         print(f"[mirror] 専用ポートに接続できないので HTTP で送ります ({e})。"
                               "ファームウェアを frame-stream-3 以降にすると速くなります")
                         self.transport = "http"
-                        if self.fmt == "bc":
-                            self.fmt = "jpeg"  # BadCodec-C は専用ポートでしか送れない
+                        if self.fmt in ("bc", "bad16"):
+                            self.fmt = "jpeg"  # ブロック形式は専用ポートでしか送れない
                     else:
                         self._warn(f"専用ポート: {e}")
                     time.sleep(0.5)
