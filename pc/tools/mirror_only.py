@@ -20,7 +20,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fps", type=float, default=10.0, help="送る枚数/秒 (既定 10。config の mirror.interval_s より優先)")
     ap.add_argument("--format", choices=["bc", "bad16", "jpeg", "raw"],
-                    help="bc = ブロック差分 (変わったブロックだけ) / bad16 = BadCodec 16bit 版 (ESP32-S3 + PSRAM) / jpeg / raw")
+                    help="bad16 = BadCodec 16bit 版 (既定) / bc = ブロック差分 / jpeg / raw (省略時は config の mirror.format)")
     ap.add_argument("--drop-bits", type=int, default=0, choices=[0, 1, 2, 3],
                     help="bad16 で各色の下位ビットを捨てる数 (0 = 可逆)。ESP32 に入らなければ自動で減らす")
     ap.add_argument("--with-prev", action="store_true",
@@ -46,19 +46,21 @@ def main() -> None:
         raise SystemExit("config.yaml の device.host に ESP32 の IP を書いてください")
     from akm.bad16 import bits_of_drop
 
-    if args.color:
-        if len(args.color) != 3 or not args.color.isdigit():
-            raise SystemExit("--color は 343 のように R G B のビット数を 3 桁で")
-        r, g, b = (int(c) for c in args.color)
-        if not (1 <= r <= 5 and 1 <= g <= 6 and 1 <= b <= 5):
-            raise SystemExit("--color は R 1-5, G 1-6, B 1-5")
-        bits = (r, g, b)
-    else:
-        bits = bits_of_drop(args.drop_bits)
-    m = Mirror(host, 1.0 / max(0.5, args.fps), fmt=args.format or mcfg.get("format", "bc"),
+    from akm.bad16 import parse_color
+
+    try:
+        if args.color:
+            bits = parse_color(args.color)
+        elif args.drop_bits:
+            bits = bits_of_drop(args.drop_bits)
+        else:
+            bits = parse_color(mcfg.get("color", "343"))  # 既定: R3 G4 B3 (10 面)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    m = Mirror(host, 1.0 / max(0.5, args.fps), fmt=args.format or mcfg.get("format", "bad16"),
                quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview,
                transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)),
-               b16_bits=bits, b16_prev_free=not args.with_prev)
+               b16_bits=bits, b16_prev_free=not (args.with_prev or mcfg.get("with_prev", False)))
     m.bc_tolerance = args.tolerance
     m.bc_max_ratio = args.max_ratio
     m.set_lines([("MIRROR ONLY", (0, 200, 255))])

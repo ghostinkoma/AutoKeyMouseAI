@@ -108,9 +108,14 @@ popups:
 mirror:
   enabled: true
   interval_s: 0.1          # 送る間隔 (0.1 = 毎秒 10 枚)。ESP32 の負荷は mirror_only.py の表示 (CPU %) で確認
-  # bc  : BadCodec-C (変わった 8x8 ブロックだけ送る。ESP32 は展開不要で軽い。画面全体が変わる時だけ JPEG)
-  # jpeg: 毎回 JPEG (5〜10KB/枚, ESP32 の展開が重い) / raw: 非圧縮 (64.8KB/枚)
-  format: bc
+  # bad16: BadCodec 16bit 版 (既定)。変わった 8x8 ブロックだけを BadCodec の命令で送り、ESP32 は液晶へ直接描く
+  #        (前フレーム不要でメモリをほぼ使わない。実測 343 で約 9fps・CPU 約 35%。firmware frame-stream-9 以降)
+  # bc   : ブロック差分 (BlockDiff。画面全体が変わる時だけ JPEG)
+  # jpeg : 毎回 JPEG (5〜10KB/枚, ESP32 の展開が重い) / raw: 非圧縮 (64.8KB/枚)
+  format: bad16
+  # bad16 の色のビット数 R G B。565 = 可逆 (16 面, 1 枚 30KB 前後) / 343 = 10 面 (既定) / 332 = 8 面 (一番小さい)
+  color: "343"
+  with_prev: false         # true: 面ごとのフレーム (少し小さいが ESP32 に面の数 x 4KB 要る。S3 + PSRAM 向け)
   quality: 70              # JPEG 画質 (1-100)
   transport: auto          # tcp = 専用ポートに接続しっぱなし (速い) / http = 1 枚ずつ POST / auto = tcp を試して http
   port: 5005

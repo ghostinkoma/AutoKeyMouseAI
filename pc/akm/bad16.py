@@ -78,6 +78,17 @@ def bits_of_drop(drop_bits: int) -> tuple[int, int, int]:
     return (max(1, 5 - d), max(1, 6 - d), max(1, 5 - d))
 
 
+def parse_color(s) -> tuple[int, int, int]:
+    """'343' → (3, 4, 3)。R 1-5, G 1-6, B 1-5。"""
+    s = str(s).strip()
+    if len(s) != 3 or not s.isdigit():
+        raise ValueError(f"色のビット数は 343 のように R G B を 3 桁で: {s!r}")
+    r, g, b = (int(c) for c in s)
+    if not (1 <= r <= 5 and 1 <= g <= 6 and 1 <= b <= 5):
+        raise ValueError(f"色のビット数は R 1-5, G 1-6, B 1-5: {s!r}")
+    return (r, g, b)
+
+
 def mask_of(bits: tuple[int, int, int]) -> int:
     """RGB565 のうち送るビット (各色の上位 r, g, b ビット)。"""
     r, g, b = bits
