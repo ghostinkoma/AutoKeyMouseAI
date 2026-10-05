@@ -21,6 +21,10 @@ Adafruit_ST7789 gTft(&SPI, TFT_PIN_CS, TFT_PIN_DC, TFT_PIN_RST);
 String gShown;
 uint32_t gLastCheck = 0;
 
+// 受信 JPEG 用の共用バッファ (24KB)。無印 ESP32 は Wi-Fi + BLE でメモリに余裕が無いので 1 つだけ持つ
+uint8_t gFrameBuf[FRAME_BUF_SIZE];
+SemaphoreHandle_t gBufLock = nullptr;
+
 // 液晶は loop() (状態画面) とミラー受信タスクの両方から描くので排他する
 SemaphoreHandle_t gLock = nullptr;
 struct TftLock {
@@ -69,8 +73,18 @@ void test() {
   Serial.println("[TFT] test pattern drawn (red, green, blue)");
 }
 
+uint8_t* acquireFrameBuffer(uint32_t waitMs) {
+  if (!gBufLock) return nullptr;
+  return xSemaphoreTake(gBufLock, pdMS_TO_TICKS(waitMs)) == pdTRUE ? gFrameBuf : nullptr;
+}
+
+void releaseFrameBuffer() {
+  if (gBufLock) xSemaphoreGive(gBufLock);
+}
+
 void begin() {
   if (!gLock) gLock = xSemaphoreCreateRecursiveMutex();
+  if (!gBufLock) gBufLock = xSemaphoreCreateMutex();
   TftLock lock;
   Serial.printf("[TFT] ST7789 135x240  MOSI=%d SCLK=%d CS=%d DC=%d RST=%d BL=%d\n", TFT_PIN_MOSI,
                 TFT_PIN_SCLK, TFT_PIN_CS, TFT_PIN_DC, TFT_PIN_RST, TFT_PIN_BL);
@@ -359,6 +373,8 @@ void loop() {}
 bool showFrame(const uint8_t*, size_t) { return false; }
 uint32_t framesShown() { return 0; }
 void noteReceive(uint32_t, size_t) {}
+uint8_t* acquireFrameBuffer(uint32_t) { return nullptr; }
+void releaseFrameBuffer() {}
 String frameStatsJson() { return "{}"; }
 String frameStatsLine() { return "no display"; }
 bool rawBegin() { return false; }

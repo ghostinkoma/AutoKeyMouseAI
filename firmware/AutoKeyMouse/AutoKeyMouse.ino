@@ -316,7 +316,7 @@ void setup() {
   led(0, 0, 255);
 
   display::begin();
-  frame_stream::begin();  // 受信バッファ 32KB を BLE / Wi-Fi より先に確保する
+  frame_stream::begin();
   macro::begin();
   hid::begin(DEVICE_NAME, BLE_MANUFACTURER);
   net::begin();

@@ -23,6 +23,12 @@ void noteReceive(uint32_t us, size_t bytes);  // 1 フレームの受信にか�
 String frameStatsJson();                      // {"fps":..,"recv_ms":..,"decode_ms":..,"draw_ms":..,"cpu_pct":..}
 String frameStatsLine();                      // シリアル表示用
 
+// 受信した JPEG を置く共用バッファ (Web サーバーの /frame と専用 TCP の両方で使う。メモリ節約のため 1 つだけ)
+// 取れなければ nullptr。使い終わったら releaseFrameBuffer()。
+constexpr size_t FRAME_BUF_SIZE = 24 * 1024;
+uint8_t* acquireFrameBuffer(uint32_t waitMs);
+void releaseFrameBuffer();
+
 // RGB565 BE を受信しながらそのまま液晶へ流す (64,800 バイトのバッファを確保しなくて済む)
 bool rawBegin();
 bool rawWrite(const uint8_t* data, size_t len);  // 画素数を超えたら false

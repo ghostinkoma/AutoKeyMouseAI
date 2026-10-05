@@ -8,8 +8,7 @@
 namespace frame_stream {
 namespace {
 
-constexpr size_t kMax = 32 * 1024;  // JPEG 240x135 は 5〜10KB
-uint8_t* gBuf = nullptr;            // 起動直後 (ヒープが細切れになる前) に確保する
+constexpr size_t kMax = display::FRAME_BUF_SIZE;  // JPEG 240x135 は 5〜10KB (液晶モジュールの共用バッファ)
 volatile bool gClient = false;
 
 bool readAll(WiFiClient& c, uint8_t* dst, size_t n, uint32_t timeoutMs) {
@@ -75,14 +74,21 @@ void task(void*) {
       client.stop();
       continue;
     }
+    uint8_t* buf = display::acquireFrameBuffer(1000);
+    if (!buf) {
+      client.stop();
+      continue;
+    }
     uint32_t t0 = micros();
-    if (!readAll(client, gBuf, len, 3000)) {
+    if (!readAll(client, buf, len, 3000)) {
+      display::releaseFrameBuffer();
       client.stop();
       continue;
     }
     display::noteReceive(micros() - t0, len);
     client.write((uint8_t)'K');  // 受信完了。PC はすぐ次を送ってよい (展開と次の受信が重なる)
-    if (!display::showFrame(gBuf, len)) Serial.println("[STREAM] frame decode failed");
+    if (!display::showFrame(buf, len)) Serial.println("[STREAM] frame decode failed");
+    display::releaseFrameBuffer();
   }
 }
 
@@ -90,13 +96,8 @@ void task(void*) {
 
 void begin() {
 #if HAS_TFT
-  gBuf = (uint8_t*)malloc(kMax);
-  if (!gBuf) {
-    Serial.println("[STREAM] no memory for frame buffer");
-    return;
-  }
   // Arduino の loop() と同じコア 1・同じ優先度。Wi-Fi / BLE の処理 (コア 0) は邪魔しない
-  xTaskCreatePinnedToCore(task, "frame_stream", 6144, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(task, "frame_stream", 4096, nullptr, 1, nullptr, 1);
 #endif
 }
 

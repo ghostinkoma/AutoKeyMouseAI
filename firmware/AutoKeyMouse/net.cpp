@@ -308,10 +308,10 @@ void handleWifi() {
 
 // POST /frame  本文 = JPEG (240x135 以下) または RGB565 BE 240x135 (64800 バイト)
 // PC 側ボットが縮小したゲーム画面を送ってくる。
-// 無印 ESP32 は Wi-Fi + BLE でヒープが細切れになり 64KB を一度に確保できないことがあるので、
-// raw は受信しながら液晶へ流し、JPEG は固定の 32KB バッファに受ける。
-constexpr size_t kJpegMax = 32 * 1024;
-uint8_t gJpegBuf[kJpegMax];
+// 無印 ESP32 は Wi-Fi + BLE でメモリに余裕が無いので、raw は受信しながら液晶へ流し、
+// JPEG は液晶モジュールの共用バッファ (専用 TCP 受信と共用, 24KB) に受ける。
+constexpr size_t kJpegMax = display::FRAME_BUF_SIZE;
+uint8_t* gJpegBuf = nullptr;  // 受信中だけ借りる
 size_t gFrameLen = 0;
 enum class FrameMode { None, Jpeg, Raw } gFrameMode = FrameMode::None;
 String gFrameErr;
@@ -330,10 +330,14 @@ void handleFrameBody() {
       bool jpeg = raw.currentSize >= 2 && raw.buf[0] == 0xFF && raw.buf[1] == 0xD8;
       gFrameMode = jpeg ? FrameMode::Jpeg : FrameMode::Raw;
       if (!jpeg) display::rawBegin();
+      if (jpeg && !(gJpegBuf = display::acquireFrameBuffer(500))) {
+        gFrameErr = "busy (frame buffer in use by tcp stream)";
+        return;
+      }
     }
     if (gFrameMode == FrameMode::Jpeg) {
       if (gFrameLen + raw.currentSize > kJpegMax) {
-        gFrameErr = "jpeg too large (max 32KB)";
+        gFrameErr = "jpeg too large (max 24KB)";
         return;
       }
       memcpy(gJpegBuf + gFrameLen, raw.buf, raw.currentSize);
@@ -360,6 +364,10 @@ void handleFrameBody() {
 }
 
 void handleFrameDone() {
+  if (gJpegBuf) {  // 借りていた共用バッファを返す
+    display::releaseFrameBuffer();
+    gJpegBuf = nullptr;
+  }
   gServer.sendHeader("Access-Control-Allow-Origin", "*");
   if (gFrameMode == FrameMode::None && gFrameErr.isEmpty()) gFrameErr = "empty body (Content-Type?)";
   if (gFrameErr.isEmpty()) {
