@@ -91,6 +91,8 @@ class Mirror:
         self._bc = None
         self.bc_tolerance = 16
         self.sent_kinds = {"bc": 0, "jpeg": 0}
+        self.bc_max_ratio = 1.5  # BadCodec-C が JPEG のこの倍数を超えたら JPEG で送る
+        self.cand_bytes = {"bc": 0.0, "jpeg": 0.0}  # 直近の平均サイズ (比較用)
         self.last_bytes = 0
         self._lock = threading.Lock()
         self._pending: bytes | None = None
@@ -141,7 +143,9 @@ class Mirror:
             self._bc = Encoder(self.bc_tolerance)
         data = self._bc.encode(frame)
         jpg = encode(frame, "jpeg", self.quality)
-        if len(data) > len(jpg) * 1.5:
+        for k, v in (("bc", len(data)), ("jpeg", len(jpg))):
+            self.cand_bytes[k] = v if not self.cand_bytes[k] else 0.8 * self.cand_bytes[k] + 0.2 * v
+        if len(data) > len(jpg) * self.bc_max_ratio:
             dec = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
             self._bc.ref = blocks(to565(_pad(dec)))  # ESP32 には JPEG の絵が出る
             self.sent_kinds["jpeg"] += 1
