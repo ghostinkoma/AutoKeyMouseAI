@@ -577,6 +577,52 @@ static uint8_t read_frame_op(bad_ctx_t *ctx)
 }
 
 /* ============================================================
+ * [AutoKeyMouse 追加] 前フレーム不要のブロック命令 (bad16 ver 3 用)
+ * 8x8 だけの gram (width = height = 8) に、上の内部関数そのものを使って展開する
+ * ============================================================ */
+
+uint8_t bad_block_abs_len(uint8_t op)
+{
+    if (BAD_IS_SKIP(op) || BAD_IS_INVERT(op) || BAD_IS_SHIFT(op) || BAD_IS_FOR(op)) return 0U;
+    if (BAD_IS_FILL(op)) return 1U;
+    if (BAD_IS_RLE4(op)) return 4U;
+    if (BAD_IS_RLE8(op)) return 7U;
+    if (op == BAD_OP_MASTER_BLOCK) return 9U;
+    return 0U;  /* XOR_BLOCK など */
+}
+
+typedef struct { const uint8_t *p; uint8_t n; } abs_src_t;
+static abs_src_t s_abs_src;
+
+static uint16_t abs_read(bad_addr_t off, uint8_t *buf, uint16_t len)
+{
+    if (off + len > s_abs_src.n) return 0U;
+    memcpy(buf, s_abs_src.p + off, len);
+    return len;
+}
+
+bad_result_t bad_block_abs_rows(const uint8_t *data, uint8_t rows[8])
+{
+    uint8_t op = data[0];
+    uint8_t n  = bad_block_abs_len(op);
+    bad_ctx_t c;
+    if (n == 0U) return BAD_ERR_DATA;
+    memset(&c, 0, sizeof(c));
+    c.width = 8U;
+    c.height = 8U;
+    c.gram = rows;
+    c.prev = rows;  /* 使わない */
+    c.read = abs_read;
+    c.stream_offset = 1U;
+    s_abs_src.p = data;
+    s_abs_src.n = n;
+    if (BAD_IS_FILL(op)) { fill_block(&c, 0U, 0U, BAD_FILL_COLOR(op)); return BAD_OK; }
+    if (BAD_IS_RLE4(op)) return decode_rle4(&c, 0U, 0U, op);
+    if (BAD_IS_RLE8(op)) return decode_rle8(&c, 0U, 0U, op);
+    return decode_master_block(&c, 0U, 0U);
+}
+
+/* ============================================================
  * Public API: bad_init
  * ============================================================ */
 

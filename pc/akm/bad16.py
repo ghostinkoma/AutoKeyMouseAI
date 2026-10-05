@@ -4,7 +4,8 @@
 1 ビット面の圧縮は公式 tools/Codec.py の encode_frame_worker と同じ結果になる C 移植
 (pc/native/bad_encode.c) を使う。ESP32 側は公式 bad_decode.cpp をそのまま 16 面分使って展開する。
 
-コンテナ (1 フレーム)
+コンテナ (1 フレーム)。既定は ver 3 (前フレーム不要。Encoder の説明と firmware/AutoKeyMouse/bad16.h 参照)。
+ver 2 は
   'B' '6' ver(=2) flags(bit0: キーフレーム = 全面を 0 から) mask(u16 LE: 送る面。bit b = RGB565 の bit b)
   mask の立っている面の数だけ: 長さ (u16 LE) + そのビット面の BadCodec フレームデータ (FRAME_DELIMITER なし)
   面の順番は RGB565 の bit0 (青の最下位) → bit15 (赤の最上位)。送らない面は常に 0
@@ -39,6 +40,9 @@ def _lib():
         lib.bad_encode_frame.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
                                          ctypes.c_void_p, ctypes.c_int]
         lib.bad_encode_frame.restype = ctypes.c_int
+        lib.bad16_encode_abs.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint16,
+                                         ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+        lib.bad16_encode_abs.restype = ctypes.c_int
         _LIB = lib
     return _LIB
 
@@ -85,10 +89,18 @@ def planes_needed(bits: tuple[int, int, int]) -> int:
 
 
 class Encoder:
-    def __init__(self, drop_bits: int = 0, bits: tuple[int, int, int] | None = None):
+    """prev_free=True (既定): ver 3。受信側は前フレームを持たず、変わったブロックだけ液晶に直接描く
+    (ESP32 のメモリはほぼ不要。無印 ESP32 でも 16 面 = 可逆で使える)。
+    prev_free=False: ver 2。面ごとに BadCodec のフレームを送る (前フレームを使う命令も使えて小さいが、
+    受信側に (面の数 + 1) x 4KB 要る)。"""
+
+    def __init__(self, drop_bits: int = 0, bits: tuple[int, int, int] | None = None, prev_free: bool = True):
         self.bits = tuple(bits) if bits else bits_of_drop(drop_bits)
+        self.prev_free = prev_free
         self.prev: list[np.ndarray] | None = None
+        self.prev565: np.ndarray | None = None
         self.force_key = True
+        self.changed_blocks = 0
 
     def request_key(self) -> None:
         self.force_key = True
@@ -100,6 +112,8 @@ class Encoder:
         assert bgr.shape[:2] == (135, W), bgr.shape
         mask = self._mask()
         img = to565(np.concatenate([bgr, bgr[-1:]], axis=0)) & mask
+        if self.prev_free:
+            return self._encode_abs(np.ascontiguousarray(img, np.uint16), mask)
         planes = planes_of(img)
         key = self.force_key or self.prev is None
         self.force_key = False
@@ -111,6 +125,20 @@ class Encoder:
                 out += struct.pack("<H", len(data)) + data
         self.prev = planes
         return bytes(out)
+
+    def _encode_abs(self, img: np.ndarray, mask: int) -> bytes:
+        key = self.force_key or self.prev565 is None
+        self.force_key = False
+        prev = None if key else self.prev565
+        out = np.empty(W * H * 2 + 1024, np.uint8)
+        ch = ctypes.c_int()
+        n = _lib().bad16_encode_abs(img.ctypes.data, None if prev is None else prev.ctypes.data, W, H, mask,
+                                    out.ctypes.data, out.size, ctypes.byref(ch))
+        if n < 0:
+            raise RuntimeError("bad16_encode_abs failed")
+        self.changed_blocks = ch.value
+        self.prev565 = img
+        return b"B6\x03" + bytes([1 if key else 0]) + struct.pack("<H", mask) + out[:n].tobytes()
 
 
 # ------------------------------------------------------------- 参照デコーダ (テスト用) --
@@ -136,7 +164,7 @@ def decode(data: bytes, prev_planes: list[np.ndarray] | None) -> tuple[np.ndarra
         sys.path.insert(0, str(tools))
     import Codec  # 公式
 
-    assert data[:2] == b"B6" and data[2] in (1, 2)
+    assert data[:2] == b"B6" and data[2] in (1, 2), "ver 3 は tests/bad16_decode_test.cpp で確認する"
     key = data[3] & 1
     mask, pos = (0xFFFF, 4) if data[2] == 1 else (struct.unpack_from("<H", data, 4)[0], 6)
     planes = []

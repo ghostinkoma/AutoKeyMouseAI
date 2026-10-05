@@ -624,8 +624,8 @@ def test_mirror_bc_over_tcp_falls_back_to_jpeg_for_big_changes_and_honors_keyfra
             img = rng.integers(0, 255, img.shape, dtype=np.uint8)
         return img
 
-    m = Mirror("127.0.0.1", 0.02, fmt="bc", grab=grab, transport="tcp", port=port)
-    m.pipeline = 1  # 1 枚ずつ返事を待つ (R の次がキーフレームになる)
+    m = Mirror("127.0.0.1", 0.02, fmt="bc", grab=grab, transport="tcp", port=port,
+               pipeline=1)  # 1 枚ずつ返事を待つ (R の次がキーフレームになる)
     t = time.monotonic()
     while len(got) < 6 and time.monotonic() - t < 5:
         time.sleep(0.05)
@@ -637,7 +637,7 @@ def test_mirror_bc_over_tcp_falls_back_to_jpeg_for_big_changes_and_honors_keyfra
     m.stop()
 
 
-def _bad16_frames(bits):
+def _bad16_frames(bits, prev_free=False):
     """ゲーム画面らしい絵 → 小さな変化 / 全体ノイズ / 変化なし / 左右反転 / ずらし / 反転。
     6 枚目から色のビット数を変える (ESP32 で面が足りずに減らしたときと同じ)。"""
     import cv2
@@ -663,18 +663,19 @@ def _bad16_frames(bits):
             img = 255 - prev
         prev = img
         imgs.append(img)
-    enc = Encoder(bits=bits)
+    enc = Encoder(bits=bits, prev_free=prev_free)
     frames, expect = [], []
     for f, img in enumerate(imgs):
         if f == 6:  # 途中で面の組み合わせを変える (次はキーフレーム)
-            enc = Encoder(bits=(2, 3, 2))
+            enc = Encoder(bits=(2, 3, 2), prev_free=prev_free)
         frames.append(enc.encode(img))
         expect.append(to565(img) & enc._mask())
     return frames, expect
 
 
+@pytest.mark.parametrize("prev_free", [False, True])
 @pytest.mark.parametrize("bits", [(5, 6, 5), (4, 5, 4), (3, 4, 2), (2, 3, 2)])
-def test_bad16_esp32_decoder_matches_encoder(bits):
+def test_bad16_esp32_decoder_matches_encoder(bits, prev_free):
     """BadCodec 16bit 版: C エンコーダ → ESP32 と同じ C++ デコーダ (公式 bad_decode.cpp + bad16.h) で元の絵に戻る。"""
     import shutil
     import struct
@@ -685,14 +686,15 @@ def test_bad16_esp32_decoder_matches_encoder(bits):
     gxx = shutil.which("g++")
     if not gxx or (sys.platform != "win32" and not shutil.which("gcc")):
         pytest.skip("g++ / gcc が無い")
-    frames, expect = _bad16_frames(bits)
-    assert frames[0][:4] == b"B6\x02\x01" and frames[1][3] == 0  # 1 枚目はキーフレーム
+    frames, expect = _bad16_frames(bits, prev_free)
+    ver = 3 if prev_free else 2
+    assert frames[0][:4] == b"B6" + bytes([ver, 1]) and frames[1][3] == 0  # 1 枚目はキーフレーム
     assert struct.unpack_from("<H", frames[0], 4)[0] == mask_of(bits)
     assert bin(mask_of(bits)).count("1") == sum(bits)
     assert frames[6][3] == 1                       # 面を変えたらキーフレーム
     assert len(frames[1]) < len(frames[0]) // 10  # 変化が小さいフレームは小さい
     assert len(frames[4]) < 100                    # 変化なしはほぼ 0
-    exe = PC / "tests" / ("_bad16_decode_test_" + "".join(map(str, bits)))
+    exe = PC / "tests" / ("_bad16_decode_test_" + "".join(map(str, bits)) + str(ver))
     fw = PC.parent / "firmware" / "AutoKeyMouse"
     subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(PC / "tests" / "bad16_decode_test.cpp"),
                     str(fw / "bad_decode.cpp")], check=True)
@@ -759,9 +761,9 @@ def test_mirror_bad16_over_tcp_shrinks_planes_on_E_then_jpeg():
         c.close()
 
     threading.Thread(target=esp, daemon=True).start()
+    # 1 枚ずつ返事を待つ (送る順番を決まったものにする)。メモリ不足 ('E') があるのは面ごとのフレーム (ver 2) だけ
     m = Mirror("127.0.0.1", 0.02, fmt="bad16", grab=lambda: np.full((1050, 1680, 3), 70, np.uint8),
-               transport="tcp", port=port)
-    m.pipeline = 1  # 1 枚ずつ返事を待つ (送る順番を決まったものにする)
+               transport="tcp", port=port, pipeline=1, b16_prev_free=False)
     t = time.monotonic()
     while len(got) < 12 and time.monotonic() - t < 15:
         time.sleep(0.05)
@@ -821,7 +823,7 @@ def test_mirror_bad16_pipeline_sends_ahead_and_shrinks_one_level_at_a_time():
 
     threading.Thread(target=esp, daemon=True).start()
     m = Mirror("127.0.0.1", 0.01, fmt="bad16", grab=lambda: np.full((1050, 1680, 3), 70, np.uint8),
-               transport="tcp", port=port)
+               transport="tcp", port=port, b16_prev_free=False)
     t = time.monotonic()
     while len(got) < 14 and time.monotonic() - t < 15:
         time.sleep(0.05)
@@ -830,3 +832,43 @@ def test_mirror_bad16_pipeline_sends_ahead_and_shrinks_one_level_at_a_time():
     assert keys[:4] == [16, 13, 10, 9], keys  # 段階を飛ばさない
     assert m.b16_bits == (3, 4, 2)
     assert any(ahead[4:]), ahead               # 返事の前に次のフレームが届いている (重なっている)
+
+
+def test_mirror_bad16_prev_free_default_sends_ver3_and_only_changed_blocks():
+    """既定 (前フレーム不要版): ver 3 で送り、変わらないフレームは SKIP だけになる。'R' で全体を送り直す。"""
+    import shutil
+    import socket
+    import struct
+    import threading
+    import time
+
+    from akm.mirror import Mirror
+
+    if sys.platform != "win32" and not shutil.which("gcc") and not (PC / "native" / "libbad_encode.so").exists():
+        pytest.skip("gcc が無い")
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    got = []
+
+    def esp():
+        c, _ = srv.accept()
+        f = c.makefile("rb")
+        while len(got) < 6:
+            n = struct.unpack("<I", f.read(8)[4:])[0]
+            got.append(f.read(n))
+            c.sendall(b"R" if len(got) == 3 else b"K")
+        c.close()
+
+    threading.Thread(target=esp, daemon=True).start()
+    m = Mirror("127.0.0.1", 0.02, fmt="bad16", grab=lambda: np.full((1050, 1680, 3), 70, np.uint8),
+               transport="tcp", port=port, pipeline=1, b16_bits=(3, 3, 2))
+    t = time.monotonic()
+    while len(got) < 6 and time.monotonic() - t < 10:
+        time.sleep(0.05)
+    m.stop()
+    assert got[0][:4] == b"B6\x03\x01"
+    assert struct.unpack_from("<H", got[0], 4)[0] == 0b1110011100011000  # R3 G3 B2
+    assert got[1][:4] == b"B6\x03\x00" and len(got[1]) <= 6 + 8  # 変化なし = SKIP 命令だけ
+    assert got[3][3] == 1                                         # R のあとは全体

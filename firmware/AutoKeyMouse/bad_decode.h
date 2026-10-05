@@ -309,6 +309,13 @@ bad_result_t bad_rewind     (bad_ctx_t *ctx);
 bad_result_t bad_seek       (bad_ctx_t *ctx, uint16_t frame_no);
 const char  *bad_result_str (bad_result_t result);
 
+/* [AutoKeyMouse 追加] 前フレームを参照しないブロック命令 1 つ (FILL / RLE_BLOCK_4 / RLE_BLOCK_8 /
+ * MASTER_BLOCK) を 8x8 の 8 行 (rows[y] の bit x = 画素) に展開する。
+ * bad_block_abs_len(op): その命令の全長 (op を含む)。前フレームが要る命令や不正なら 0。
+ * bad_block_abs_rows(data, rows): data は命令全体 (data[0] = op)。BAD_OK / BAD_ERR_DATA */
+uint8_t      bad_block_abs_len (uint8_t op);
+bad_result_t bad_block_abs_rows(const uint8_t *data, uint8_t rows[8]);
+
 BAD_STATIC_INLINE uint16_t bad_current_frame(const bad_ctx_t *ctx)
 { return (ctx != NULL) ? ctx->current_frame : 0U; }
 

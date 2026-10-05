@@ -32,15 +32,24 @@ int main() {
     Mem m{buf.data(), len};
     bad16::Header h;
     int r = 0;
+    bool abs = false;
     if (bad16::readHeader(rd, &m, h)) {
-      if (!(st.ready && st.mask == h.mask) && h.key) bad16::setup(st, h.mask, [](int i) { return pool[i]; });
-      r = bad16::decodeBody(st, h, rd, &m);
+      if (h.abs) {  // ver 3: 前フレーム無しで変わったブロックだけ fb (= 液晶) に描く
+        abs = true;
+        r = bad16::decodeAbs(h, rd, &m, [&](int bx, int by, int rows, const uint16_t* px) {
+              for (int y = 0; y < rows; y++) memcpy(&fb[by * 8 + y][bx * 8], px + y * 8, 16);
+            }) >= 0 ? 1 : 0;
+      } else {
+        if (!(st.ready && st.mask == h.mask) && h.key) bad16::setup(st, h.mask, [](int i) { return pool[i]; });
+        r = bad16::decodeBody(st, h, rd, &m);
+      }
     }
     if (r == 0 || m.left) {
       fprintf(stderr, "decode failed r=%d left=%zu\n", r, m.left);
       return 1;
     }
-    bad16::compose(st, bad16::ROWS, [&](int y, const uint16_t* row) { memcpy(fb[y], row, sizeof(fb[y])); });
+    if (!abs)
+      bad16::compose(st, bad16::ROWS, [&](int y, const uint16_t* row) { memcpy(fb[y], row, sizeof(fb[y])); });
     fwrite(fb, sizeof(fb), 1, stdout);
     fprintf(stderr, "r=%d planes=%d\n", r, bad16::planesIn(st.mask));
   }

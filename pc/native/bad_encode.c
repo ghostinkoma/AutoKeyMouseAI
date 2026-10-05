@@ -477,3 +477,65 @@ API int bad_encode_frame(const uint8_t *curr, const uint8_t *prev, int w, int h,
   for (int k = 0; k < 4; k++) free(cand[k].p);
   return len;
 }
+
+/* ==================================================================== 前フレーム不要版 (bad16 ver 3)
+ * 受信側が前フレームを持たない (液晶にそのまま描く) ための 16 面ブロックストリーム。
+ * 使う命令は BadCodec の BLOCK_STREAM のうち前フレームを参照しないものだけ:
+ *   SKIP (0x80-0xBF, n+1 ブロック) … 全部の面が変わらないブロックを飛ばす (液晶に描かない)
+ *   FILL (0x30 / 0x34), RLE_BLOCK_4 (0x20-0x2F), RLE_BLOCK_8 (0x38-0x3B, 0x3D, 0x3E), MASTER_BLOCK (0x3C)
+ * 変わったブロックは mask の面ごとに (bit0 → bit15 の順に) 1 命令ずつ並べる。
+ */
+static int encode_block_abs(const blk_t c, uint8_t *out) {
+  int all0 = 1, all1 = 1;
+  for (int y = 0; y < 8; y++)
+    for (int x = 0; x < 8; x++) {
+      if (c[y][x]) all0 = 0; else all1 = 0;
+    }
+  if (all0) { out[0] = 0x30; return 1; }
+  if (all1) { out[0] = 0x34; return 1; }
+  if (try_rle4(c, out)) return 4;
+  if (try_rle8(c, out)) return 7;
+  out[0] = OP_MASTER_BLOCK;
+  for (int y = 0; y < 8; y++) {
+    uint8_t v = 0;
+    for (int x = 0; x < 8; x++) v |= (uint8_t)(c[y][x] << x);
+    out[1 + y] = v;
+  }
+  return 9;
+}
+
+/* curr / prev: RGB565 (w*h, 行優先, h は 8 の倍数)。prev が NULL なら全ブロックを送る。
+ * 戻り値: 書いたバイト数 (容量不足なら -1)。changed_blocks に変わったブロック数 */
+API int bad16_encode_abs(const uint16_t *curr, const uint16_t *prev, int w, int h, uint16_t mask,
+                         uint8_t *out, int out_cap, int *changed_blocks) {
+  if (!g_scan_ready) build_scan_paths();
+  int nbx = w / 8, nby = h / 8, n = 0, skip = 0, changed = 0;
+#define PUT(v) do { if (n >= out_cap) return -1; out[n++] = (uint8_t)(v); } while (0)
+#define FLUSH_SKIP() do { while (skip > 0) { int k = skip > 64 ? 64 : skip; PUT(0x80 | (k - 1)); skip -= k; } } while (0)
+  for (int by = 0; by < nby; by++)
+    for (int bx = 0; bx < nbx; bx++) {
+      int diff = prev == NULL;
+      for (int y = 0; y < 8 && !diff; y++) {
+        const uint16_t *a = curr + (by * 8 + y) * w + bx * 8, *b = prev + (by * 8 + y) * w + bx * 8;
+        for (int x = 0; x < 8; x++)
+          if ((a[x] ^ b[x]) & mask) { diff = 1; break; }
+      }
+      if (!diff) { skip++; continue; }
+      FLUSH_SKIP();
+      changed++;
+      for (int bit = 0; bit < 16; bit++) {
+        if (!(mask >> bit & 1)) continue;
+        blk_t c;
+        for (int y = 0; y < 8; y++)
+          for (int x = 0; x < 8; x++) c[y][x] = (uint8_t)(curr[(by * 8 + y) * w + bx * 8 + x] >> bit & 1);
+        uint8_t op[9];
+        int k = encode_block_abs(c, op);
+        for (int i = 0; i < k; i++) PUT(op[i]);
+      }
+    }
+  FLUSH_SKIP();
+#undef PUT
+#undef FLUSH_SKIP
+  if (changed_blocks) *changed_blocks = changed;
+  return n;
+}

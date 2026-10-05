@@ -329,6 +329,37 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
     gNeedKey = true;
     return 0;
   }
+  if (h.abs) {
+    // ver 3: 前フレーム不要。変わったブロックだけ液晶へ (面のメモリは使わないので返しておく)
+    if (gB16.ready || gB16HasBuf) b16Free();
+    uint32_t drawUs = 0;
+    gTft.startWrite();
+    int n = bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) {
+      uint32_t d0 = micros();
+      gTft.setAddrWindow(bx * 8, by * 8, 8, rows);
+      gTft.writePixels(px, 8 * rows);
+      drawUs += micros() - d0;
+    });
+    gTft.endWrite();
+    uint32_t waited = recvUs ? *recvUs - recv0 : 0;
+    uint32_t total = micros() - t0;
+    rollStats();
+    gCur.frames++;
+    gCur.bytes += len;
+    gCur.recvUs += waited;
+    gCur.drawUs += drawUs;
+    gCur.decodeUs += total > waited + drawUs ? total - waited - drawUs : 0;
+    if (n < 0) {
+      gNeedKey = true;
+      return 0;
+    }
+    // 液晶が上書きされていたら、全体 (キーフレーム) が来るまで 'R' を返し続ける
+    if (h.key) gNeedKey = false;
+    gLastFrame = millis();
+    gFrameShown = true;
+    ++gFrames;
+    return h.key ? 2 : (n ? 1 : 3);
+  }
   if (!(gB16.ready && gB16.mask == h.mask)) {
     if (!h.key) {  // 面の組み合わせが変わった / まだ無い: キーフレームから
       gNeedKey = true;

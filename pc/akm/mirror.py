@@ -66,7 +66,8 @@ class Mirror:
     """
 
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
-                 fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005):
+                 fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005,
+                 pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5)):
         self.enabled = enabled and bool(host)
         self.url = None
         if self.enabled:
@@ -97,10 +98,13 @@ class Mirror:
         # ESP32 側に (面の数 + 1) x 4KB 要る (16 面で約 69KB)。足りないと 'E' が返るので、
         # 色のビット数を 1 段ずつ下げて (面を減らして) 送り直し、最後は JPEG に戻す
         self._b16 = None
-        self.b16_bits: tuple[int, int, int] = (5, 6, 5)  # R, G, B のビット数 (5, 6, 5 = 可逆)
+        self.b16_bits: tuple[int, int, int] = tuple(b16_bits)  # R, G, B のビット数 (5, 6, 5 = 可逆)
+        # True: 前フレーム不要版 (ver 3)。ESP32 は変わったブロックを直接液晶へ描くのでメモリ不足にならない。
+        # False: 面ごとのフレーム (ver 2)。少し小さいが ESP32 に (面の数 + 1) x 4KB 要る
+        self.b16_prev_free = b16_prev_free
         # 返事を待たずに先に送ってよい枚数 (bc / bad16)。ESP32 が展開・描画している間に次のフレームを
         # 送っておけるので、送信と展開が重なって速くなる。1 = 1 枚ずつ返事を待つ
-        self.pipeline = 2
+        self.pipeline = pipeline
         self._inflight: list[tuple] = []  # 返事待ちのフレーム (形式, bad16 の色, キーフレームの世代)
         self._key_gen = 0  # 送ったキーフレームの数
         self.last_bytes = 0
@@ -217,7 +221,7 @@ class Mirror:
             if self._b16 is None:
                 from .bad16 import Encoder
 
-                self._b16 = Encoder(bits=self.b16_bits)
+                self._b16 = Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free)
             data = self._b16.encode(frame)
         else:
             data = encode(frame, "jpeg" if self.fmt in ("bc", "bad16") else self.fmt, self.quality)
@@ -304,9 +308,10 @@ class Mirror:
                 import re
 
                 m = re.match(r"frame-stream-(\d+)", fw)
-                if self.fmt == "bad16" and (not m or int(m.group(1)) < 7):
-                    print("[mirror] BadCodec 16bit 版 (面を減らす方式) には frame-stream-7 以降が必要です。"
-                          "ファームウェアを書き込み直してください (古いままだと JPEG に戻ります)")
+                need = 9 if self.b16_prev_free else 7
+                if self.fmt == "bad16" and (not m or int(m.group(1)) < need):
+                    print(f"[mirror] BadCodec 16bit 版{'(前フレーム不要版)' if self.b16_prev_free else ''}には "
+                          f"frame-stream-{need} 以降が必要です。ファームウェアを書き込み直してください")
             else:
                 print("[mirror] ESP32 のファームウェアが古いです。画面が映らない場合は書き込み直してください (README 参照)")
         except Exception as e:

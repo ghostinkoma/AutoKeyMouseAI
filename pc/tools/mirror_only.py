@@ -23,6 +23,9 @@ def main() -> None:
                     help="bc = ブロック差分 (変わったブロックだけ) / bad16 = BadCodec 16bit 版 (ESP32-S3 + PSRAM) / jpeg / raw")
     ap.add_argument("--drop-bits", type=int, default=0, choices=[0, 1, 2, 3],
                     help="bad16 で各色の下位ビットを捨てる数 (0 = 可逆)。ESP32 に入らなければ自動で減らす")
+    ap.add_argument("--with-prev", action="store_true",
+                    help="bad16 を面ごとのフレーム (ver 2) で送る。少し小さいが ESP32 に面の数 x 4KB 要る "
+                         "(既定は前フレーム不要版: メモリ不足にならない)")
     ap.add_argument("--color", help="bad16 の色のビット数 R G B を 3 桁で (例 343 = 10 面, 342 = 9 面, 332 = 8 面)。"
                                     "--drop-bits より優先")
     ap.add_argument("--tolerance", type=int, default=16, help="ブロック差分方式の許容誤差 (大きいほど小さく粗い)")
@@ -41,11 +44,6 @@ def main() -> None:
     host = (cfg.get("device") or {}).get("host")
     if not host:
         raise SystemExit("config.yaml の device.host に ESP32 の IP を書いてください")
-    m = Mirror(host, 1.0 / max(0.5, args.fps), fmt=args.format or mcfg.get("format", "bc"),
-               quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview,
-               transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)))
-    m.bc_tolerance = args.tolerance
-    m.bc_max_ratio = args.max_ratio
     from akm.bad16 import bits_of_drop
 
     if args.color:
@@ -54,9 +52,15 @@ def main() -> None:
         r, g, b = (int(c) for c in args.color)
         if not (1 <= r <= 5 and 1 <= g <= 6 and 1 <= b <= 5):
             raise SystemExit("--color は R 1-5, G 1-6, B 1-5")
-        m.b16_bits = (r, g, b)
+        bits = (r, g, b)
     else:
-        m.b16_bits = bits_of_drop(args.drop_bits)
+        bits = bits_of_drop(args.drop_bits)
+    m = Mirror(host, 1.0 / max(0.5, args.fps), fmt=args.format or mcfg.get("format", "bc"),
+               quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview,
+               transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)),
+               b16_bits=bits, b16_prev_free=not args.with_prev)
+    m.bc_tolerance = args.tolerance
+    m.bc_max_ratio = args.max_ratio
     m.set_lines([("MIRROR ONLY", (0, 200, 255))])
     print(f"[mirror] {host} に毎秒 {1 / m.interval:.0f} 枚で送信中 ({m.fmt}) Ctrl+C で終了  (--fps で変更)")
     import requests
@@ -68,7 +72,10 @@ def main() -> None:
             kinds = (f" (bc {m.sent_kinds['bc']} / jpeg {m.sent_kinds['jpeg']}, 大きさ bc {m.cand_bytes['bc'] / 1024:.1f}KB"
                      f" : jpeg {m.cand_bytes['jpeg'] / 1024:.1f}KB)") if m.fmt == "bc" else ""
             if m.fmt == "bad16":
-                kinds = " (色 R{}G{}B{} = {} 面)".format(*m.b16_bits, sum(m.b16_bits))
+                enc = m._b16
+                kinds = " (色 R{}G{}B{} = {} 面, {})".format(
+                    *m.b16_bits, sum(m.b16_bits),
+                    f"前フレーム不要・変化 {enc.changed_blocks}/510 ブロック" if m.b16_prev_free and enc else "面ごと")
             print(f"[mirror] 送信 {m.sent} 枚  失敗 {m.errors}  {m.fps:.1f}fps  形式 {m.fmt}{kinds}  {m.last_bytes} バイト/枚  "
                   f"(PC: 撮影 {m.t_capture:.0f}ms 圧縮 {m.t_encode:.0f}ms 送信 {m.t_post:.0f}ms)")
             try:

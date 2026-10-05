@@ -3,6 +3,8 @@
 // RGB565 の 16 ビット面を、公式 BadCodec デコーダ (bad_decode.cpp, Protocol 514) で 1 面ずつ展開する。
 // 液晶にも PC のテストにも使えるよう、描画は呼び出し側に任せる (compose)。
 //
+// ver 3 (decodeAbs) は前フレームを持たず、変わったブロックをそのまま液晶へ描く (メモリ 128B)。
+// 以下は ver 1/2 (面ごとのフレーム。前フレームが要る):
 // メモリ: (送られてくる面の数 + 作業用 1) x 4080B。16 面 (可逆) で約 69KB (ESP32-S3 + PSRAM 向け)、
 // 下位ビットを捨てると減る: drop 1 = 13 面 57KB / drop 2 = 10 面 45KB / drop 3 = 7 面 33KB。
 #include <stddef.h>
@@ -72,9 +74,13 @@ inline void makeHeader() {
 }
 }  // namespace detail
 
-// コンテナの先頭 (ver 2: 'B' '6' 2 flags mask(u16 LE) / ver 1: 'B' '6' 1 flags = 16 面すべて)
+// コンテナの先頭
+//   ver 1: 'B' '6' 1 flags                … 16 面すべて、面ごとの BadCodec フレーム (前フレームが要る)
+//   ver 2: 'B' '6' 2 flags mask(u16 LE)   … mask の面だけ、面ごとの BadCodec フレーム (前フレームが要る)
+//   ver 3: 'B' '6' 3 flags mask(u16 LE)   … 前フレーム不要のブロックストリーム (decodeAbs)
 struct Header {
   bool key = false;
+  bool abs = false;        // ver 3
   uint16_t mask = 0xFFFF;  // 送られてくるビット面 (bit b = RGB565 の bit b)。無い面は常に 0
 };
 
@@ -92,7 +98,8 @@ inline bool readHeader(ReadFn read, void* ctx, Header& h) {
     h.mask = 0xFFFF;
     return true;
   }
-  if (b[2] != 2) return false;
+  if (b[2] != 2 && b[2] != 3) return false;
+  h.abs = b[2] == 3;
   uint8_t m[2];
   if (!read(ctx, m, 2)) return false;
   h.mask = (uint16_t)(m[0] | m[1] << 8);
@@ -128,7 +135,7 @@ inline bool init(State& s, void* (*alloc)(size_t)) {
 // readHeader の後の本体を展開して面を更新する (s.mask == h.mask であること)。
 // 戻り値: 0 = 失敗, 1 = 差分, 2 = キーフレーム, 3 = 全面 SKIP_FRAME (絵は変わらない)
 inline int decodeBody(State& s, const Header& h, ReadFn read, void* ctx) {
-  if (!s.ready || s.mask != h.mask) return 0;
+  if (h.abs || !s.ready || s.mask != h.mask) return 0;
   bool all_skip = !h.key;
   int top = ROWS, bottom = -1;
   bad_ctx_t bc;
@@ -183,6 +190,54 @@ inline int decodeBody(State& s, const Header& h, ReadFn read, void* ctx) {
   s.dirtyBottom = bottom;
   if (bottom >= 0) all_skip = false;
   return h.key ? 2 : (all_skip ? 3 : 1);
+}
+
+// ver 3 (前フレーム不要) の本体を読みながら、変わったブロックを 1 つずつ sink(bx, by, rows, px) に渡す。
+// px は 8x8 の RGB565 (行優先)、rows はそのブロックの有効な行数 (最下段は 7)。メモリは 128 バイトだけ。
+// 本体: SKIP (0x80-0xBF) = n+1 ブロック変化なし / それ以外 = 次のブロックの mask の面 (bit0 → bit15) の命令が 1 つずつ
+// (FILL / RLE_BLOCK_4 / RLE_BLOCK_8 / MASTER_BLOCK)。戻り値: 描いたブロック数、失敗なら -1
+template <typename Sink>
+inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
+  constexpr int NBX = W / 8, NBY = H / 8, TOTAL = NBX * NBY;
+  uint16_t px[64];
+  int ptr = 0, drawn = 0;
+  while (ptr < TOTAL) {
+    uint8_t op;
+    if (!read(ctx, &op, 1)) return -1;
+    if (BAD_IS_SKIP(op)) {
+      ptr += BAD_SKIP_COUNT(op);
+      continue;
+    }
+    memset(px, 0, sizeof(px));
+    bool first = true;
+    for (int b = 0; b < 16; b++) {
+      if (!(h.mask >> b & 1)) continue;
+      uint8_t d[9];
+      if (first) {
+        d[0] = op;
+        first = false;
+      } else if (!read(ctx, d, 1)) {
+        return -1;
+      }
+      uint8_t n = bad_block_abs_len(d[0]);
+      if (n == 0 || (n > 1 && !read(ctx, d + 1, n - 1))) return -1;
+      uint8_t rows[8];
+      if (bad_block_abs_rows(d, rows) != BAD_OK) return -1;
+      uint16_t bit = (uint16_t)(1u << b);
+      for (int y = 0; y < 8; y++) {
+        uint8_t v = rows[y];
+        if (!v) continue;
+        for (int x = 0; x < 8; x++)
+          if (v >> x & 1) px[y * 8 + x] |= bit;
+      }
+    }
+    int bx = ptr % NBX, by = ptr / NBX;
+    int rows = ROWS - by * 8;
+    sink(bx, by, rows > 8 ? 8 : rows, px);
+    ptr++;
+    drawn++;
+  }
+  return ptr == TOTAL ? drawn : -1;
 }
 
 // 1 フレーム展開 (ヘッダーから)。面の組み合わせが変わったら 0
