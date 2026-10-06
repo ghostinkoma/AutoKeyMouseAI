@@ -875,3 +875,90 @@ def test_mirror_bad16_prev_free_default_sends_ver3_and_only_changed_blocks():
     assert struct.unpack_from("<H", got[0], 4)[0] == 0b1110011100011000  # R3 G3 B2
     assert got[1][:3] == b"B6\x03" and not got[1][3] & 1 and len(got[1]) <= 6 + 8  # 変化なし = SKIP 命令だけ
     assert got[3][3] & 1                                         # R のあとは全体
+
+
+# ------------------------------------------------------------------ MU Helper 定期再起動 --
+def test_helper_cycle_restart_script_spams_potion_around_toggles():
+    from akm.helper_cycle import CycleConfig, HelperCycle
+
+    c = HelperCycle(CycleConfig(), run=None, grab=None, detector=None)
+    cmds = c.restart_script().split(";")
+    homes = [i for i, x in enumerate(cmds) if x == "k:home"]
+    assert len(homes) == 2
+    w_before = cmds[:homes[0]].count("k:w")
+    w_gap = cmds[homes[0]:homes[1]].count("k:w")
+    w_after = cmds[homes[1]:].count("k:w")
+    assert (w_before, w_gap, w_after) == (10, 4, 10)  # 500ms / 200ms / 500ms を 50ms 間隔
+    waits = [int(x[2:]) for x in cmds if x.startswith("w:")]
+    assert set(waits) == {45}  # 押す時間 (約 5ms, d:5) + 待ち 45ms = 50ms 間隔
+    assert cmds[0] == "d:5"
+
+
+class _FakeDet:
+    def __init__(self, seq):
+        self.seq = list(seq)
+
+    def score(self, img):
+        from akm.hunting_log import Match
+
+        v = self.seq.pop(0) if len(self.seq) > 1 else self.seq[0]
+        return Match(v, 0.99 if v else 0.2, None)
+
+
+def _cycle(seq, **kw):
+    from akm.helper_cycle import CycleConfig, HelperCycle
+
+    t = {"now": 0.0}
+    sent = []
+    c = HelperCycle(CycleConfig(**kw), run=sent.append, grab=lambda: None, detector=_FakeDet(seq),
+                    clock=lambda: t["now"], sleep=lambda s: t.__setitem__("now", t["now"] + s), log=lambda *a: None)
+    return c, t, sent
+
+
+def test_helper_cycle_restarts_every_interval_and_verifies():
+    c, t, sent = _cycle([True], interval_s=600)
+    t["now"] = 599
+    assert c.step() == "on" and not sent
+    t["now"] = 600
+    assert c.step() == "restart"
+    assert len(sent) == 1 and sent[0].count("k:home") == 2 and c.restarts == 1
+    t["now"] += 10
+    assert c.step() == "on"  # 次の再起動は 600 秒後
+
+
+def test_helper_cycle_recovers_when_log_missing_and_toggles_back_if_still_hidden():
+    # 見えない → 6 秒続いたら Home。押しても見えない → もう一度 Home (トグルを戻す)。それでも見えなければ休む
+    c, t, sent = _cycle([False], missing_s=6, backoff_s=60)
+    assert c.step() == "missing"
+    t["now"] += 7
+    assert c.step() == "recover"
+    assert len(sent) == 2 and all(s.count("k:home") == 1 for s in sent)
+    t["now"] += 1
+    assert c.step() == "backoff"
+    # 押したら見えるようになる場合は 1 回で済む
+    c, t, sent = _cycle([False, False, True], missing_s=6)
+    c.step()
+    t["now"] += 7
+    assert c.step() == "recover" and len(sent) == 1 and c.recoveries == 1
+
+
+def test_helper_cycle_does_nothing_when_game_not_active():
+    c, t, sent = _cycle([False], missing_s=0)
+    c.active = lambda: False
+    t["now"] = 10_000
+    assert c.step() == "inactive" and not sent
+
+
+def test_hunting_log_detector_finds_window_anywhere():
+    from akm.hunting_log import DEFAULT_TEMPLATES, HuntingLogDetector
+
+    rng = np.random.default_rng(0)
+    bg = cv2.GaussianBlur(rng.integers(0, 255, (1050, 1680, 3), dtype=np.uint8), (0, 0), 6)
+    det = HuntingLogDetector(PC, threshold=0.7)
+    assert not det.score(bg).visible
+    tpl = cv2.imread(str(PC / DEFAULT_TEMPLATES[0]))
+    for x, y in ((100, 80), (1300, 700)):
+        img = bg.copy()
+        img[y:y + tpl.shape[0], x:x + tpl.shape[1]] = tpl
+        m = det.score(img)
+        assert m.visible and abs(m.pos[0] - x) <= 4 and abs(m.pos[1] - y) <= 4

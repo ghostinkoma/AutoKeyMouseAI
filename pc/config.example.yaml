@@ -104,6 +104,22 @@ popups:
   #   key: esc
   #   threshold: 0.8
 
+# MU Helper の定期再起動 (tools/helper_cycle.py)。動作中は「Instant Hunting Log」窓が出るので、それで判定する。
+#   再起動: W 連打 (pre_ms) → Home (停止) → W 連打 (gap_ms) → Home (再開) → W 連打 (post_ms)
+#   見張り: 窓が missing_s 秒見えなければ Home で再開 (押しても出なければもう一度押して戻す)
+helper_cycle:
+  interval_s: 600          # 再起動の間隔 (秒)
+  toggle_key: home
+  potion_key: w
+  period_ms: 50            # ポーション連打の間隔
+  pre_ms: 500
+  gap_ms: 200
+  post_ms: 500
+  check_s: 2               # 画面を見る間隔
+  settle_s: 1.5            # Home のあと窓の表示が変わるまで待つ
+  missing_s: 6
+  backoff_s: 60            # 押しても窓が出ないときに見張りを休む時間
+
 # ゲーム画面を縮小して ESP32 (T-Display) の液晶に映す。状態 (STANDBY / RUN)・HP/MP・拾得数も重ねて表示
 mirror:
   enabled: true
