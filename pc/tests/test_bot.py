@@ -1039,3 +1039,35 @@ def test_helper_cycle_closes_windows_when_state_unknown(tmp_path):
 
     c.closer = _Closer()
     assert c.step() == "on" and sent == ["k:i"]
+
+
+def test_button_model_learns_on_off_at_fixed_position(tmp_path):
+    from akm.helper_state import BUTTON_ROI, ButtonModel, HelperStateReader
+
+    rng = np.random.default_rng(4)
+    on = cv2.imread(str(PC / "templates" / "helper_on.png"))
+    off = cv2.imread(str(PC / "templates" / "helper_off.png"))
+    x, y, w, h = BUTTON_ROI
+
+    def frame(btn, dx=0, dy=0, size=(1680, 1050)):
+        img = cv2.GaussianBlur(rng.integers(0, 255, (1050, 1680, 3), dtype=np.uint8), (0, 0), 4)
+        b = np.clip(btn.astype(int) + rng.integers(-12, 13, btn.shape), 0, 255).astype(np.uint8)
+        img[y + dy:y + dy + h, x + dx:x + dx + w] = b
+        return cv2.resize(img, size) if size != (1680, 1050) else img
+
+    ons = [frame(on, *rng.integers(-2, 3, 2)) for _ in range(12)]
+    offs = [frame(off, *rng.integers(-2, 3, 2)) for _ in range(12)]
+    model, st = ButtonModel.train(ons, offs)
+    assert st["wrong"] == 0 and st["right"] == 24
+    assert model.classify(frame(on)) is True and model.classify(frame(off)) is False
+    assert model.classify(frame(on, size=(1280, 800))) is True  # 画面の大きさが違っても比率で合わせる
+    covered = frame(on)
+    covered[y - 5:y + h + 5, x - 5:x + w + 5] = 128  # 何かが重なって見えない → 決めない
+    assert model.classify(covered) is None
+    # 保存して読み込むと、HelperStateReader がこれを最優先で使う
+    (tmp_path / "templates").mkdir()
+    for f in ("helper_panel.png", "helper_on.png", "helper_off.png", "hunting_log_title.png", "hunting_log_labels.png"):
+        (tmp_path / "templates" / f).write_bytes((PC / "templates" / f).read_bytes())
+    model.save(tmp_path / "templates" / "helper_button.npz")
+    r = HelperStateReader(tmp_path).read(frame(off))
+    assert r.state is False and r.how.startswith("学習した")

@@ -8,9 +8,10 @@ Instant Hunting Log 窓で補う。どちらも見えない (インベントリ�
     python tools\\helper_cycle.py --once          今すぐ 1 回再起動して終わる (キー操作の確認用)
 
 学習 (表示されているかの判定の閾値を決める):
-    python tools\\helper_cycle.py --collect on    MU Helper 動作中の画面を集める (窓をあちこちに動かしながら)
-    python tools\\helper_cycle.py --collect off   MU Helper 停止中の画面を集める
-    python tools\\helper_cycle.py --calibrate     集めた画面から閾値を決めて templates/hunting_log.json に保存
+    python tools\\helper_cycle.py --collect on    MU Helper 動作中の画面を集める (dataset/helper_state/on)
+    python tools\\helper_cycle.py --collect off   MU Helper 停止中の画面を集める (dataset/helper_state/off)
+    python tools\\helper_cycle.py --calibrate     集めた画面で ■/▶ ボタン (決まった位置) を学習し
+                                                  templates/helper_button.npz に保存 (以後これで判定)
     python tools\\helper_cycle.py --snap character   キャラクター窓を開いた画面を保存
     python tools\\helper_cycle.py --make-ui-template character dataset\\ui\\character.png
                                                   保存した画面から窓のタイトル等を囲んで見本を作る
@@ -33,7 +34,7 @@ from akm.ui_windows import DEFAULT_WINDOWS, WindowCloser
 from akm.hunting_log import CALIB_FILE, DEFAULT_TEMPLATES, HuntingLogDetector, calibrate
 from akm.screen import GameScreen
 
-DATA = PC_DIR / "dataset" / "hunting_log"
+DATA = PC_DIR / "dataset" / "helper_state"
 
 
 def collect(screen: GameScreen, det: HuntingLogDetector, label: str, n: int, every: float) -> None:
@@ -43,7 +44,8 @@ def collect(screen: GameScreen, det: HuntingLogDetector, label: str, n: int, eve
     out.mkdir(parents=True, exist_ok=True)
     start = len(list(out.glob("*.png")))
     print(f"[collect] {out} に {n} 枚集めます ({every:.1f} 秒ごと)。"
-          + ("窓をあちこちに動かしてください" if label == "on" else "MU Helper を止めた状態で、いろいろな場面を映してください"))
+          + ("MU Helper 動作中のまま、狩り・移動・インベントリやキャラクター窓の開閉など、いろいろな場面を映してください"
+             if label == "on" else "MU Helper を止めた状態で、同じようにいろいろな場面を映してください"))
     for i in range(n):
         img = screen.grab()
         p = out / f"{start + i + 1:04d}.png"
@@ -133,6 +135,19 @@ def main() -> None:
     if args.calibrate:
         import cv2
 
+        from akm.helper_state import BUTTON_MODEL, ButtonModel
+
+        imgs = {k: [cv2.imread(str(f)) for f in sorted((DATA / k).glob("*.png"))] for k in ("on", "off")}
+        try:
+            model, st = ButtonModel.train(imgs["on"], imgs["off"])
+        except ValueError as e:
+            raise SystemExit(f"[calibrate] {e}。--collect on / --collect off で集めてください")
+        model.save(PC_DIR / BUTTON_MODEL)
+        print(f"[calibrate] ■/▶ ボタンを学習しました ({BUTTON_MODEL}): 動作中 {st['on']} 枚 / 停止中 {st['off']} 枚")
+        print(f"[calibrate]   見本の判定: 正しい {st['right']} / 不明 {st['unknown']} / 逆 {st['wrong']}"
+              f"  (一番きわどい見本の余裕 {st['min_margin']}、■ と ▶ の平均画像の似かた {st['on_vs_off']})")
+        if st["wrong"]:
+            print("[calibrate]   注意: 逆に判定した見本があります。見本のラベル (on/off) が正しいか確かめてください")
         reader = HelperStateReader(PC_DIR)
         for label, want in (("on", True), ("off", False)):
             files = sorted((DATA / label).glob("*.png"))
