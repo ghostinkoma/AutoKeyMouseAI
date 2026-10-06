@@ -881,7 +881,7 @@ def test_mirror_bad16_prev_free_default_sends_ver3_and_only_changed_blocks():
 def test_helper_cycle_restart_script_spams_potion_around_toggles():
     from akm.helper_cycle import CycleConfig, HelperCycle
 
-    c = HelperCycle(CycleConfig(), run=None, grab=None, detector=None)
+    c = HelperCycle(CycleConfig(), run=None, grab=None, reader=None)
     cmds = c.restart_script().split(";")
     homes = [i for i, x in enumerate(cmds) if x == "k:home"]
     assert len(homes) == 2
@@ -894,15 +894,17 @@ def test_helper_cycle_restart_script_spams_potion_around_toggles():
     assert cmds[0] == "d:5"
 
 
-class _FakeDet:
+class _FakeReader:
+    """state の並び (True = 動作中 / False = 停止中 / None = 不明) を順に返す。最後の値は繰り返す。"""
+
     def __init__(self, seq):
         self.seq = list(seq)
 
-    def score(self, img):
-        from akm.hunting_log import Match
+    def read(self, img):
+        from akm.helper_state import HelperReading
 
         v = self.seq.pop(0) if len(self.seq) > 1 else self.seq[0]
-        return Match(v, 0.99 if v else 0.2, None)
+        return HelperReading(v, "test")
 
 
 def _cycle(seq, **kw):
@@ -910,7 +912,7 @@ def _cycle(seq, **kw):
 
     t = {"now": 0.0}
     sent = []
-    c = HelperCycle(CycleConfig(**kw), run=sent.append, grab=lambda: None, detector=_FakeDet(seq),
+    c = HelperCycle(CycleConfig(**kw), run=sent.append, grab=lambda: None, reader=_FakeReader(seq),
                     clock=lambda: t["now"], sleep=lambda s: t.__setitem__("now", t["now"] + s), log=lambda *a: None)
     return c, t, sent
 
@@ -926,8 +928,8 @@ def test_helper_cycle_restarts_every_interval_and_verifies():
     assert c.step() == "on"  # 次の再起動は 600 秒後
 
 
-def test_helper_cycle_recovers_when_log_missing_and_toggles_back_if_still_hidden():
-    # 見えない → 6 秒続いたら Home。押しても見えない → もう一度 Home (トグルを戻す)。それでも見えなければ休む
+def test_helper_cycle_recovers_when_stopped_and_retries_once():
+    # 停止中が 6 秒続いたら Home。押しても停止中 → もう一度 Home。それでも停止中なら休む
     c, t, sent = _cycle([False], missing_s=6, backoff_s=60)
     assert c.step() == "missing"
     t["now"] += 7
@@ -940,6 +942,40 @@ def test_helper_cycle_recovers_when_log_missing_and_toggles_back_if_still_hidden
     c.step()
     t["now"] += 7
     assert c.step() == "recover" and len(sent) == 1 and c.recoveries == 1
+
+
+def test_helper_cycle_never_presses_when_state_unknown():
+    # インベントリ等でパネルもログ窓も見えない = 不明。動いているかもしれないので Home は押さない
+    c, t, sent = _cycle([None], missing_s=1)
+    for _ in range(10):
+        t["now"] += 5
+        assert c.step() == "unknown"
+    assert not sent
+
+
+def test_helper_state_reads_panel_button_then_log_window():
+    from akm.helper_state import BUTTON_OFFSET, HelperStateReader
+
+    rng = np.random.default_rng(1)
+    bg = cv2.GaussianBlur(rng.integers(0, 255, (1050, 1680, 3), dtype=np.uint8), (0, 0), 6)
+    tp = PC / "templates"
+    panel, on, off = (cv2.imread(str(tp / f)) for f in ("helper_panel.png", "helper_on.png", "helper_off.png"))
+    log = cv2.imread(str(tp / "hunting_log_title.png"))
+    reader = HelperStateReader(PC)
+
+    def put(img, tpl, x, y):
+        img[y:y + tpl.shape[0], x:x + tpl.shape[1]] = tpl
+
+    for btn, want in ((on, True), (off, False)):
+        img = bg.copy()
+        put(img, panel, 116, 23)
+        put(img, btn, 116 + BUTTON_OFFSET[0], 23 + BUTTON_OFFSET[1])
+        r = reader.read(img)
+        assert r.state is want, r
+    img = bg.copy()  # パネルが無く、ログ窓だけ見える → 動作中
+    put(img, log, 900, 600)
+    assert reader.read(img).state is True
+    assert reader.read(bg).state is None  # どちらも無い → 不明 (押さない)
 
 
 def test_helper_cycle_does_nothing_when_game_not_active():

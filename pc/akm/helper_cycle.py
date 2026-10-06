@@ -1,13 +1,15 @@
 """MU Helper の定期再起動と見張り。
 
-MU Helper は動作中「Instant Hunting Log」窓が出る。切替キー (Home) でオン/オフする。
+MU Helper の状態は画面から読む (akm/helper_state.py: 左上パネルの ■/▶、無ければ Hunting Log 窓)。
+切替キー (Home) でオン/オフする。
   * 一定間隔 (既定 10 分) ごとに再起動する:
         W 連打 (500ms) → Home (停止) → W 連打 (200ms) → Home (再開) → W 連打 (500ms)
     W (ポーション) を 50ms ごとに押し続けるので、切り替えの間に襲われても死ににくい。
     キー操作は 1 本のスクリプトにまとめて ESP32 に送るので、間隔は ESP32 側で正確に守られる。
-  * 再起動のあと、窓が出ているか画面で確かめる。出ていなければもう一度 Home。
-  * 普段も見張り、窓が一定時間 (既定 6 秒) 見えなければ止まったとみなして Home で再開する。
-    Home はトグルなので、押しても窓が出なければ (元から動いていて窓だけ隠れていた等) もう一度押して戻す。
+  * 再起動のあと、動作中に戻ったか画面で確かめる。はっきり停止中ならもう一度 Home。
+  * 普段も見張り、はっきり「停止中」が一定時間 (既定 6 秒) 続いたら Home で再開する。
+    状態が分からないとき (インベントリ等でパネルもログ窓も見えない) は何もしない
+    (Home はトグルなので、分からないまま押すと動いている MU Helper を止めてしまう)。
 """
 from __future__ import annotations
 
@@ -33,7 +35,7 @@ class CycleConfig:
     post_ms: int = 500             # 再開後の連打
     check_s: float = 2.0           # 画面を見る間隔
     settle_s: float = 1.5          # Home のあと窓の表示が変わるまで待つ
-    missing_s: float = 6.0         # 窓がこの時間見えなければ止まったとみなす
+    missing_s: float = 6.0         # はっきり停止中がこの時間続いたら再開する
     backoff_s: float = 60.0        # 押しても直らないときに見張りを休む時間
 
     @classmethod
@@ -47,7 +49,7 @@ class HelperCycle:
     cfg: CycleConfig
     run: callable                  # run(script) → ESP32 にスクリプトを送る (完了まで待つ)
     grab: callable                 # grab() → 画面 (BGR)
-    detector: object               # .score(img) → Match
+    reader: object                 # .read(img) → HelperReading (state: True/False/None)
     active: callable = lambda: True  # ゲームが前面か (前面でないとキーが届かない)
     clock: callable = time.monotonic
     sleep: callable = time.sleep
@@ -76,10 +78,9 @@ class HelperCycle:
         return ";".join(["d:5", self._spam(c.pre_ms), f"k:{c.toggle_key}", self._spam(c.post_ms)])
 
     # ---------------------------------------------------------------- actions
-    def _visible_after(self) -> bool:
+    def _state_after(self) -> bool | None:
         self.sleep(self.cfg.settle_s)
-        m = self.detector.score(self.grab())
-        return m.visible
+        return self.reader.read(self.grab()).state
 
     def restart(self) -> bool:
         """定期再起動。終わったら窓が出ているか確かめ、出ていなければ Home をもう一度。"""
@@ -87,25 +88,29 @@ class HelperCycle:
         self.run(self.restart_script())
         self.restarts += 1
         self.last_restart = self.clock()
-        if self._visible_after():
-            self.log("[cycle] 再起動 OK (Hunting Log 表示中)")
+        st = self._state_after()
+        if st:
+            self.log("[cycle] 再起動 OK (動作中)")
             return True
-        self.log("[cycle] 再起動後に Hunting Log が見えません。Home をもう一度押します")
+        if st is None:
+            self.log("[cycle] 再起動後の状態が画面で分かりません (見張りで確認します)")
+            return True
+        self.log("[cycle] 再起動後に停止中のままです。Home をもう一度押します")
         return self.recover(reason="再起動後")
 
     def recover(self, reason: str = "") -> bool:
-        """止まった MU Helper を再開する。トグルなので、押して窓が出なければもう一度押して元に戻す。"""
+        """停止中の MU Helper を再開する。押してもはっきり停止中ならもう一度押す (最大 2 回)。"""
         for attempt in (1, 2):
             self.log(f"[cycle] MU Helper を再開します{f' ({reason})' if reason else ''} (試行 {attempt})")
             self.run(self.toggle_script())
-            if self._visible_after():
+            st = self._state_after()
+            if st is not False:
                 self.recoveries += 1
                 self.missing_since = None
-                self.log("[cycle] 再開 OK (Hunting Log 表示中)")
+                self.log("[cycle] 再開 OK (動作中)" if st else "[cycle] 再開後の状態は画面で分かりません")
                 return True
         self.backoff_until = self.clock() + self.cfg.backoff_s
-        self.log(f"[cycle] Hunting Log が見えないままです (窓を閉じた/隠れている?)。"
-                 f"{self.cfg.backoff_s:.0f} 秒見張りを休みます")
+        self.log(f"[cycle] 押しても停止中のままです。{self.cfg.backoff_s:.0f} 秒見張りを休みます")
         return False
 
     # ---------------------------------------------------------------- loop
@@ -114,14 +119,16 @@ class HelperCycle:
         now = self.clock()
         if not self.active():
             return "inactive"
-        img = self.grab()
-        m = self.detector.score(img)
+        st = self.reader.read(self.grab()).state
         if now - self.last_restart >= self.cfg.interval_s:
             self.restart()
             return "restart"
-        if m.visible:
+        if st:
             self.missing_since = None
             return "on"
+        if st is None:
+            self.missing_since = None  # 分からないときは何もしない (押すと止めてしまうかもしれない)
+            return "unknown"
         if now < self.backoff_until:
             return "backoff"
         if self.missing_since is None:

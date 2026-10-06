@@ -1,4 +1,6 @@
-"""MU Helper を 10 分おきに再起動し、止まっていたら再開する (Instant Hunting Log 窓の表示で判定)。
+"""MU Helper を 10 分おきに再起動し、止まっていたら再開する。
+状態は左上の MU Helper パネルの ■ (動作中) / ▶ (停止中) で判定し、パネルが見えないときは
+Instant Hunting Log 窓で補う。どちらも見えない (インベントリ等で隠れている) ときは何もしない。
 
     python tools\\helper_cycle.py                 実行 (Ctrl+C で終了)
     python tools\\helper_cycle.py --dry-run       キーは送らず、判定と動作の予定だけ表示
@@ -22,6 +24,7 @@ import _path  # noqa: F401
 from akm.config import PC_DIR, abs_map_from, ask_obs_password, load_config
 from akm.device import open_device
 from akm.helper_cycle import CycleConfig, HelperCycle
+from akm.helper_state import HelperStateReader
 from akm.hunting_log import CALIB_FILE, DEFAULT_TEMPLATES, HuntingLogDetector, calibrate
 from akm.screen import GameScreen
 
@@ -40,9 +43,15 @@ def collect(screen: GameScreen, det: HuntingLogDetector, label: str, n: int, eve
         img = screen.grab()
         p = out / f"{start + i + 1:04d}.png"
         cv2.imwrite(str(p), img)
-        m = det.score(img)
-        print(f"[collect] {p.name}  一致度 {m.score:.3f}  位置 {m.pos}")
+        r = HelperStateReader(PC_DIR, log_detector=det).read(img)
+        print(f"[collect] {p.name}  判定 {fmt_state(r)}")
         time.sleep(every)
+
+
+def fmt_state(r) -> str:
+    s = {True: "動作中", False: "停止中", None: "不明  "}[r.state]
+    return (f"{s} ({r.how})  パネル {r.panel:.2f} ■ {r.on:.2f} ▶ {r.off:.2f}"
+            + (f" ログ {r.log:.2f}" if r.log >= 0 else ""))
 
 
 def make_template(png: Path) -> None:
@@ -84,12 +93,20 @@ def main() -> None:
         make_template(args.make_template)
         return
     if args.calibrate:
+        import cv2
+
+        reader = HelperStateReader(PC_DIR)
+        for label, want in (("on", True), ("off", False)):
+            files = sorted((DATA / label).glob("*.png"))
+            res = [reader.read(cv2.imread(str(f))).state for f in files]
+            ok = sum(r == want for r in res)
+            wrong = sum(r == (not want) for r in res)
+            print(f"[calibrate] {'動作中' if want else '停止中'}の画面 {len(files)} 枚: 正しい {ok} / 不明 {res.count(None)} / "
+                  f"逆に判定 {wrong}" + ("  ← 危険 (誤って Home を押す)" if wrong else ""))
         det = HuntingLogDetector(PC_DIR, threshold=0.0)
         r = calibrate(det, DATA / "on", DATA / "off")
-        print(f"[calibrate] 表示中 {r['on']} 枚 (一致度の最小 {r['on_min']}) / 非表示 {r['off']} 枚 (最大 {r['off_max']})")
-        if not r["separated"]:
-            print(f"[calibrate] 注意: 表示中と非表示が分けきれません (誤り {r['errors']} 枚)。"
-                  "--make-template でテンプレートを作り直すか、画面を増やしてください")
+        print(f"[calibrate] Hunting Log 窓: 動作中の画面で一致度の最小 {r['on_min']} / 停止中の画面で最大 {r['off_max']}"
+              " (インベントリ等で窓が隠れた画面があると最小は低くなります。パネルで判定できていれば問題ありません)")
         (PC_DIR / CALIB_FILE).write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"[calibrate] 閾値 {r['threshold']} を {CALIB_FILE} に保存しました")
         return
@@ -104,30 +121,31 @@ def main() -> None:
     if args.collect:
         collect(screen, det, args.collect, args.n, args.every)
         return
+    reader = HelperStateReader(PC_DIR, log_detector=det)
     if args.watch:
         while True:
-            m = det.score(screen.grab())
-            print(f"[watch] {'表示中' if m.visible else '----  '}  一致度 {m.score:.3f}  位置 {m.pos}")
+            print(f"[watch] {fmt_state(reader.read(screen.grab()))}")
             time.sleep(1.0)
 
     ccfg = CycleConfig.from_dict(cfg.get("helper_cycle"))
     if args.interval:
         ccfg.interval_s = args.interval
     dev = open_device(cfg, abs_map_from(cfg), dry_run=args.dry_run)
-    cyc = HelperCycle(ccfg, run=lambda s: dev.run(s, timeout=10), grab=screen.grab, detector=det,
+    cyc = HelperCycle(ccfg, run=lambda s: dev.run(s, timeout=10), grab=screen.grab, reader=reader,
                       active=(lambda: True) if args.ignore_active else screen.is_active)
     if args.once:
         cyc.restart()
         return
     print(f"[cycle] {ccfg.interval_s / 60:.0f} 分ごとに MU Helper を再起動します。"
-          f"Hunting Log が {ccfg.missing_s:.0f} 秒見えなければ再開します。Ctrl+C で終了")
+          f"停止中が {ccfg.missing_s:.0f} 秒続けば再開します (状態が分からないときは何もしません)。Ctrl+C で終了")
     last = None
     try:
         while True:
             r = cyc.step()
             if r != last:
                 left = ccfg.interval_s - (time.monotonic() - cyc.last_restart)
-                msg = {"on": "MU Helper 動作中", "missing": "Hunting Log が見えません", "inactive": "ゲームが前面にありません (待機)",
+                msg = {"on": "MU Helper 動作中", "missing": "MU Helper 停止中", "unknown": "状態が分かりません (待機)",
+                       "inactive": "ゲームが前面にありません (待機)",
                        "backoff": "見張りを休止中", "restart": "再起動しました", "recover": "再開を試みました"}[r]
                 print(f"[cycle] {msg}  (次の再起動まで {max(0, left) / 60:.1f} 分, 再起動 {cyc.restarts} 回, 再開 {cyc.recoveries} 回)")
                 last = r
