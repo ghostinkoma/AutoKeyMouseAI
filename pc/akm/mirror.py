@@ -310,6 +310,13 @@ class Mirror:
                 import re
 
                 m = re.match(r"frame-stream-(\d+)", fw)
+                ver = int(m.group(1)) if m else 0
+                if self.fmt == "bad16" and self.b16_gray and ver < 10:
+                    # 古いファームウェアは Gray 符号を戻せず色が崩れるので、Gray 符号なしで送る
+                    print("[mirror] Gray 符号には frame-stream-10 以降が必要です。今回は Gray 符号なしで送ります"
+                          "(ファームウェアを書き込み直してください)")
+                    self.b16_gray = False
+                    self._b16 = None
                 need = (10 if self.b16_gray else 9) if self.b16_prev_free else 7
                 if self.fmt == "bad16" and (not m or int(m.group(1)) < need):
                     print(f"[mirror] BadCodec 16bit 版{'(前フレーム不要版)' if self.b16_prev_free else ''}には "
