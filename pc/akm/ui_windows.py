@@ -9,7 +9,7 @@ config.yaml:
       key: c
       template: templates/ui_character.png   # 窓の中で動かない部分 (タイトル等) の切り抜き
     - name: inventory
-      key: i
+      key: v
       template: templates/ui_inventory.png
 見本は tools/helper_cycle.py --snap で画面を保存し、--make-ui-template で切り抜く。
 """
@@ -24,7 +24,7 @@ import numpy as np
 
 DEFAULT_WINDOWS = [
     {"name": "character", "key": "c", "template": "templates/ui_character.png"},
-    {"name": "inventory", "key": "i", "template": "templates/ui_inventory.png"},
+    {"name": "inventory", "key": "v", "template": "templates/ui_inventory.png"},
 ]
 
 

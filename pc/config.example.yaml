@@ -111,10 +111,10 @@ popups:
 # 見本: tools/helper_cycle.py --snap character → --make-ui-template character dataset/ui/character.png
 ui_windows:
   - name: character
-    key: c                 # キャラクター窓の開閉キー (ゲームの設定に合わせる)
+    key: c                 # キャラクター窓の開閉キー (Murex は C)
     template: templates/ui_character.png
   - name: inventory
-    key: i                 # インベントリの開閉キー
+    key: v                 # インベントリの開閉キー (Murex は V)
     template: templates/ui_inventory.png
 
 helper_cycle:
