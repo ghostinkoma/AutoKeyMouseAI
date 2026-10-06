@@ -317,6 +317,10 @@ class Mirror:
                           "(ファームウェアを書き込み直してください)")
                     self.b16_gray = False
                     self._b16 = None
+                if (self.fmt == "bad16" and self.b16_prev_free and tuple(self.b16_bits) != (5, 6, 5)
+                        and ver < 11):
+                    print("[mirror] 色を減らしたときのきれいな表示 (下位ビットの複製) には frame-stream-11 以降が必要です"
+                          "(古いままだと暗めに表示されます)")
                 need = (10 if self.b16_gray else 9) if self.b16_prev_free else 7
                 if self.fmt == "bad16" and (not m or int(m.group(1)) < need):
                     print(f"[mirror] BadCodec 16bit 版{'(前フレーム不要版)' if self.b16_prev_free else ''}には "

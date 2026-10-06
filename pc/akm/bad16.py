@@ -91,6 +91,21 @@ def gray565(img: np.ndarray, bits: tuple[int, int, int]) -> np.ndarray:
     return out
 
 
+def replicate565(img: np.ndarray, bits: tuple[int, int, int]) -> np.ndarray:
+    """送った上位ビットを下位に繰り返して埋めた RGB565 (ESP32 の表示と同じ。例 R3 → r2 r1 r0 r2 r1)。"""
+    img = img.astype(np.uint16)
+    out = np.zeros_like(img)
+    for shift, width, n in ((11, 5, bits[0]), (5, 6, bits[1]), (0, 5, bits[2])):
+        q = ((img >> shift) & ((1 << width) - 1)) >> (width - n)
+        v = np.zeros_like(img)
+        pos = width
+        while pos > 0:
+            pos -= n
+            v |= (q << pos) if pos >= 0 else (q >> -pos)
+        out |= (v & ((1 << width) - 1)) << shift
+    return out
+
+
 def parse_color(s) -> tuple[int, int, int]:
     """'343' → (3, 4, 3)。R 1-5, G 1-6, B 1-5。"""
     s = str(s).strip()
@@ -119,10 +134,17 @@ class Encoder:
     受信側に (面の数 + 1) x 4KB 要る)。"""
 
     def __init__(self, drop_bits: int = 0, bits: tuple[int, int, int] | None = None, prev_free: bool = True,
-                 gray: bool = False):
+                 gray: bool = False, hold: float = 0.6):
         self.bits = tuple(bits) if bits else bits_of_drop(drop_bits)
         self.prev_free = prev_free
         self.gray = gray and prev_free  # Gray 符号は ver 3 だけ (frame-stream-10 以降)
+        # 色を減らすとき (ver 3): 四捨五入で段階を選び、ESP32 は送らない下位ビットを上位ビットの複製で埋める
+        # (flags bit2。白が白になり暗部がつぶれない)。hold: 前の段階から hold 段以内の変化なら前の段階のまま
+        # (段階の境目で色が行き来するちらつきを防ぐ。変化ブロックも減る)
+        self.smooth = prev_free and self.bits != (5, 6, 5)
+        self.hold = hold
+        self._q_prev: list[np.ndarray] | None = None
+        self.last_display: np.ndarray | None = None  # 液晶に出る RGB565 (136x240, テスト用)
         self.prev: list[np.ndarray] | None = None
         self.prev565: np.ndarray | None = None
         self.force_key = True
@@ -137,7 +159,13 @@ class Encoder:
     def encode(self, bgr: np.ndarray) -> bytes:
         assert bgr.shape[:2] == (135, W), bgr.shape
         mask = self._mask()
-        img = to565(np.concatenate([bgr, bgr[-1:]], axis=0)) & mask
+        src = np.concatenate([bgr, bgr[-1:]], axis=0)
+        if self.smooth:
+            img = self._quantize(src)
+            self.last_display = replicate565(img, self.bits)
+        else:
+            img = to565(src) & mask
+            self.last_display = img
         if self.prev_free:
             if self.gray:
                 img = gray565(img, self.bits)
@@ -154,6 +182,22 @@ class Encoder:
         self.prev = planes
         return bytes(out)
 
+    def _quantize(self, src: np.ndarray) -> np.ndarray:
+        """各色を n ビットに四捨五入 (+ ヒステリシス) して RGB565 の上位ビットに置く。"""
+        qs = []
+        for ch, n in ((2, self.bits[0]), (1, self.bits[1]), (0, self.bits[2])):
+            v = src[..., ch].astype(np.float32)
+            levels = (1 << n) - 1
+            q = np.rint(v * levels / 255.0)
+            if self._q_prev is not None and self.hold > 0:
+                p = self._q_prev[len(qs)]
+                keep = np.abs(v - p * 255.0 / levels) <= self.hold * 255.0 / levels
+                q = np.where(keep, p, q)
+            qs.append(q.astype(np.uint16))
+        self._q_prev = qs
+        r, g, b = qs
+        return ((r << (5 - self.bits[0])) << 11) | ((g << (6 - self.bits[1])) << 5) | (b << (5 - self.bits[2]))
+
     def _encode_abs(self, img: np.ndarray, mask: int) -> bytes:
         key = self.force_key or self.prev565 is None
         self.force_key = False
@@ -166,7 +210,7 @@ class Encoder:
             raise RuntimeError("bad16_encode_abs failed")
         self.changed_blocks = ch.value
         self.prev565 = img
-        flags = (1 if key else 0) | (2 if self.gray else 0)
+        flags = (1 if key else 0) | (2 if self.gray else 0) | (4 if self.smooth else 0)
         return b"B6\x03" + bytes([flags]) + struct.pack("<H", mask) + out[:n].tobytes()
 
 

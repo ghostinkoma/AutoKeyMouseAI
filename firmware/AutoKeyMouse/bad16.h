@@ -100,6 +100,7 @@ inline const uint64_t* spread() {
 struct Header {
   bool key = false;
   bool gray = false;       // flags bit1 (ver 3): 各色を Gray 符号にしてからビット面に分けてある
+  bool rep = false;        // flags bit2 (ver 3): 送られない下位ビットを上位ビットの複製で埋めて表示する
   bool abs = false;        // ver 3
   uint16_t mask = 0xFFFF;  // 送られてくるビット面 (bit b = RGB565 の bit b)。無い面は常に 0
 };
@@ -115,6 +116,7 @@ inline bool readHeader(ReadFn read, void* ctx, Header& h) {
   if (!read(ctx, b, 4) || b[0] != 'B' || b[1] != '6') return false;
   h.key = b[3] & 1;
   h.gray = b[3] & 2;
+  h.rep = b[3] & 4;
   if (b[2] == 1) {
     h.mask = 0xFFFF;
     return true;
@@ -254,14 +256,26 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
           for (int y = 0; y < 8; y++) rowsAll[b][y] ^= rowsAll[b + 1][y];
         }
     }
+    uint16_t present = h.mask;
+    if (h.rep) {
+      // 送られない下位の面を上位の面の複製で埋める (R3 なら bit12 = bit15, bit11 = bit14)。面の行のコピーだけ
+      static const uint8_t lo[3] = {0, 5, 11}, hi[3] = {4, 10, 15};
+      for (int c = 0; c < 3; c++) {
+        int n = 0;
+        while (n <= hi[c] - lo[c] && (h.mask >> (hi[c] - n) & 1)) n++;
+        if (n == 0) continue;
+        for (int b = hi[c] - n; b >= lo[c]; b--) memcpy(rowsAll[b], rowsAll[b + n], 8);
+      }
+      present = 0xFFFF;
+    }
     // 16 面の 1 行 (各 1 バイト) から 8 画素を表引きでまとめて組む (ビットの数に関係なく一定の速さ)
     const uint64_t* sp = detail::spread();
     for (int y = 0; y < 8; y++) {
       uint64_t lo = 0, hi = 0;
       for (int b = 0; b < 8; b++)
-        if (h.mask >> b & 1) lo |= sp[rowsAll[b][y]] << b;
+        if (present >> b & 1) lo |= sp[rowsAll[b][y]] << b;
       for (int b = 8; b < 16; b++)
-        if (h.mask >> b & 1) hi |= sp[rowsAll[b][y]] << (b - 8);
+        if (present >> b & 1) hi |= sp[rowsAll[b][y]] << (b - 8);
       uint16_t* p = px + y * 8;
       for (int k = 0; k < 8; k++) p[k] = (uint16_t)((lo >> (8 * k)) & 0xFF) | (uint16_t)(((hi >> (8 * k)) & 0xFF) << 8);
     }

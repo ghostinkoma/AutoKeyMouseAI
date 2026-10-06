@@ -669,7 +669,7 @@ def _bad16_frames(bits, prev_free=False, gray=False):
         if f == 6:  # 途中で面の組み合わせを変える (次はキーフレーム)
             enc = Encoder(bits=(2, 3, 2), prev_free=prev_free, gray=gray)
         frames.append(enc.encode(img))
-        expect.append(to565(img) & enc._mask())
+        expect.append(enc.last_display[:135])  # 液晶に出る絵 (色を減らすときは四捨五入 + 下位ビットの複製)
     return frames, expect
 
 
@@ -689,7 +689,9 @@ def test_bad16_esp32_decoder_matches_encoder(bits, prev_free, gray):
     frames, expect = _bad16_frames(bits, prev_free, gray)
     ver = 3 if prev_free else 2
     g = 2 if gray else 0
-    assert frames[0][:4] == b"B6" + bytes([ver, 1 | g]) and frames[1][3] == g  # 1 枚目はキーフレーム
+    assert frames[0][:3] == b"B6" + bytes([ver]) and frames[0][3] & 3 == 1 | g and frames[1][3] & 3 == g  # 1 枚目はキー
+    if prev_free:  # 色を減らすときは下位ビットを複製して表示 (flags bit2)
+        assert bool(frames[0][3] & 4) == (bits != (5, 6, 5))
     assert struct.unpack_from("<H", frames[0], 4)[0] == mask_of(bits)
     assert bin(mask_of(bits)).count("1") == sum(bits)
     assert frames[6][3] & 1                         # 面を変えたらキーフレーム
@@ -869,7 +871,7 @@ def test_mirror_bad16_prev_free_default_sends_ver3_and_only_changed_blocks():
     while len(got) < 6 and time.monotonic() - t < 10:
         time.sleep(0.05)
     m.stop()
-    assert got[0][:4] == b"B6\x03\x01"
+    assert got[0][:3] == b"B6\x03" and got[0][3] & 1
     assert struct.unpack_from("<H", got[0], 4)[0] == 0b1110011100011000  # R3 G3 B2
-    assert got[1][:4] == b"B6\x03\x00" and len(got[1]) <= 6 + 8  # 変化なし = SKIP 命令だけ
-    assert got[3][3] == 1                                         # R のあとは全体
+    assert got[1][:3] == b"B6\x03" and not got[1][3] & 1 and len(got[1]) <= 6 + 8  # 変化なし = SKIP 命令だけ
+    assert got[3][3] & 1                                         # R のあとは全体
