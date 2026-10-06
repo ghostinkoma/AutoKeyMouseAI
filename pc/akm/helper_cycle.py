@@ -6,6 +6,8 @@ MU Helper の状態は画面から読む (akm/helper_state.py: 左上パネル�
         W 連打 (500ms) → Home (停止) → W 連打 (200ms) → Home (再開) → W 連打 (500ms)
     W (ポーション) を 50ms ごとに押し続けるので、切り替えの間に襲われても死ににくい。
     キー操作は 1 本のスクリプトにまとめて ESP32 に送るので、間隔は ESP32 側で正確に守られる。
+  * 前準備: 再起動・再開の前と、状態が分からないときに、キャラクター・インベントリ等の窓が
+    開いていればキーで閉じる (akm/ui_windows.py。開いていると確認できたときだけ押す)。
   * 再起動のあと、動作中に戻ったか画面で確かめる。はっきり停止中ならもう一度 Home。
   * 普段も見張り、はっきり「停止中」が一定時間 (既定 6 秒) 続いたら Home で再開する。
     状態が分からないとき (インベントリ等でパネルもログ窓も見えない) は何もしない
@@ -51,6 +53,7 @@ class HelperCycle:
     grab: callable                 # grab() → 画面 (BGR)
     reader: object                 # .read(img) → HelperReading (state: True/False/None)
     active: callable = lambda: True  # ゲームが前面か (前面でないとキーが届かない)
+    closer: object = None          # akm.ui_windows.WindowCloser (キャラクター・インベントリ窓を閉じる前準備)
     clock: callable = time.monotonic
     sleep: callable = time.sleep
     log: callable = print
@@ -78,12 +81,19 @@ class HelperCycle:
         return ";".join(["d:5", self._spam(c.pre_ms), f"k:{c.toggle_key}", self._spam(c.post_ms)])
 
     # ---------------------------------------------------------------- actions
+    def close_windows(self) -> list[str]:
+        """前準備: キャラクター・インベントリ等の窓が開いていれば閉じる (パネル・ログ窓が隠れないように)。"""
+        if self.closer is None:
+            return []
+        return self.closer.close_all(self.grab, self.run)
+
     def _state_after(self) -> bool | None:
         self.sleep(self.cfg.settle_s)
         return self.reader.read(self.grab()).state
 
     def restart(self) -> bool:
         """定期再起動。終わったら窓が出ているか確かめ、出ていなければ Home をもう一度。"""
+        self.close_windows()
         self.log("[cycle] MU Helper を再起動します (W 連打しながら Home → Home)")
         self.run(self.restart_script())
         self.restarts += 1
@@ -100,6 +110,7 @@ class HelperCycle:
 
     def recover(self, reason: str = "") -> bool:
         """停止中の MU Helper を再開する。押してもはっきり停止中ならもう一度押す (最大 2 回)。"""
+        self.close_windows()
         for attempt in (1, 2):
             self.log(f"[cycle] MU Helper を再開します{f' ({reason})' if reason else ''} (試行 {attempt})")
             self.run(self.toggle_script())
@@ -126,6 +137,10 @@ class HelperCycle:
         if st:
             self.missing_since = None
             return "on"
+        if st is None and self.close_windows():
+            st = self.reader.read(self.grab()).state  # 窓を閉じたので見え直したはず
+            if st:
+                return "on"
         if st is None:
             self.missing_since = None  # 分からないときは何もしない (押すと止めてしまうかもしれない)
             return "unknown"

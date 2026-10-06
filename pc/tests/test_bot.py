@@ -998,3 +998,44 @@ def test_hunting_log_detector_finds_window_anywhere():
         img[y:y + tpl.shape[0], x:x + tpl.shape[1]] = tpl
         m = det.score(img)
         assert m.visible and abs(m.pos[0] - x) <= 4 and abs(m.pos[1] - y) <= 4
+
+
+def _ui_closer(tmp_path):
+    from akm.ui_windows import WindowCloser
+
+    rng = np.random.default_rng(2)
+    bg = cv2.GaussianBlur(rng.integers(0, 255, (1050, 1680, 3), dtype=np.uint8), (0, 0), 6)
+    win = rng.integers(0, 255, (40, 160, 3), dtype=np.uint8)  # 窓のタイトル部分の見本
+    cv2.imwrite(str(tmp_path / "ui_inv.png"), win)
+    closer = WindowCloser(tmp_path, [{"name": "inventory", "key": "i", "template": "ui_inv.png"}],
+                          log=lambda *a: None, sleep=lambda s: None)
+    opened = bg.copy()
+    opened[300:340, 1200:1360] = win
+    return closer, bg, opened
+
+
+def test_ui_window_closer_presses_key_only_when_open(tmp_path):
+    closer, closed_img, open_img = _ui_closer(tmp_path)
+    sent = []
+    # 閉じている → 押さない (トグルなので押すと開いてしまう)
+    assert closer.close_all(lambda: closed_img, sent.append) == [] and not sent
+    # 開いている → i を 1 回押し、閉じたことを確認
+    frames = [open_img, closed_img]
+    assert closer.close_all(lambda: frames.pop(0) if len(frames) > 1 else frames[0], sent.append) == ["inventory"]
+    assert sent == ["k:i"]
+    # 押しても閉じない (キーの割り当て違い等) → それ以上押さない
+    sent.clear()
+    assert closer.close_all(lambda: open_img, sent.append) == [] and sent == ["k:i"]
+
+
+def test_helper_cycle_closes_windows_when_state_unknown(tmp_path):
+    closer, _, _ = _ui_closer(tmp_path)
+    c, t, sent = _cycle([None, True])  # 1 回目は不明 → 窓を閉じて読み直すと動作中
+
+    class _Closer:
+        def close_all(self, grab, run):
+            run("k:i")
+            return ["inventory"]
+
+    c.closer = _Closer()
+    assert c.step() == "on" and sent == ["k:i"]

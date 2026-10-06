@@ -11,6 +11,10 @@ Instant Hunting Log 窓で補う。どちらも見えない (インベントリ�
     python tools\\helper_cycle.py --collect on    MU Helper 動作中の画面を集める (窓をあちこちに動かしながら)
     python tools\\helper_cycle.py --collect off   MU Helper 停止中の画面を集める
     python tools\\helper_cycle.py --calibrate     集めた画面から閾値を決めて templates/hunting_log.json に保存
+    python tools\\helper_cycle.py --snap character   キャラクター窓を開いた画面を保存
+    python tools\\helper_cycle.py --make-ui-template character dataset\\ui\\character.png
+                                                  保存した画面から窓のタイトル等を囲んで見本を作る
+                                                  (inventory も同じ。閉じるキーは config の ui_windows:)
     python tools\\helper_cycle.py --make-template dataset\\hunting_log\\on\\0001.png
                                                   画面からタイトルバー / 項目名の列を選んでテンプレートを作り直す
 
@@ -25,6 +29,7 @@ from akm.config import PC_DIR, abs_map_from, ask_obs_password, load_config
 from akm.device import open_device
 from akm.helper_cycle import CycleConfig, HelperCycle
 from akm.helper_state import HelperStateReader
+from akm.ui_windows import DEFAULT_WINDOWS, WindowCloser
 from akm.hunting_log import CALIB_FILE, DEFAULT_TEMPLATES, HuntingLogDetector, calibrate
 from akm.screen import GameScreen
 
@@ -72,6 +77,27 @@ def make_template(png: Path) -> None:
         print(f"[template] {name} を保存しました ({w}x{h})")
 
 
+def make_ui_template(name: str, png: Path, entries: list[dict]) -> None:
+    import cv2
+
+    img = cv2.imread(str(png))
+    if img is None:
+        raise SystemExit(f"画像が読めません: {png}")
+    e = next((e for e in entries if e["name"] == name), None)
+    if e is None:
+        raise SystemExit(f"config の ui_windows: に {name} がありません ({', '.join(x['name'] for x in entries)})")
+    print(f"[template] {name} 窓の中で動かない部分 (タイトル・枠の飾りなど。中身のアイテムや数値は含めない) を"
+          "マウスで囲んで Enter")
+    x, y, w, h = cv2.selectROI(f"select: {name}", img, showCrosshair=False)
+    cv2.destroyAllWindows()
+    if w == 0 or h == 0:
+        raise SystemExit("やめました")
+    out = PC_DIR / e["template"]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out), img[y:y + h, x:x + w])
+    print(f"[template] {out} を保存しました ({w}x{h})。--watch で開閉が見分けられるか確認してください")
+
+
 def main() -> None:
     import argparse
     import json
@@ -87,7 +113,19 @@ def main() -> None:
     ap.add_argument("--every", type=float, default=1.0, help="--collect の間隔 (秒)")
     ap.add_argument("--calibrate", action="store_true", help="集めた画面から閾値を決める")
     ap.add_argument("--make-template", type=Path, help="この画像からテンプレートを作り直す")
+    ap.add_argument("--snap", metavar="NAME", help="今の画面を dataset/ui/NAME.png に保存する (窓の見本づくり用)")
+    ap.add_argument("--make-ui-template", nargs=2, metavar=("NAME", "PNG"), help="画面から窓の見本を切り抜く")
     args = ap.parse_args()
+    import yaml
+
+    try:
+        with open(PC_DIR / "config.yaml", encoding="utf-8") as f:
+            ui_entries = (yaml.safe_load(f) or {}).get("ui_windows") or DEFAULT_WINDOWS
+    except FileNotFoundError:
+        ui_entries = DEFAULT_WINDOWS
+    if args.make_ui_template:
+        make_ui_template(args.make_ui_template[0], Path(args.make_ui_template[1]), ui_entries)
+        return
 
     if args.make_template:
         make_template(args.make_template)
@@ -121,10 +159,24 @@ def main() -> None:
     if args.collect:
         collect(screen, det, args.collect, args.n, args.every)
         return
+    if args.snap:
+        import cv2
+
+        out = PC_DIR / "dataset" / "ui" / f"{args.snap}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(out), screen.grab())
+        print(f"[snap] {out} に保存しました。次は --make-ui-template {args.snap} {out}")
+        return
     reader = HelperStateReader(PC_DIR, log_detector=det)
+    closer = WindowCloser(PC_DIR, ui_entries)
+    if closer.missing:
+        print(f"[ui] 窓の見本がまだありません: {', '.join(closer.missing)}。"
+              "--snap と --make-ui-template で作ると、開いていれば閉じてから判定します")
     if args.watch:
         while True:
-            print(f"[watch] {fmt_state(reader.read(screen.grab()))}")
+            img = screen.grab()
+            opened = ", ".join(f"{w.name} {s:.2f}" for w, s in closer.open_windows(img)) or "なし"
+            print(f"[watch] {fmt_state(reader.read(img))}  開いている窓: {opened}")
             time.sleep(1.0)
 
     ccfg = CycleConfig.from_dict(cfg.get("helper_cycle"))
@@ -132,7 +184,7 @@ def main() -> None:
         ccfg.interval_s = args.interval
     dev = open_device(cfg, abs_map_from(cfg), dry_run=args.dry_run)
     cyc = HelperCycle(ccfg, run=lambda s: dev.run(s, timeout=10), grab=screen.grab, reader=reader,
-                      active=(lambda: True) if args.ignore_active else screen.is_active)
+                      active=(lambda: True) if args.ignore_active else screen.is_active, closer=closer)
     if args.once:
         cyc.restart()
         return

@@ -107,6 +107,16 @@ popups:
 # MU Helper の定期再起動 (tools/helper_cycle.py)。動作中は「Instant Hunting Log」窓が出るので、それで判定する。
 #   再起動: W 連打 (pre_ms) → Home (停止) → W 連打 (gap_ms) → Home (再開) → W 連打 (post_ms)
 #   見張り: 窓が missing_s 秒見えなければ Home で再開 (押しても出なければもう一度押して戻す)
+# ゲーム内の窓 (トグルで開閉)。MU Helper の判定・再起動の前に、開いていれば閉じる (akm/ui_windows.py)。
+# 見本: tools/helper_cycle.py --snap character → --make-ui-template character dataset/ui/character.png
+ui_windows:
+  - name: character
+    key: c                 # キャラクター窓の開閉キー (ゲームの設定に合わせる)
+    template: templates/ui_character.png
+  - name: inventory
+    key: i                 # インベントリの開閉キー
+    template: templates/ui_inventory.png
+
 helper_cycle:
   interval_s: 600          # 再起動の間隔 (秒)
   toggle_key: home
