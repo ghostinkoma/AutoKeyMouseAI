@@ -1551,3 +1551,22 @@ def test_map_guide_sections_with_icons():
         ("Lost Tower", "Cursed Wizard", 54, "cursed.webp"),          # 名前が alt にしか無い
         ("Atlans", "Bahamut", 43, None), ("Atlans", "Vepar", 45, None)}  # アイコンの無い section は行の形で
     assert section_html(html, "lost").startswith('<section id="map-guide-lost-tower">')
+
+
+def test_map_guide_heading_min_level_icons_and_cleanup():
+    import sqlite3
+
+    from akm.spawn import parse_guide_tables, save_guide
+
+    html = """<h3>Aida (230+)</h3><table><tr><th></th><th>Monster</th><th>Level</th></tr>
+      <tr><td><img src="/icons/death_tree.png"></td><td>Death Tree</td><td>120</td></tr></table>
+      <h3>Atlans (110+)</h3><table><tr><th>Monster</th><th>Level</th></tr><tr><td>Bahamut</td><td>70</td></tr></table>"""
+    rows = parse_guide_tables(html)
+    assert [(r["map"], r["monster"], r["level"], r["icon"], r["min_level"]) for r in rows] == [
+        ("Aida", "Death Tree", 120, "/icons/death_tree.png", 230), ("Atlans", "Bahamut", 70, None, 110)]
+    con = sqlite3.connect(":memory:")
+    save_guide(con, [{"map": "Aida (23o+)", "monster": "Death Tree", "level": 120}])  # 前の版の読み違い
+    save_guide(con, rows)
+    assert con.execute("SELECT name, min_level FROM guide_maps ORDER BY name").fetchall() == [("Aida", 230), ("Atlans", 110)]
+    assert con.execute("SELECT DISTINCT map FROM monsters WHERE source='guide:rexmu' ORDER BY map").fetchall() == [
+        ("Aida",), ("Atlans",)]

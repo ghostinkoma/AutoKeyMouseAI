@@ -22,7 +22,7 @@ GUIDE_URL = "https://wiki.rexmu.online/map-guide"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guide_maps (
-    name TEXT PRIMARY KEY, source TEXT, updated REAL);
+    name TEXT PRIMARY KEY, source TEXT, updated REAL, min_level INTEGER);
 CREATE TABLE IF NOT EXISTS guide_monsters (
     map TEXT NOT NULL, monster TEXT NOT NULL, level INTEGER, source TEXT, updated REAL, icon TEXT,
     PRIMARY KEY (map, monster));
@@ -37,6 +37,8 @@ def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
     if "icon" not in [r[1] for r in db.execute("PRAGMA table_info(guide_monsters)")]:
         db.execute("ALTER TABLE guide_monsters ADD COLUMN icon TEXT")
+    if "min_level" not in [r[1] for r in db.execute("PRAGMA table_info(guide_maps)")]:
+        db.execute("ALTER TABLE guide_maps ADD COLUMN min_level INTEGER")  # 入場に必要なレベル
 
 
 def similarity(a: str, b: str) -> float:
@@ -56,9 +58,17 @@ _LV_HDR = ("lv", "level", "lvl")
 _MAP_HDR = ("map", "location", "zone", "area")
 
 
+def split_map_heading(text: str) -> tuple[str, int | None]:
+    """見出し "Aida (230+)" → ("Aida", 230)。括弧の中は入場に必要なレベル。"""
+    m = re.search(r"[\(\[]\s*(?:lv\.?\s*)?(\d{1,4})\s*\+?\s*[\)\]]", text, re.I)
+    name = re.sub(r"\s*[\(\[].*?[\)\]]", "", text)
+    return name, int(m.group(1)) if m else None
+
+
 def _clean_map(name: str) -> str:
     from .maploc import normalize_map
 
+    name = split_map_heading(name)[0]
     name = re.sub(r"\s+", " ", re.sub(r"[#*:]+", " ", name)).strip(" -–")
     return normalize_map(name) if name else ""
 
@@ -74,12 +84,15 @@ def _looks_like_map(line: str, known: list[str]) -> str | None:
 
 
 def parse_guide_tables(html: str) -> list[dict]:
-    """表から {map, monster, level}。列は見出しの文字で、マップは「マップ」列か表の直前の見出しから。"""
+    """表から {map, monster, level, icon, min_level}。列は見出しの文字で、マップは「マップ」列か表の直前の見出しから。
+    アイコンは行の中の最初の画像。見出し "Aida (230+)" の括弧の数字は入場に必要なレベル (min_level)。"""
     from .monsters import parse_tables
 
     out = []
     for t in parse_tables(html):
-        rows = [r for r in t["rows"] if any(c.strip() for c in r)]
+        imgs_all = t.get("imgs") or [[] for _ in t["rows"]]
+        pairs = [(r, im) for r, im in zip(t["rows"], imgs_all) if any(c.strip() for c in r)]
+        rows = [r for r, _ in pairs]
         hi = None
         for i, r in enumerate(rows[:5]):
             low = [c.lower() for c in r]
@@ -92,13 +105,14 @@ def parse_guide_tables(html: str) -> list[dict]:
         cn = next(i for i, c in enumerate(header) if any(k in c for k in _NAME_HDR) and not any(k in c for k in _MAP_HDR))
         cl = next(i for i, c in enumerate(header) if any(k == c.strip(" .") or c.startswith(k) for k in _LV_HDR))
         cm = next((i for i, c in enumerate(header) if any(k in c for k in _MAP_HDR) and i != cn), None)
-        for r in rows[hi + 1:]:
+        for r, im in pairs[hi + 1:]:
             if cn >= len(r) or not r[cn].strip() or [c.lower() for c in r] == header:
                 continue
             m = re.search(r"\d{1,3}", r[cl]) if cl < len(r) else None
             maps = r[cm] if cm is not None and cm < len(r) else t["heading"]
             for mp in [x for x in re.split(r"\s*[,/、]\s*", maps or "") if x.strip()] or [""]:
-                out.append({"map": _clean_map(mp), "monster": r[cn].strip(), "level": int(m.group()) if m else None})
+                out.append({"map": _clean_map(mp), "monster": r[cn].strip(), "level": int(m.group()) if m else None,
+                            "icon": im[0] if im else None, "min_level": split_map_heading(mp)[1]})
     return [e for e in out if e["map"] and e["monster"]]
 
 
@@ -288,9 +302,16 @@ def save_guide(db: sqlite3.Connection, rows: list[dict], source: str = GUIDE_URL
     ensure_monsters(db)
     now = time.time()
     maps = sorted({r["map"] for r in rows})
-    db.executemany("INSERT INTO guide_maps(name, source, updated) VALUES (?,?,?) "
-                   "ON CONFLICT(name) DO UPDATE SET source=excluded.source, updated=excluded.updated",
-                   [(m, source, now) for m in maps])
+    min_lv = {r["map"]: r["min_level"] for r in rows if r.get("min_level") is not None}
+    # 前回の取り込みで入った、今回のガイドに無いもの (読み方を直す前の名前など) は消す
+    q = ",".join("?" * len(maps))
+    db.execute(f"DELETE FROM guide_monsters WHERE map NOT IN ({q})", maps)
+    db.execute(f"DELETE FROM guide_maps WHERE name NOT IN ({q})", maps)
+    db.execute(f"DELETE FROM monsters WHERE source='guide:rexmu' AND map NOT IN ({q})", maps)
+    db.executemany("INSERT INTO guide_maps(name, source, updated, min_level) VALUES (?,?,?,?) "
+                   "ON CONFLICT(name) DO UPDATE SET source=excluded.source, updated=excluded.updated, "
+                   "min_level=COALESCE(excluded.min_level, guide_maps.min_level)",
+                   [(m, source, now, min_lv.get(m)) for m in maps])
     db.executemany("INSERT INTO guide_monsters(map, monster, level, source, updated, icon) VALUES (?,?,?,?,?,?) "
                    "ON CONFLICT(map, monster) DO UPDATE SET level=COALESCE(excluded.level, guide_monsters.level), "
                    "source=excluded.source, updated=excluded.updated, icon=COALESCE(excluded.icon, guide_monsters.icon)",

@@ -81,6 +81,13 @@ def main() -> None:
 
                 ids = re.findall(r'<section[^>]*id=["\']([^"\']+)', html)
                 print(f"[guide] id に {args.section!r} を含む map-guide の section がありません。section の id: {ids[:40]}")
+                # 代わりに、その名前の後にある最初の表の HTML を出す (アイコンの書き方を確かめるため)
+                i = html.lower().find(args.section.lower())
+                j = html.lower().find("<table", i) if i >= 0 else -1
+                if j >= 0:
+                    k = html.lower().find("</table>", j)
+                    print(f"[guide] 代わりに「{args.section}」の後の表:")
+                    print(html[j:(k + 8 if k >= 0 else j + 6000)][:6000])
             else:
                 print(sec[:8000] + ("\n… (以下略)" if len(sec) > 8000 else ""))
             return
@@ -101,7 +108,8 @@ def main() -> None:
           "一覧の * がアイコンあり)")
     for mp, n in sorted(per_map.items()):
         mons = [r for r in rows if r["map"] == mp]
-        print(f"  {mp} ({n}): " + ", ".join(f"{r['monster']} Lv{r['level'] or '?'}{'*' if r.get('icon') else ''}"
+        lv = next((r.get("min_level") for r in mons if r.get("min_level")), None)
+        print(f"  {mp}{f' (入場 Lv{lv}+)' if lv else ''} ({n}): " + ", ".join(f"{r['monster']} Lv{r['level'] or '?'}{'*' if r.get('icon') else ''}"
                                             for r in mons[:8])
               + (" …" if n > 8 else ""))
     if not rows:
