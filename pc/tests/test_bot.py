@@ -1632,3 +1632,25 @@ def test_rexmu_map_guide_cards():
     con = sqlite3.connect(":memory:")
     save_guide(con, rows)
     assert con.execute("SELECT min_level, zen_cost, resets FROM guide_maps WHERE name='Kanturu'").fetchone() == (270, 200000, 10)
+
+
+def test_guide_icons_from_saved_page_folder_converted_to_png(tmp_path):
+    import cv2
+
+    from akm.spawn import fetch_icons
+
+    files = tmp_path / "guide_files"
+    files.mkdir()
+    icon = np.full((40, 40, 3), (30, 120, 200), np.uint8)
+    cv2.imwrite(str(files / "Monster10.webp"), icon)
+    (files / "Broken.webp").write_bytes(b"<html>not an image</html>")
+    rows = [{"monster": "Spider", "icon": "/assets/monsters/Monster10.webp"},
+            {"monster": "Spider2", "icon": "/assets/monsters/Monster10.webp"},
+            {"monster": "Bad", "icon": "/assets/monsters/Broken.webp"}, {"monster": "Skull", "icon": None}]
+    out = tmp_path / "monster_icons"
+    st = fetch_icons(rows, "https://wiki.rexmu.online/map-guide", out, [files])
+    assert (st["new"], st["failed"]) == (1, 1) and "画像として読めません" in st["reason"]
+    assert rows[0]["icon"] == rows[1]["icon"] and rows[0]["icon"].startswith("monster_icons/") and rows[0]["icon"].endswith(".png")
+    assert cv2.imread(str(tmp_path / rows[0]["icon"])).shape == (40, 40, 3)  # webp → png
+    assert rows[2]["icon"] == "" and rows[3]["icon"] == ""
+    assert fetch_icons([{"icon": "/assets/monsters/Monster10.webp"}], "https://wiki.rexmu.online/map-guide", out)["have"] == 1

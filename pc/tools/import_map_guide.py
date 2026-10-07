@@ -56,6 +56,7 @@ def main() -> None:
     ap.add_argument("--dump", action="store_true", help="取り込まずに内容を表示する")
     ap.add_argument("--section", help="id にこの文字を含む map-guide の section の HTML を表示する (確認用)")
     ap.add_argument("--no-icons", action="store_true", help="アイコン画像を取得しない")
+    ap.add_argument("--icons-dir", help="アイコン画像のあるフォルダ (ブラウザで保存したページの画像など)")
     args = ap.parse_args()
 
     if args.text:
@@ -143,11 +144,20 @@ def main() -> None:
     db_path = PC_DIR / ((cfg.get("maplog") or {}).get("db", "data/mu_map.db"))
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if not args.no_icons and any(r.get("icon") for r in rows):
-        from akm.monsters import download_icons
+        from akm.spawn import fetch_icons
 
         base = args.url if not args.file else GUIDE_URL
-        n = download_icons(rows, base, db_path.parent / "monster_icons")
-        print(f"[guide] アイコンを {n} 枚取得しました ({db_path.parent / 'monster_icons'})")
+        local = [args.icons_dir] if args.icons_dir else []
+        if args.file:  # ブラウザで「Web ページ、完全」で保存したときの画像のフォルダ (page_files)
+            f = Path(args.file)
+            local += [str(d) for d in f.parent.glob(f.stem + "*_files") if d.is_dir()]
+        st = fetch_icons(rows, base, db_path.parent / "monster_icons", local)
+        print(f"[guide] アイコン: 新しく保存 {st['new']} 枚 / 保存済み {st['have']} 枚 / 取れない {st['failed']} 枚"
+              f" ({db_path.parent / 'monster_icons'})")
+        if st["failed"]:
+            print(f"[guide]   取れない理由 (最初の 1 つ): {st['reason']}")
+            print("[guide]   サイトから取れないときは、ブラウザでページを「名前を付けて保存」→「Web ページ、完全」で"
+                  " guide.html として pc フォルダに保存すると、一緒に保存される画像 (guide_files) から取り込みます")
     else:
         for r in rows:
             r["icon"] = ""

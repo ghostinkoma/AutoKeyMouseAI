@@ -490,3 +490,80 @@ class SpawnRegistry:
             "level=COALESCE(monster_areas.level, excluded.level)",
             (loc.map, ax, ay, m.monster, level if level is not None else m.level, ts, ts, m.ratio, int(m.in_map)))
         return m
+
+
+# ------------------------------------------------------------ アイコン --
+def fetch_icons(rows: list[dict], base_url: str, out_dir, local_dirs=(), log=print) -> dict:
+    """ガイドのアイコンを out_dir に PNG で保存し、r["icon"] を DB からの相対パス (monster_icons/xxx.png) にする。
+
+    webp (ビューアの Java では表示できない) は PNG に変換する。local_dirs にブラウザで「Web ページ、完全」で保存した
+    フォルダを渡すと、同じファイル名の画像をそこから使う (サイトから取れないとき用)。
+    戻り値: {"new": 新しく保存, "have": 保存済み, "failed": 取れなかった, "reason": 最初の失敗の理由}
+    """
+    import hashlib
+    from pathlib import Path
+    from urllib.parse import urljoin
+
+    import cv2
+    import numpy as np
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    local = {}
+    for d in local_dirs:
+        for f in Path(d).rglob("*"):
+            if f.suffix.lower() in (".webp", ".png", ".jpg", ".jpeg", ".gif", ".bmp"):
+                local.setdefault(f.name.lower(), f)
+    stats = {"new": 0, "have": 0, "failed": 0, "reason": ""}
+    done: dict[str, str] = {}
+    session = None
+    for r in rows:
+        src = r.get("icon") or ""
+        if not src:
+            r["icon"] = ""
+            continue
+        url = urljoin(base_url, src)
+        if url in done:
+            r["icon"] = done[url]
+            continue
+        fname = hashlib.sha1(url.encode()).hexdigest()[:16] + ".png"
+        path = out_dir / fname
+        rel = f"{out_dir.name}/{fname}"
+        if path.exists() and path.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":  # 前の版が webp のまま保存したもの
+            old = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_UNCHANGED)
+            if old is not None:
+                cv2.imwrite(str(path), old)
+            else:
+                path.unlink()
+        if path.exists():
+            stats["have"] += 1
+            done[url] = r["icon"] = rel
+            continue
+        data, why = None, ""
+        name = Path(url.split("?")[0]).name.lower()
+        if name in local:
+            data = local[name].read_bytes()
+        else:
+            try:
+                import requests
+
+                session = session or requests.Session()
+                resp = session.get(url, timeout=15, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/126.0 Safari/537.36",
+                    "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8", "Referer": base_url})
+                resp.raise_for_status()
+                data = resp.content
+            except Exception as e:
+                why = f"{url}: {e}"
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED) if data else None
+        if img is None:
+            stats["failed"] += 1
+            if not stats["reason"]:
+                stats["reason"] = why or f"{url}: 画像として読めません (先頭 {data[:40]!r})"
+            done[url] = r["icon"] = ""
+            continue
+        cv2.imwrite(str(path), img)  # PNG で保存 (webp も変換)
+        stats["new"] += 1
+        done[url] = r["icon"] = rel
+    return stats
