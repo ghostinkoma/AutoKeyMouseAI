@@ -1193,7 +1193,17 @@ def test_target_bar_found_and_live_overlay():
     r = rec.step()
     assert r.helper is True and r.windows == ["inventory"] and got == [r]
     texts = [t for t, _ in overlay_lines(r)]
-    assert texts == ["HELPER ON", "WIN: inventory"]
+    assert texts == ["MAP ?", "HELPER ON", "MOB -", "WIN inventory"]
+    # 相手を見たら、見えなくなっても少しの間は液晶に残す。現在地は読めなくなったら最後の場所を (old) で
+    from akm.edge.live import Recognition
+    from akm.edge.target import Target
+    from akm.maploc import Location
+
+    tg = Target("Bahamut", "70", 0.52, (0, 0, 1, 1), (0, 0, 1, 1))
+    r2 = Recognition(helper=False, target=tg, loc=Location("Atlans", 45, 69))
+    assert [t for t, _ in overlay_lines(r2)] == ["MAP Atlans 45,69", "HELPER OFF", "MOB Bahamut Lv70 52%"]
+    r3 = Recognition(shown_target=tg, last_loc=Location("Atlans", 45, 69))
+    assert [t for t, _ in overlay_lines(r3)] == ["MAP Atlans (old)", "HELPER ?", "MOB Bahamut Lv70"]
 
 
 def test_learn_cycle_trains_when_enough_new_frames_and_reloads(tmp_path):
@@ -1480,7 +1490,7 @@ def test_mirror_only_starts_with_auto_train_without_device(tmp_path, monkeypatch
     monkeypatch.setattr(mo, "time", types.SimpleNamespace(sleep=stop_soon))
     monkeypatch.setattr(sys, "argv", ["mirror_only.py", "--auto-train", "--no-ask"])
     mo.main()
-    assert made["mirror"].lines[0][0] == "MIRROR ONLY"
+    assert [t for t, _ in made["mirror"].lines[:3]] == ["MAP ?", "HELPER ?", "MOB -"]  # 認識結果を液晶に重ねた
     assert (tmp_path / "data" / "mu_map.db").exists()  # 現在地・目撃の記録先を開いた
 
 

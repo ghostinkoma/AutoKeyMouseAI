@@ -25,21 +25,31 @@ class Recognition:
     loc: object = None                          # 現在地 (akm.maploc.Location。world を渡したとき)
     judge: tuple | None = None                  # 相手の名前の判定 ('ok' / 'pending' / 'ng', 確率)
     ms: float = 0.0
+    last_loc: object = None                     # 現在地が読めないときに出す、最後に分かった現在地
+    shown_target: object = None                 # 液晶に出す相手 (見えなくなっても少しの間は残す)
+    target_age: float = 0.0                     # shown_target を最後に見てからの秒数
 
 
 def overlay_lines(r: Recognition) -> list[tuple[str, tuple[int, int, int]]]:
-    lines = []
-    if r.helper is not None:
-        lines.append(("HELPER ON" if r.helper else "HELPER OFF", GREEN if r.helper else RED))
-    if r.windows:
-        lines.append(("WIN: " + " ".join(r.windows), YELLOW))
-    t = r.target
-    if t is not None:
-        hp = f" {t.hp_ratio * 100:.0f}%" if t.hp_ratio is not None else ""
-        mark = {"ok": "", "pending": " ?", "ng": " x"}.get(r.judge[0], "") if r.judge else ""
-        lines.append((f"{t.name or '?'}" + (f" Lv{t.level}" if t.level else "") + hp + mark, MAGENTA))
+    """液晶に重ねる認識結果。マップ・MU Helper・モンスターの 3 行は、分からないときも「?」で常に出す。"""
     if r.loc is not None:
-        lines.append((f"{r.loc.map} {r.loc.x},{r.loc.y}", GRAY))
+        mp = (f"MAP {r.loc.map} {r.loc.x},{r.loc.y}", GREEN)
+    elif r.last_loc is not None:
+        mp = (f"MAP {r.last_loc.map} (old)", GRAY)
+    else:
+        mp = ("MAP ?", GRAY)
+    helper = {True: ("HELPER ON", GREEN), False: ("HELPER OFF", RED)}.get(r.helper, ("HELPER ?", GRAY))
+    t = r.shown_target if r.shown_target is not None else r.target
+    if t is not None:
+        hp = f" {t.hp_ratio * 100:.0f}%" if t.hp_ratio is not None and r.target is not None else ""
+        mark = {"ok": "", "pending": " ?", "ng": " x"}.get(r.judge[0], "") if r.judge else ""
+        mob = (f"MOB {t.name or '?'}" + (f" Lv{t.level}" if t.level else "") + hp + mark,
+               MAGENTA if r.target is not None else GRAY)
+    else:
+        mob = ("MOB -", GRAY)
+    lines = [mp, helper, mob]
+    if r.windows:
+        lines.append(("WIN " + " ".join(r.windows), YELLOW))
     return lines
 
 
@@ -59,6 +69,10 @@ class LiveRecognizer:
         self.harvester = harvester      # akm.edge.harvest.OcrHarvester (正解付きの文字の行を自動で集める)
         self.world = world              # akm.world_log.WorldLogger (現在地と相手を DB に記録する)
         self.last = Recognition()
+        self.keep_target_s = 8.0        # 相手が見えなくなっても液晶に残す秒数
+        self._shown = None
+        self._shown_ts = -1e9
+        self._last_loc = None
         self.words = None
         self._last_save = 0.0
         self._stop = threading.Event()
@@ -119,8 +133,21 @@ class LiveRecognizer:
                 r.loc = self.world.current()
                 if r.target is not None:
                     r.judge = self.world.last_judge
+                    cur = getattr(self.world, "_cur", None)
+                    if cur and cur.get("monster"):
+                        r.target.name = cur["monster"]  # マップガイドで直した名前を出す
             except Exception as e:
                 self.log(f"[world] 記録に失敗: {e}")
+        now = time.monotonic()
+        if r.loc is not None:
+            self._last_loc = r.loc
+        r.last_loc = self._last_loc
+        if r.target is not None and r.target.name:
+            self._shown, self._shown_ts = r.target, now
+        if now - self._shown_ts <= self.keep_target_s:
+            r.shown_target, r.target_age = self._shown, now - self._shown_ts
+            if r.target is None and self.last.judge is not None:
+                r.judge = self.last.judge
         if (r.helper, r.windows, getattr(r.target, "name", None)) != \
                 (self.last.helper, self.last.windows, getattr(self.last.target, "name", None)):
             parts = [f"Helper {'ON' if r.helper else 'OFF' if r.helper is False else '?'}",

@@ -154,7 +154,7 @@ def main() -> None:
             if not FILTER_MODEL.exists():
                 print("[world] 判定 AI のモデルがありません。規則で代わりに判定します")
         rec = LiveRecognizer(grab_full, det, ocr if args.recognize else None, period=args.recognize_every,
-                             on_result=(lambda r: m.set_lines(base_lines + overlay_lines(r))) if args.recognize else None,
+                             on_result=(lambda r: m.set_lines(overlay_lines(r))) if args.recognize else None,
                              learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None,
                              learn_every=args.learn_every, harvester=harvester, world=world)
         rec.start()
