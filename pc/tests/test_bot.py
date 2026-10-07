@@ -1570,3 +1570,19 @@ def test_map_guide_heading_min_level_icons_and_cleanup():
     assert con.execute("SELECT name, min_level FROM guide_maps ORDER BY name").fetchall() == [("Aida", 230), ("Atlans", 110)]
     assert con.execute("SELECT DISTINCT map FROM monsters WHERE source='guide:rexmu' ORDER BY map").fetchall() == [
         ("Aida",), ("Atlans",)]
+
+
+def test_map_guide_table_stats():
+    import sqlite3
+
+    from akm.spawn import parse_guide_tables, save_guide
+
+    html = """<h3>Karutan (340+)</h3><table><thead><tr><th>Monster</th><th>Level</th><th>HP</th><th>Damage</th>
+      <th>Defense</th></tr></thead><tbody><tr><td>Narcondra</td><td>300</td><td>1,250,000</td><td>2,100-2,400</td>
+      <td>950</td></tr></tbody></table>"""
+    r = parse_guide_tables(html)[0]
+    assert (r["hp"], r["dmg_min"], r["dmg_max"], r["def"], r["min_level"]) == (1250000, 2100, 2400, 950, 340)
+    con = sqlite3.connect(":memory:")
+    save_guide(con, [r])
+    assert con.execute("SELECT hp, atk_min, atk_max, def FROM monsters WHERE name='Narcondra'").fetchone() == (
+        1250000, 2100, 2400, 950)

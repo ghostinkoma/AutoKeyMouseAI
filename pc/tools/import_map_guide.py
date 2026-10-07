@@ -64,6 +64,9 @@ def main() -> None:
         html = None
     else:
         if args.file:
+            if not Path(args.file).exists():
+                raise SystemExit(f"[guide] {args.file} がありません。ブラウザで表示した HTML を保存してから指定してください"
+                                 " (F12 → Elements の <html> を右クリック → Copy → Copy outerHTML → メモ帳に貼って UTF-8 で保存)")
             html = read_text_file(args.file)
             src = f"file:{Path(args.file).name}"
         else:
@@ -109,9 +112,11 @@ def main() -> None:
     for mp, n in sorted(per_map.items()):
         mons = [r for r in rows if r["map"] == mp]
         lv = next((r.get("min_level") for r in mons if r.get("min_level")), None)
-        print(f"  {mp}{f' (入場 Lv{lv}+)' if lv else ''} ({n}): " + ", ".join(f"{r['monster']} Lv{r['level'] or '?'}{'*' if r.get('icon') else ''}"
-                                            for r in mons[:8])
-              + (" …" if n > 8 else ""))
+        print(f"  {mp}{f' (入場 Lv{lv}+)' if lv else ''} ({n}): " + ", ".join(
+            f"{r['monster']} Lv{r['level'] or '?'}" + (f" HP{r['hp']}" if r.get("hp") else "")
+            + (f" 攻{r['dmg_min']}-{r['dmg_max']}" if r.get("dmg_min") is not None else "")
+            + (f" 防{r['def']}" if r.get("def") is not None else "") + ("*" if r.get("icon") else "") for r in mons[:6])
+              + (" …" if n > 6 else ""))
     if not rows:
         print("[guide] マップとモンスターを読み取れませんでした。")
         if html is not None:

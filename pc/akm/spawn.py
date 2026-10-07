@@ -37,6 +37,10 @@ def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
     if "icon" not in [r[1] for r in db.execute("PRAGMA table_info(guide_monsters)")]:
         db.execute("ALTER TABLE guide_monsters ADD COLUMN icon TEXT")
+    cols = [r[1] for r in db.execute("PRAGMA table_info(guide_monsters)")]
+    for col in ("hp", "dmg_min", "dmg_max", "def"):
+        if col not in cols:
+            db.execute(f"ALTER TABLE guide_monsters ADD COLUMN {col} INTEGER")
     if "min_level" not in [r[1] for r in db.execute("PRAGMA table_info(guide_maps)")]:
         db.execute("ALTER TABLE guide_maps ADD COLUMN min_level INTEGER")  # 入場に必要なレベル
 
@@ -105,14 +109,28 @@ def parse_guide_tables(html: str) -> list[dict]:
         cn = next(i for i, c in enumerate(header) if any(k in c for k in _NAME_HDR) and not any(k in c for k in _MAP_HDR))
         cl = next(i for i, c in enumerate(header) if any(k == c.strip(" .") or c.startswith(k) for k in _LV_HDR))
         cm = next((i for i, c in enumerate(header) if any(k in c for k in _MAP_HDR) and i != cn), None)
+        # ステータスの列 (あれば): HP / Damage "4-7" / Defense
+        ch = next((i for i, c in enumerate(header) if c.strip() in ("hp", "life", "health")), None)
+        cd = next((i for i, c in enumerate(header) if any(k in c for k in ("damage", "dmg", "attack", "atk"))), None)
+        cf = next((i for i, c in enumerate(header) if c.strip(" .") in ("def", "defense", "defence")), None)
+
+        def num(r, c):
+            if c is None or c >= len(r):
+                return None
+            m2 = re.search(r"\d[\d,]*", r[c])
+            return int(m2.group().replace(",", "")) if m2 else None
+
         for r, im in pairs[hi + 1:]:
             if cn >= len(r) or not r[cn].strip() or [c.lower() for c in r] == header:
                 continue
             m = re.search(r"\d{1,3}", r[cl]) if cl < len(r) else None
             maps = r[cm] if cm is not None and cm < len(r) else t["heading"]
+            dmg = re.findall(r"\d+", r[cd].replace(",", "")) if cd is not None and cd < len(r) else []
+            stats = {"hp": num(r, ch), "dmg_min": int(dmg[0]) if dmg else None,
+                     "dmg_max": int(dmg[-1]) if dmg else None, "def": num(r, cf)}
             for mp in [x for x in re.split(r"\s*[,/、]\s*", maps or "") if x.strip()] or [""]:
                 out.append({"map": _clean_map(mp), "monster": r[cn].strip(), "level": int(m.group()) if m else None,
-                            "icon": im[0] if im else None, "min_level": split_map_heading(mp)[1]})
+                            "icon": im[0] if im else None, "min_level": split_map_heading(mp)[1], **stats})
     return [e for e in out if e["map"] and e["monster"]]
 
 
@@ -312,14 +330,23 @@ def save_guide(db: sqlite3.Connection, rows: list[dict], source: str = GUIDE_URL
                    "ON CONFLICT(name) DO UPDATE SET source=excluded.source, updated=excluded.updated, "
                    "min_level=COALESCE(excluded.min_level, guide_maps.min_level)",
                    [(m, source, now, min_lv.get(m)) for m in maps])
-    db.executemany("INSERT INTO guide_monsters(map, monster, level, source, updated, icon) VALUES (?,?,?,?,?,?) "
+    db.executemany("INSERT INTO guide_monsters(map, monster, level, source, updated, icon, hp, dmg_min, dmg_max, def) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?) "
                    "ON CONFLICT(map, monster) DO UPDATE SET level=COALESCE(excluded.level, guide_monsters.level), "
-                   "source=excluded.source, updated=excluded.updated, icon=COALESCE(excluded.icon, guide_monsters.icon)",
-                   [(r["map"], r["monster"], r["level"], source, now, r.get("icon") or None) for r in rows])
-    db.executemany("INSERT INTO monsters(name, level, map, map_en, source, updated, icon) VALUES (?,?,?,?, 'guide:rexmu', ?, ?) "
+                   "source=excluded.source, updated=excluded.updated, icon=COALESCE(excluded.icon, guide_monsters.icon), "
+                   "hp=COALESCE(excluded.hp, guide_monsters.hp), dmg_min=COALESCE(excluded.dmg_min, guide_monsters.dmg_min), "
+                   "dmg_max=COALESCE(excluded.dmg_max, guide_monsters.dmg_max), def=COALESCE(excluded.def, guide_monsters.def)",
+                   [(r["map"], r["monster"], r["level"], source, now, r.get("icon") or None, r.get("hp"), r.get("dmg_min"),
+                     r.get("dmg_max"), r.get("def")) for r in rows])
+    # ビューアのモンスター一覧にも (生命・攻撃力・防御力も。手で登録したものは書き換えない)
+    db.executemany("INSERT INTO monsters(name, level, map, map_en, source, updated, icon, hp, atk_min, atk_max, def) "
+                   "VALUES (?,?,?,?, 'guide:rexmu', ?,?,?,?,?,?) "
                    "ON CONFLICT(name, map) DO UPDATE SET level=COALESCE(monsters.level, excluded.level), "
-                   "updated=excluded.updated, icon=COALESCE(NULLIF(excluded.icon, ''), monsters.icon)",
-                   [(r["monster"], r["level"], r["map"], r["map"], now, r.get("icon") or "") for r in rows])
+                   "updated=excluded.updated, icon=COALESCE(NULLIF(excluded.icon, ''), monsters.icon), "
+                   "hp=COALESCE(monsters.hp, excluded.hp), atk_min=COALESCE(monsters.atk_min, excluded.atk_min), "
+                   "atk_max=COALESCE(monsters.atk_max, excluded.atk_max), def=COALESCE(monsters.def, excluded.def)",
+                   [(r["monster"], r["level"], r["map"], r["map"], now, r.get("icon") or "", r.get("hp"), r.get("dmg_min"),
+                     r.get("dmg_max"), r.get("def")) for r in rows])
     # 英字だけのマップ名は、画面右下の現在地の読みでも既知のマップとして扱う
     db.execute("CREATE TABLE IF NOT EXISTS map_names (name TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', "
                "reviewed INTEGER NOT NULL DEFAULT 0, raw TEXT, reads INTEGER NOT NULL DEFAULT 0, first_seen REAL, "
