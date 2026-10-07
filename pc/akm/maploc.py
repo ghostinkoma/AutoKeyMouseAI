@@ -42,7 +42,8 @@ KNOWN_MAPS = [
     "Imperial Guardian", "Loren Market", "Karutan", "Valley of Loren", "Lorencia Market",
 ]
 
-_LOC_RE = re.compile(r"([A-Za-z][A-Za-z '\-]*?)\s*[\(\[\{]\s*([0-9OoIl|]{1,3})\s*[,.\s]\s*([0-9OoIl|]{1,3})\s*[\)\]\}]?")
+_LOC_RE = re.compile(r"([A-Za-z][A-Za-z0-9 '\-]*?)\s*[\(\[\{]\s*([0-9OoIl|]{1,3})\s*[,.\s]\s*([0-9OoIl|]{1,3})\s*[\)\]\}]?")
+_NAME_FIX = str.maketrans({"0": "o", "1": "l", "5": "s", "8": "B", "|": "l"})
 _DIGIT_FIX = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1"})
 
 
@@ -53,19 +54,21 @@ class Location:
     y: int
 
 
-def normalize_map(name: str) -> str:
+def normalize_map(name: str, maps: list[str] | None = None) -> str:
+    """既知のマップ名 (maps を渡せばそれも) に十分近ければその名前に直す。"""
     name = re.sub(r"\s+", " ", name).strip(" -'")
-    m = difflib.get_close_matches(name.title(), KNOWN_MAPS, n=1, cutoff=0.75)
+    name = name.translate(_NAME_FIX)  # 名前の中の数字は読み違い (Fie1ds → Fields)
+    m = difflib.get_close_matches(name.title(), maps or KNOWN_MAPS, n=1, cutoff=0.75)
     return m[0] if m else name
 
 
-def parse_location(text: str) -> Location | None:
-    """OCR の文字列から位置を取り出す。読めなければ None。"""
+def parse_location(text: str, maps: list[str] | None = None) -> Location | None:
+    """OCR の文字列から位置を取り出す。読めなければ None。maps: 既知のマップ名 (省略時 KNOWN_MAPS)。"""
     text = text.replace("\n", " ").replace("（", "(").replace("）", ")").replace("，", ",")
     m = _LOC_RE.search(text)
     if not m:
         return None
-    name = normalize_map(m.group(1))
+    name = normalize_map(m.group(1), maps)
     try:
         x = int(m.group(2).translate(_DIGIT_FIX))
         y = int(m.group(3).translate(_DIGIT_FIX))

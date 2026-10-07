@@ -169,7 +169,7 @@ def main() -> None:
 
                 old = rec.world.filt
                 rec.world.filt = RecordFilter.load(ok=old.ok, ng=old.ng)
-                rec.world._words = None  # 承認された名前を辞書に入れ直す
+                rec.world.reload_lists()  # 承認された名前・マップを辞書に入れ直す
 
         cycle = LearnCycle(PC_DIR, PC_DIR / "dataset" / "frames", every_frames=args.train_every,
                            ocr_every=args.ocr_every, reload=reload_models)

@@ -28,6 +28,8 @@ public final class MapPanel extends JPanel {
     private int hoverX = -1, hoverY = -1;
     private BiConsumer<Integer, Integer> onHover = (x, y) -> {};
     private ContextHandler onContext = (x, y, e) -> {};
+    private ContextHandler onClick = (x, y, e) -> {};
+    private int markX = -1, markY = -1, markR = 0;
 
     public interface ContextHandler { void open(int x, int y, MouseEvent e); }
 
@@ -38,6 +40,11 @@ public final class MapPanel extends JPanel {
             @Override public void mousePressed(MouseEvent e) {
                 if (e.isPopupTrigger()) { popup(e); return; }
                 dragFrom = e.getPoint();
+            }
+            @Override public void mouseClicked(MouseEvent e) {
+                if (e.getButton() != MouseEvent.BUTTON1) return;
+                int[] c = toCell(e.getX(), e.getY());
+                if (c[0] >= 0) onClick.open(c[0], c[1], e);
             }
             @Override public void mouseReleased(MouseEvent e) {
                 if (e.isPopupTrigger()) popup(e);
@@ -77,6 +84,16 @@ public final class MapPanel extends JPanel {
 
     public void onHover(BiConsumer<Integer, Integer> h) { onHover = h; }
     public void onContext(ContextHandler h) { onContext = h; }
+    /** 左クリック (タップ) したマス。 */
+    public void onClick(ContextHandler h) { onClick = h; }
+
+    /** 調べている範囲 (中心と半径マス) を描く。r < 0 で消す。 */
+    public void mark(int x, int y, int r) {
+        markX = r < 0 ? -1 : x;
+        markY = y;
+        markR = r;
+        repaint();
+    }
 
     public void setData(int[][] cells, List<MapDb.Pos> trail, List<MapDb.Spot> spots, MapDb.Pos current) {
         this.cells = cells;
@@ -206,6 +223,15 @@ public final class MapPanel extends JPanel {
             g.fillOval(cx(current.x()) - r / 2, cy(current.y()) - r / 2, r, r);
             g.setColor(Color.WHITE);
             g.drawOval(cx(current.x()) - r, cy(current.y()) - r, 2 * r, 2 * r);
+        }
+        // 調べている範囲
+        if (markX >= 0) {
+            g.setColor(new Color(255, 255, 255, 200));
+            g.setStroke(new BasicStroke(1.5f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, new float[] {4f, 3f}, 0f));
+            int x0 = (int) (offX + (markX - markR) * cell), y0 = (int) (offY + (markY - markR) * cell);
+            int w = (int) Math.ceil((2 * markR + 1) * cell);
+            g.drawRect(x0, y0, w, w);
+            g.setStroke(new BasicStroke(1f));
         }
         // マウス位置
         if (hoverX >= 0) {

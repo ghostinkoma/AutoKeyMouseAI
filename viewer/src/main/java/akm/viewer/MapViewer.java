@@ -49,6 +49,7 @@ public final class MapViewer extends JFrame {
     private MapDb db;
     private final MapPanel panel = new MapPanel();
     private final SightingsPanel sightingsPanel;
+    private final MapsPanel mapsPanel;
     private final JTabbedPane tabs = new JTabbedPane();
     private final JComboBox<String> mapBox = new JComboBox<>();
     private final JCheckBox follow = new JCheckBox("現在地のマップを表示", true);
@@ -68,10 +69,12 @@ public final class MapViewer extends JFrame {
     public MapViewer(MapDb db) {
         super("MU Map Viewer - " + db.path);
         this.db = db;
-        sightingsPanel = new SightingsPanel(new SightingsPanel.MapViewerContext() {
+        SightingsPanel.MapViewerContext ctx = new SightingsPanel.MapViewerContext() {
             @Override public MapDb db() { return MapViewer.this.db; }
             @Override public void changed() { refresh(); }
-        });
+        };
+        sightingsPanel = new SightingsPanel(ctx);
+        mapsPanel = new MapsPanel(ctx);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
 
         JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -92,6 +95,22 @@ public final class MapViewer extends JFrame {
         JButton here = new JButton("現在地を狩場に登録…");
         here.addActionListener(e -> addAtCurrent());
         top.add(here);
+        JButton newMonster = new JButton("モンスター登録…");
+        newMonster.addActionListener(e -> {
+            if (MonsterDialog.open(this, db, shownMap) != null) refresh();
+        });
+        top.add(newMonster);
+        JButton newMap = new JButton("マップ登録…");
+        newMap.addActionListener(e -> {
+            String m = MapsPanel.addManual(this, ctx);
+            if (m != null) {
+                follow.setSelected(false);
+                refresh();
+                selectMap(m);
+                refresh();
+            }
+        });
+        top.add(newMap);
         JButton open = new JButton("DB を開く…");
         open.addActionListener(e -> chooseDb());
         top.add(open);
@@ -122,6 +141,7 @@ public final class MapViewer extends JFrame {
         JPanel sp = spotPane;
         JScrollPane ep = new JScrollPane(new JList<>(events));
         tabs.addTab("目撃 (相手の名前)", sightingsPanel);
+        tabs.addTab("新しいマップ", mapsPanel);
         tabs.addTab("出来事 (マップ移動・ワープ)", ep);
         JSplitPane sideSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, sp, tabs);
         sideSplit.setResizeWeight(0.4);
@@ -151,6 +171,7 @@ public final class MapViewer extends JFrame {
                     near.isEmpty() ? "" : "  見かけた: " + String.join(", ", near)));
         });
         panel.onContext(this::contextMenu);
+        panel.onClick(this::showMonstersAt);
 
         setSize(1200, 860);
         setLocationRelativeTo(null);
@@ -192,6 +213,9 @@ public final class MapViewer extends JFrame {
             }
             panel.setSightings(db.sightingsOn(map, 3000));
             sightingsPanel.refresh();
+            mapsPanel.refresh();
+            int newMaps = db.pendingMaps();
+            tabs.setTitleAt(1, newMaps > 0 ? "新しいマップ  候補 " + newMaps : "新しいマップ");
             int pending = db.pendingSightings();
             tabs.setTitleAt(0, pending > 0 ? "目撃 (相手の名前)  保留 " + pending : "目撃 (相手の名前)");
             if (center.isSelected() && cur != null && Objects.equals(cur.map(), map)) panel.centerOn(cur.x(), cur.y());
@@ -223,6 +247,53 @@ public final class MapViewer extends JFrame {
         } catch (SQLException ex) {
             status.setText("DB を読めません: " + ex.getMessage());
         }
+    }
+
+    /** 地図をクリック (タップ) した場所の近くで見かけたモンスターを出す。 */
+    private void showMonstersAt(int x, int y, java.awt.event.MouseEvent e) {
+        if (shownMap == null) return;
+        int r = 6;
+        panel.mark(x, y, r);
+        JPopupMenu menu = new JPopupMenu();
+        JLabel title = new JLabel(String.format("  %s (%d, %d) 付近 ±%d マスで見かけたモンスター", shownMap, x, y, r));
+        title.setFont(title.getFont().deriveFont(java.awt.Font.BOLD));
+        menu.add(title);
+        menu.addSeparator();
+        try {
+            List<MapDb.NearMonster> near = db.monstersNear(shownMap, x, y, r);
+            if (near.isEmpty()) menu.add(new JLabel("  (まだ記録がありません)"));
+            for (MapDb.NearMonster m : near) {
+                JMenuItem it = new JMenuItem(m.label() + "  最後 " + TIME.format(new Date((long) (m.lastTs() * 1000))));
+                it.setToolTipText("クリックでモンスター登録画面 (アイコン・ステータスを入れられる)");
+                it.addActionListener(a -> {
+                    if (MonsterDialog.open(this, db, shownMap, m.name(), m.minLevel()) != null) refresh();
+                });
+                menu.add(it);
+            }
+            for (MapDb.Spot s : spotList) {
+                if (!s.map().equals(shownMap) || Math.hypot(s.x() - x, s.y() - y) > Math.max(2, s.radius())) continue;
+                List<String> target = spotMonsters.get(s.id());
+                if (target != null && !target.isEmpty())
+                    menu.add(new JLabel("  狩場「" + s.name() + "」の狙い: " + String.join(", ", target)));
+            }
+        } catch (SQLException ex) {
+            menu.add(new JLabel("  DB を読めません: " + ex.getMessage()));
+        }
+        menu.addSeparator();
+        JMenuItem reg = new JMenuItem("このマップに新しいモンスターを登録…");
+        reg.addActionListener(a -> {
+            if (MonsterDialog.open(this, db, shownMap) != null) refresh();
+        });
+        menu.add(reg);
+        JMenuItem spot = new JMenuItem(String.format("ここ (%d, %d) を狩場などに登録…", x, y));
+        spot.addActionListener(a -> addSpot(shownMap, x, y));
+        menu.add(spot);
+        menu.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
+            @Override public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent ev) {}
+            @Override public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent ev) { panel.mark(0, 0, -1); }
+            @Override public void popupMenuCanceled(javax.swing.event.PopupMenuEvent ev) {}
+        });
+        menu.show(e.getComponent(), e.getX(), e.getY());
     }
 
     private void contextMenu(int x, int y, java.awt.event.MouseEvent e) {

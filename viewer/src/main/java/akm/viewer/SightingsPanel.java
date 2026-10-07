@@ -71,12 +71,16 @@ public final class SightingsPanel extends JPanel {
         ok.addActionListener(e -> review(true, false));
         JButton fix = new JButton("名前を直して承認…");
         fix.addActionListener(e -> review(true, true));
+        JButton reg = new JButton("新規モンスターとして登録…");
+        reg.setToolTipText("モンスター登録画面を名前・Lv・マップを入れた状態で開き、登録したらこの目撃を承認する");
+        reg.addActionListener(e -> registerNew());
         JButton ng = new JButton("却下");
         ng.setToolTipText("読み違い。登録しない");
         ng.addActionListener(e -> review(false, false));
         onlyPending.addActionListener(e -> refresh());
         buttons.add(ok);
         buttons.add(fix);
+        buttons.add(reg);
         buttons.add(ng);
         buttons.add(onlyPending);
         JPanel south = new JPanel(new BorderLayout());
@@ -118,6 +122,25 @@ public final class SightingsPanel extends JPanel {
         } catch (Exception ex) {
             info.setText("目撃を読めません: " + ex.getMessage());
         }
+    }
+
+    private void registerNew() {
+        int[] sel = table.getSelectedRows();
+        if (sel.length == 0) {
+            JOptionPane.showMessageDialog(this, "一覧から選んでください");
+            return;
+        }
+        MapDb.Sighting s = rows.get(sel[0]);
+        String name = MonsterDialog.open(javax.swing.SwingUtilities.getWindowAncestor(this), ctx.db(), s.map(), s.monster(), s.level());
+        if (name == null) return;
+        try {
+            ctx.db().reviewSighting(s, true, name);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "保存できません: " + ex.getMessage());
+        }
+        rows = List.of();
+        refresh();
+        ctx.changed();
     }
 
     private void review(boolean ok, boolean askName) {

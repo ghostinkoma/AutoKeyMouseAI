@@ -238,7 +238,14 @@ public final class MonsterDialog extends JDialog {
 
     /** モンスター登録画面を開く。登録したモンスターの名前を返す (キャンセルなら null)。 */
     public static String open(Window owner, MapDb db, String map) {
+        return open(owner, db, map, null, null);
+    }
+
+    /** 名前・レベルを入れた状態で開く (目撃した新しいモンスターの登録用)。 */
+    public static String open(Window owner, MapDb db, String map, String name, Integer level) {
         MonsterDialog d = new MonsterDialog(owner, db, map);
+        if (name != null) d.name.setText(name);
+        if (level != null) d.level.setText(String.valueOf(level));
         d.setVisible(true);
         return d.result;
     }

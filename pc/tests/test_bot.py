@@ -1322,3 +1322,56 @@ def test_world_logger_records_location_and_sightings(tmp_path):
         (6, "Devias", "sighting")
     assert con.execute("SELECT COUNT(*) FROM positions").fetchone()[0] >= 1
     assert con.execute("SELECT COUNT(*) FROM monsters WHERE name='x;|q:'").fetchone()[0] == 0
+
+
+def test_world_logger_unknown_map_waits_for_approval_and_new_names_join_lexicon(tmp_path):
+    import sqlite3
+
+    from akm.edge.target import Target
+    from akm.record_filter import RecordFilter
+    from akm.world_log import WorldLogger
+
+    class Ocr:
+        text = "Kalrutan Fields (12, 34)"
+
+        def read(self, img):
+            return self.text, 0.9
+
+    class Rec:
+        target = None
+
+    t = {"now": 1000.0}
+    w = WorldLogger(tmp_path / "mu.db", RecordFilter.load(), loc_every=0, refresh_s=0, log=lambda *a: None,
+                    clock=lambda: t["now"])
+    img = np.zeros((1050, 1680, 3), np.uint8)
+    for _ in range(4):
+        t["now"] += 1
+        w.feed(img, Rec(), Ocr())
+    db = w.open().db
+    # 知らないマップ: 位置は記録せず、候補として残る
+    assert db.execute("SELECT status, reads FROM map_names WHERE name='Kalrutan Fields'").fetchone() == ("pending", 2)
+    assert db.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
+    # ビューアで承認 → 記録が始まる。少し読み違えても承認したマップ名に直る
+    db.execute("UPDATE map_names SET status='ok', reviewed=1 WHERE name='Kalrutan Fields'")
+    db.execute("INSERT INTO monsters(name, level, map, map_en, source) VALUES ('Frost Wyrmling', 90, '', '', 'manual')")
+    db.commit()
+    o = Ocr()
+    o.text = "Kalrutan Fie1ds (13, 34)"
+    for _ in range(5):  # 初めの位置は前の位置と比べられないので、続けて同じに読めてから採用
+        t["now"] += 1
+        w.feed(img, Rec(), o)
+    assert w.current() is not None and w.current().map == "Kalrutan Fields"
+    # 手で登録したモンスター名は辞書に入り、読み違いが直る
+    rec = Rec()
+    rec.target = Target("Frost Wyrmllng", "90", 0.8, (0, 0, 1, 1), (0, 0, 1, 1), raw_name="Frost Wyrmllng", conf=0.8)
+    w.feed(img, rec, o)
+    assert db.execute("SELECT monster, map FROM sightings").fetchone() == ("Frost Wyrmling", "Kalrutan Fields")
+    # 辞書に無い新しい名前は、続けて同じに読めても自動登録せず保留 (人がビューアで確かめる)
+    t["now"] += 30
+    for _ in range(4):
+        t["now"] += 1
+        rec.target = Target("Zorkan Mafa", "40", 0.5, (0, 0, 1, 1), (0, 0, 1, 1), raw_name="Zorkan Mafa", conf=0.9)
+        w.feed(img, rec, o)
+    assert db.execute("SELECT status, reads FROM sightings WHERE monster='Zorkan Mafa'").fetchone() == ("pending", 4)
+    assert db.execute("SELECT COUNT(*) FROM monsters WHERE name='Zorkan Mafa'").fetchone()[0] == 0
+    w.close()

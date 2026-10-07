@@ -4,10 +4,14 @@
   相手の名前 (攻撃時に画面上部)          → sightings (目撃記録: いつ・どこで・何を・Lv・判定)
                                           正しいと判定したものは monsters にも足す (ビューアの一覧に出る)
 どちらも登録の前に akm/record_filter.py の AI で「正しい読みか」を判定する:
-  ok      → 登録する
+  ok      → 登録する (辞書に無い新しいモンスター名は ok でも保留にして人が確かめる)
   pending → sightings に保留として残す (ビューアの「目撃一覧」で承認 / 却下。それが次の学習の正解になる)
   ng      → 登録しない (sightings には ng として残す。現在地は捨てる)
 同じ相手を殴り続けている間は 1 件にまとめる (reads が増え、最後に見た時刻と HP の最小値を更新)。
+
+知らないマップ (KNOWN_MAPS に無い名前) は位置を記録せず、map_names 表に「新しいマップの候補」(pending) として残す。
+ビューアの「新しいマップ」タブで承認されたら (または手で登録されたら) 既知のマップとして記録を始める。
+ビューアで承認・登録したモンスター名・マップ名は refresh_s 秒ごとに読み直して辞書に入れる (再起動は要らない)。
 """
 from __future__ import annotations
 
@@ -29,6 +33,9 @@ CREATE TABLE IF NOT EXISTS sightings (
     source TEXT, features TEXT);
 CREATE INDEX IF NOT EXISTS sightings_ts ON sightings(ts);
 CREATE INDEX IF NOT EXISTS sightings_status ON sightings(status);
+CREATE TABLE IF NOT EXISTS map_names (
+    name TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', reviewed INTEGER NOT NULL DEFAULT 0, raw TEXT,
+    reads INTEGER NOT NULL DEFAULT 0, first_seen REAL, last_seen REAL, x INTEGER, y INTEGER);
 """
 
 
@@ -51,7 +58,8 @@ def add_monster_from_sighting(db: sqlite3.Connection, name: str, level: int | No
 class WorldLogger:
     def __init__(self, db_path: str | Path, filt: RecordFilter | None = None, teacher=None,
                  loc_roi=(0.86, 0.955, 0.14, 0.045), loc_every: float = 1.0, merge_s: float = 8.0,
-                 here_s: float = 15.0, words: list[str] | None = None, log=print, clock=time.time):
+                 here_s: float = 15.0, words: list[str] | None = None, log=print, clock=time.time,
+                 refresh_s: float = 30.0):
         self.db_path = Path(db_path)
         self.filt = filt or RecordFilter.load()
         self.teacher = teacher          # (画像) → 文字列 (Windows の OCR 等)。無ければ None
@@ -61,7 +69,11 @@ class WorldLogger:
         self.here_s = here_s            # 現在地がこの秒数以内に読めていれば目撃の場所にする
         self.log = log
         self.clock = clock
-        self._words = words
+        self._fixed_words = words
+        self._words: list[str] | None = None
+        self._maps: list[str] = list(KNOWN_MAPS)
+        self.refresh_s = refresh_s
+        self._lists_ts = -1e9
         self.map: MapDB | None = None   # 認識のスレッドで開く (SQLite は開いたスレッドで使う)
         self.here: Location | None = None
         self.here_ts = 0.0
@@ -82,21 +94,64 @@ class WorldLogger:
             self.here_ts = 0.0
         return self.map
 
+    def _refresh_lists(self) -> None:
+        """辞書と既知のマップを DB (ビューアで承認・登録したもの) から読み直す。"""
+        now = self.clock()
+        if self._words is not None and now - self._lists_ts < self.refresh_s:
+            return
+        self._lists_ts = now
+        from .edge.harvest import load_lexicon
+
+        db = self.open().db
+        maps = set(KNOWN_MAPS)
+        try:
+            maps |= {r[0] for r in db.execute("SELECT name FROM map_names WHERE status='ok'")}
+        except sqlite3.Error:
+            pass
+        self._maps = sorted(maps)
+        if self._fixed_words is not None:
+            self._words = sorted(set(self._fixed_words) | maps)
+            return
+        w = set(load_lexicon()) | maps
+        for sql in ("SELECT DISTINCT monster FROM sightings WHERE status='ok' AND reviewed=1",
+                    "SELECT DISTINCT name FROM monsters WHERE source IN ('manual', 'sighting')"):
+            try:
+                w |= {r[0] for r in db.execute(sql) if r[0] and r[0].isascii()}  # 日本語名は画面に出ないので除く
+            except sqlite3.Error:
+                pass
+        self._words = sorted(w)
+
     @property
     def words(self) -> list[str]:
-        """辞書: lexicon.txt + マップ名 + ビューアで承認した名前。"""
-        if self._words is None:
-            from .edge.harvest import load_lexicon
-
-            w = set(load_lexicon())
-            if self.map is not None:
-                try:
-                    w |= {r[0] for r in self.map.db.execute(
-                        "SELECT DISTINCT monster FROM sightings WHERE status='ok' AND reviewed=1")}
-                except sqlite3.Error:
-                    pass
-            self._words = sorted(w)
+        """辞書: lexicon.txt + マップ名 + ビューアで承認・登録した名前。"""
+        self._refresh_lists()
         return self._words
+
+    @property
+    def known_maps(self) -> list[str]:
+        """KNOWN_MAPS + ビューアで承認・登録したマップ。"""
+        self._refresh_lists()
+        return self._maps
+
+    def reload_lists(self) -> None:
+        self._words = None
+
+    def _new_map(self, loc: Location, raw: str) -> None:
+        """知らないマップ名: 続けて同じに読めたら候補として残す (人がビューアで承認する)。"""
+        name = loc.map
+        if sum(t.startswith(name + " (") for t in self._loc_hist) < 3:
+            return
+        if len(name) < 3 or sum(ch.isalpha() for ch in name) < 0.8 * len(name.replace(" ", "")):
+            return
+        db = self.open().db
+        now = self.clock()
+        row = db.execute("SELECT status FROM map_names WHERE name=?", (name,)).fetchone()
+        db.execute("INSERT INTO map_names(name, status, raw, reads, first_seen, last_seen, x, y) VALUES (?, 'pending', ?, 1, ?, ?, ?, ?) "
+                   "ON CONFLICT(name) DO UPDATE SET reads=reads+1, last_seen=excluded.last_seen, x=excluded.x, y=excluded.y",
+                   (name, raw, now, now, loc.x, loc.y))
+        db.commit()
+        if row is None:
+            self.log(f"[world] 知らないマップ「{name}」を新しいマップの候補にしました (ビューアの「新しいマップ」で承認すると記録を始めます)")
 
     def current(self) -> Location | None:
         """最近読めた現在地 (古ければ None)。"""
@@ -109,12 +164,13 @@ class WorldLogger:
         if crop.size == 0:
             return None
         raw, conf = ocr.read(crop) if ocr is not None else ("", 0.0)
-        loc = parse_location(raw)
+        maps = self.known_maps
+        loc = parse_location(raw, maps)
         teach = None
         if self.teacher is not None:
             try:
                 t = self.teacher(preprocess(crop, 3, "bright", 130)).strip()
-                tl = parse_location(t)
+                tl = parse_location(t, maps)
                 if loc is None and tl is not None:  # 自分では読めなかった: 先生の読みを候補にする
                     raw, loc, conf = t, tl, 0.5
                     teach = 1.0
@@ -132,8 +188,12 @@ class WorldLogger:
             jump = 99.0
         else:
             jump = float(max(abs(loc.x - self.here.x), abs(loc.y - self.here.y)))
-        c = Candidate("location", raw, text, conf=conf, in_lex=loc.map in KNOWN_MAPS,
-                      repeat=self._loc_hist.count(text) / len(self._loc_hist), map_known=loc.map in KNOWN_MAPS,
+        if loc.map not in maps:
+            self._new_map(loc, raw)
+            self.stats["loc_ng"] += 1
+            return None
+        c = Candidate("location", raw, text, conf=conf, in_lex=True,
+                      repeat=self._loc_hist.count(text) / len(self._loc_hist), map_known=True,
                       coord_ok=True, jump=jump, teacher=teach)
         status, score = self.filt.judge(c)
         if status != "ok":
@@ -155,10 +215,17 @@ class WorldLogger:
         raw = target.raw_name or target.name
         text, in_lex = lexicon_fix(raw, self.words)
         self._name_hist.append(text)
+        streak = 0  # 直前から続けて同じに読めた回数 (前の相手の読みで薄まらないように)
+        for t in reversed(self._name_hist):
+            if t != text:
+                break
+            streak += 1
         c = Candidate("monster", raw, text, conf=getattr(target, "conf", 0.0), in_lex=in_lex,
-                      repeat=self._name_hist.count(text) / len(self._name_hist), level=target.level or "",
+                      repeat=max(streak / 4, self._name_hist.count(text) / len(self._name_hist)), level=target.level or "",
                       hp_ok=target.hp_ratio is not None)
         status, score = self.filt.judge(c)
+        if not in_lex and status == "ok":
+            status = "pending"  # 辞書に無い (新しい) 名前は自動で登録せず、人に確かめてもらう
         now = self.clock()
         level = int(target.level) if target.level.isdigit() and 1 <= int(target.level) <= 400 else None
         here = self.current()

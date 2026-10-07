@@ -332,6 +332,114 @@ public final class MapDb implements AutoCloseable {
         if (hasTable("spot_monsters")) setSpotMonsters(id, List.of());
     }
 
+    /** その場所の近くで見かけたモンスター (名前ごとにまとめる)。confirmed は正しいと判定された目撃があるか。 */
+    public record NearMonster(String name, Integer minLevel, Integer maxLevel, int count, double lastTs, boolean confirmed) {
+        public String label() {
+            String lv = minLevel == null ? "" : " Lv" + (maxLevel == null || maxLevel.equals(minLevel) ? minLevel : minLevel + "-" + maxLevel);
+            return name + lv + "  (" + count + " 回" + (confirmed ? "" : ", 未確認") + ")";
+        }
+    }
+
+    /** 新しいマップの候補 (Python の world_log.py が知らないマップ名を読んだとき) と、手で登録したマップ。 */
+    public record MapName(String name, String status, boolean reviewed, String raw, int reads, Double lastSeen, Integer x, Integer y) {}
+
+    /** (x, y) から r マス以内で見かけたモンスター。除外 (ng) の目撃は数えない。 */
+    public List<NearMonster> monstersNear(String map, int x, int y, int r) throws SQLException {
+        List<NearMonster> out = new ArrayList<>();
+        if (map == null || !hasTable("sightings")) return out;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT monster, MIN(level), MAX(level), COUNT(*), MAX(last_ts), MAX(status='ok') FROM sightings "
+                        + "WHERE map=? AND x BETWEEN ? AND ? AND y BETWEEN ? AND ? AND status!='ng' "
+                        + "GROUP BY monster ORDER BY MAX(status='ok') DESC, COUNT(*) DESC")) {
+            ps.setString(1, map);
+            ps.setInt(2, x - r);
+            ps.setInt(3, x + r);
+            ps.setInt(4, y - r);
+            ps.setInt(5, y + r);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next())
+                    out.add(new NearMonster(rs.getString(1), (Integer) rs.getObject(2), (Integer) rs.getObject(3), rs.getInt(4),
+                            rs.getDouble(5), rs.getInt(6) != 0));
+            }
+        }
+        return out;
+    }
+
+    private void ensureMapNames() throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.execute("CREATE TABLE IF NOT EXISTS map_names (name TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', "
+                    + "reviewed INTEGER NOT NULL DEFAULT 0, raw TEXT, reads INTEGER NOT NULL DEFAULT 0, first_seen REAL, "
+                    + "last_seen REAL, x INTEGER, y INTEGER)");
+            st.execute("CREATE TABLE IF NOT EXISTS maps (name TEXT PRIMARY KEY, first_seen REAL, last_seen REAL)");
+        }
+    }
+
+    /** マップ名の一覧。unchecked なら人がまだ判定していない候補だけ。 */
+    public List<MapName> mapNames(boolean unchecked) throws SQLException {
+        List<MapName> out = new ArrayList<>();
+        if (!hasTable("map_names")) return out;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT name, status, reviewed, raw, reads, last_seen, x, y FROM map_names"
+                     + (unchecked ? " WHERE reviewed=0" : "") + " ORDER BY last_seen DESC")) {
+            while (rs.next())
+                out.add(new MapName(rs.getString(1), rs.getString(2), rs.getInt(3) != 0, rs.getString(4), rs.getInt(5),
+                        rs.getObject(6) == null ? null : rs.getDouble(6), (Integer) rs.getObject(7), (Integer) rs.getObject(8)));
+        }
+        return out;
+    }
+
+    public int pendingMaps() throws SQLException {
+        if (!hasTable("map_names")) return 0;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM map_names WHERE reviewed=0")) {
+            return rs.next() ? rs.getInt(1) : 0;
+        }
+    }
+
+    /**
+     * マップを既知として登録する (Python の記録はこの名前を既知のマップとして扱い、位置の記録を始める)。
+     * マップの選択欄にも出るように maps にも入れる。
+     */
+    public void addMap(String name) throws SQLException {
+        ensureMapNames();
+        double now = System.currentTimeMillis() / 1000.0;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO map_names(name, status, reviewed, first_seen, last_seen) VALUES (?, 'ok', 1, ?, ?) "
+                        + "ON CONFLICT(name) DO UPDATE SET status='ok', reviewed=1")) {
+            ps.setString(1, name);
+            ps.setDouble(2, now);
+            ps.setDouble(3, now);
+            ps.executeUpdate();
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO maps(name, first_seen, last_seen) VALUES (?,?,?) ON CONFLICT(name) DO NOTHING")) {
+            ps.setString(1, name);
+            ps.setDouble(2, now);
+            ps.setDouble(3, now);
+            ps.executeUpdate();
+        }
+    }
+
+    /** 新しいマップの候補を判定する。ok なら (rename があればその名前で) 既知のマップにする。 */
+    public void reviewMap(MapName m, boolean ok, String rename) throws SQLException {
+        ensureMapNames();
+        String n = rename == null || rename.isBlank() ? m.name() : rename.trim();
+        if (!n.equals(m.name())) {
+            try (PreparedStatement ps = conn.prepareStatement("UPDATE map_names SET status='ng', reviewed=1 WHERE name=?")) {
+                ps.setString(1, m.name());  // 読み違いの名前は却下として残す (同じ読みがまた候補にならないように)
+                ps.executeUpdate();
+            }
+        }
+        if (ok) {
+            addMap(n);
+        } else {
+            try (PreparedStatement ps = conn.prepareStatement("UPDATE map_names SET status='ng', reviewed=1 WHERE name=?")) {
+                ps.setString(1, n);
+                ps.executeUpdate();
+            }
+        }
+    }
+
     /** 目撃の一覧 (新しい順)。unchecked なら人がまだ見ていない保留・除外だけ (除外の中の正しい名前も拾えるように)。 */
     public List<Sighting> sightings(boolean unchecked, int limit) throws SQLException {
         List<Sighting> out = new ArrayList<>();
