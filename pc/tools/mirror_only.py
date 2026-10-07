@@ -145,7 +145,9 @@ def main() -> None:
             world = WorldLogger(PC_DIR / lcfg.get("db", "data/mu_map.db"), filt, teacher=wteacher,
                                 loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]),
                                 area_cells=int(wcfg.get("area_cells", 10)),
-                                spawn_threshold=float(wcfg.get("spawn_match", 0.85)))
+                                spawn_threshold=float(wcfg.get("spawn_match", 0.85)),
+                                spawn_map_threshold=float(wcfg.get("spawn_match_map", 0.65)),
+                                spawn_margin=float(wcfg.get("spawn_margin", 0.10)))
             print(f"[world] 現在地と相手の名前を {world.db_path} に記録します (判定 AI: "
                   f"{'あり' if filt.model else 'なし → python tools/record_filter.py train で作成'}、"
                   f"先生役の OCR: {'あり' if wteacher else 'なし'})。ビューア: java -jar viewer\\mapviewer.jar")

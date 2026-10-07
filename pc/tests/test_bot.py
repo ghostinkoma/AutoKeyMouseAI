@@ -1515,10 +1515,12 @@ def test_map_guide_parsing_and_spawn_area_registration(tmp_path):
     assert reg.register("Bahamut", 43, Location("Atlans", 45, 63), 1.0).monster == "Bahamut"
     m = reg.register("Bahamvt", None, Location("Atlans", 41, 69), 2.0)   # 1 文字違い (86%)
     assert m.monster == "Bahamut" and m.ratio >= 0.85 and m.in_map
-    assert reg.register("Bahanot", None, Location("Atlans", 45, 63), 3.0) is None  # 2 文字違い (71%) は登録しない
+    # 2 文字違い (71%): 今いるマップ (Atlans) の候補の中なら 65% 以上で登録。全マップからでは (85% 未満) 登録しない
+    assert reg.register("Bahanot", None, Location("Atlans", 45, 63), 3.0).monster == "Bahamut"
+    assert reg.register("Bahanot", None, Location("Devias", 45, 63), 3.5) is None
     reg.register("Bahamut", 43, Location("Atlans", 50, 63), 4.0)  # 隣の区画
     rows = con.execute("SELECT map, ax, ay, monster, reads, in_guide_map FROM monster_areas ORDER BY ax").fetchall()
-    assert rows == [("Atlans", 40, 60, "Bahamut", 2, 1), ("Atlans", 50, 60, "Bahamut", 1, 1)]
+    assert rows == [("Atlans", 40, 60, "Bahamut", 3, 1), ("Atlans", 50, 60, "Bahamut", 1, 1)]
     # ガイドで別のマップに載っているモンスターも登録するが、印 (in_guide_map = 0) を付ける
     assert reg.register("Yeti", 30, Location("Atlans", 10, 10), 5.0).in_map is False
     # ガイドのモンスターはビューアの一覧にも入る
@@ -1654,3 +1656,55 @@ def test_guide_icons_from_saved_page_folder_converted_to_png(tmp_path):
     assert cv2.imread(str(tmp_path / rows[0]["icon"])).shape == (40, 40, 3)  # webp → png
     assert rows[2]["icon"] == "" and rows[3]["icon"] == ""
     assert fetch_icons([{"icon": "/assets/monsters/Monster10.webp"}], "https://wiki.rexmu.online/map-guide", out)["have"] == 1
+
+
+
+def _rexmu_registry():
+    import sqlite3
+
+    from akm.spawn import SpawnRegistry, save_guide
+
+    rows = []
+    for line in (PC / "tests" / "data" / "rexmu_guide.tsv").read_text(encoding="utf-8").splitlines():
+        mp, name, lv = line.split("\t")
+        rows.append({"map": mp, "monster": name, "level": int(lv)})
+    con = sqlite3.connect(":memory:")
+    save_guide(con, rows)
+    return SpawnRegistry(con), rows
+
+
+def test_spawn_match_in_map_handles_similar_names_with_level_and_margin():
+    from akm.maploc import Location
+
+    reg, _ = _rexmu_registry()
+    swamp = "Swamp of Calmness"
+    # Shadow Pawn / Shadow Knight / Shadow Look: 後半が読めないと決められない → 登録しない
+    assert reg.match("Shadow Pxxk", swamp) is None  # Pawn 73% / Look 73%
+    # レベルが読めていれば決まる (Shadow Pawn 214 / Shadow Knight 218 / Shadow Look 222)
+    assert reg.match("Shadow Pxxk", swamp, 222).monster == "Shadow Look"
+    assert reg.match("Shadow Pxxk", swamp, 214).monster == "Shadow Pawn"
+    # Bahamut と Great Bahamut: 読みどおりの方
+    assert reg.match("Bahamut", "Atlans").monster == "Bahamut"
+    assert reg.match("Great Bahamvt", "Atlans").monster == "Great Bahamut"
+    # 今いるマップに居ない名前は全マップから 85% 以上 (別マップの印)
+    m = reg.match("Yeti", "Atlans")
+    assert m.monster == "Yeti" and m.in_map is False
+    assert reg.register("Sapi-Tr3s", 209, Location(swamp, 120, 45), 1.0).monster == "Sapi-Tres"
+
+
+def test_spawn_match_rates_on_rexmu_master():
+    """マスター (14 マップ・101 体) で、読み違い 2 文字なら 9 割以上を正しく登録し、間違った登録はほぼ無い。"""
+    import random
+
+    from akm.record_filter import corrupt
+
+    reg, rows = _rexmu_registry()
+    rng = random.Random(3)
+    ok = bad = 0
+    n = 800
+    for _ in range(n):
+        r = rng.choice(rows)
+        m = reg.match(corrupt(r["monster"], 2, rng), r["map"], r["level"] if rng.random() < 0.7 else None)
+        ok += m is not None and m.monster == r["monster"]
+        bad += m is not None and m.monster != r["monster"]
+    assert ok / n > 0.9 and bad / n < 0.01

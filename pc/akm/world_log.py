@@ -60,7 +60,8 @@ class WorldLogger:
     def __init__(self, db_path: str | Path, filt: RecordFilter | None = None, teacher=None,
                  loc_roi=(0.86, 0.955, 0.14, 0.045), loc_every: float = 1.0, merge_s: float = 8.0,
                  here_s: float = 15.0, words: list[str] | None = None, log=print, clock=time.time,
-                 refresh_s: float = 30.0, area_cells: int = 10, spawn_threshold: float = 0.85):
+                 refresh_s: float = 30.0, area_cells: int = 10, spawn_threshold: float = 0.85,
+                 spawn_map_threshold: float = 0.65, spawn_margin: float = 0.10):
         self.db_path = Path(db_path)
         self.filt = filt or RecordFilter.load()
         self.teacher = teacher          # (画像) → 文字列 (Windows の OCR 等)。無ければ None
@@ -76,7 +77,9 @@ class WorldLogger:
         self._maps: list[str] = list(KNOWN_MAPS)
         self.refresh_s = refresh_s
         self._lists_ts = -1e9
-        self.spawn_threshold = spawn_threshold  # ガイドの名前とこれ以上似ていたら出現エリアに登録
+        self.spawn_threshold = spawn_threshold  # 全マップから探すとき: ガイドの名前とこれ以上似ていたら出現エリアに登録
+        self.spawn_map_threshold = spawn_map_threshold  # 今いるマップのモンスターから探すとき
+        self.spawn_margin = spawn_margin
         self.spawn = None               # akm.spawn.SpawnRegistry (open で作る)
         self.last_spawn = None          # 最後に登録した出現エリアの照合結果 (akm.spawn.Match)
         self.last_spawn_area = None
@@ -97,7 +100,8 @@ class WorldLogger:
             ensure_sightings(self.map.db)
             from .spawn import SpawnRegistry
 
-            self.spawn = SpawnRegistry(self.map.db, self.spawn_threshold, self.area_cells)
+            self.spawn = SpawnRegistry(self.map.db, self.spawn_threshold, self.area_cells,
+                                       self.spawn_map_threshold, self.spawn_margin)
             self.map.db.commit()
             self.here = self.map.latest()
             self.here_ts = 0.0

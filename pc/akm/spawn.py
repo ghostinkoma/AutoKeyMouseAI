@@ -6,8 +6,9 @@
   guide_monsters  マップごとのモンスターとレベル
   monster_areas   出現エリア: マップの 10 マス四方の区画 (ax, ay は 10 の倍数) ごとに、そこで見たモンスター
 
-登録の条件: 文字認識の読み (辞書で直す前の生の読み) がガイドのモンスター名と同じか、似ている度合いが 85% 以上。
-  同じマップに載っているモンスターを優先して照らし合わせる (載っていないマップで見たときは in_guide_map = 0)。
+登録の条件: 文字認識の読み (辞書で直す前の生の読み) を、まず今いるマップのモンスターだけと照らし合わせて 65% 以上
+  (似た名前が複数ならレベルと 1 位・2 位の差で決める)、だめなら全マップから 85% 以上 (SpawnRegistry の説明を参照)。
+  ガイドでは別のマップに載っているモンスターなら in_guide_map = 0。
 区画は「最初に見た場所」ではなく 10 マスの格子 (0-9, 10-19, …) なので、ビューアで四角く塗り分けられる。
 """
 from __future__ import annotations
@@ -443,11 +444,23 @@ class Match:
 
 
 class SpawnRegistry:
-    """ガイドとの照合と、出現エリアの登録。db は記録用の接続 (WorldLogger が開いたもの)。"""
+    """ガイドとの照合と、出現エリアの登録。db は記録用の接続 (WorldLogger が開いたもの)。
 
-    def __init__(self, db: sqlite3.Connection, threshold: float = 0.85, area: int = 10):
+    照合は 2 段 (マスター 14 マップ・101 体での試算: 読み違い 2 文字で正しく登録 98% / 間違い 0%、
+    3 文字で 90% / 0%。全体から 85% 以上で探す方式は 2 文字 65%、3 文字 31%):
+      1. 今いるマップのモンスター (5〜11 体) だけを候補にして、似ている度合い map_threshold (65%) 以上。
+         2 体以上が近いとき (Bahamut / Great Bahamut など) は、読めたレベルが合う方 (±level_tol)、
+         それでも決まらなければ 1 位と 2 位の差が margin 以上のときだけ採用 (決まらなければ登録しない)
+      2. 1 で決まらなければ全マップから threshold (85%) 以上 (ガイドで別マップのモンスターなら in_map = False)
+    """
+
+    def __init__(self, db: sqlite3.Connection, threshold: float = 0.85, area: int = 10, map_threshold: float = 0.65,
+                 margin: float = 0.10, level_tol: int = 3):
         self.db = db
         self.threshold = threshold
+        self.map_threshold = map_threshold
+        self.margin = margin
+        self.level_tol = level_tol
         self.area = area
         ensure_schema(db)
         self.reload()
@@ -459,26 +472,44 @@ class SpawnRegistry:
     def names(self) -> list[str]:
         return sorted({g[1] for g in self.guide})
 
-    def match(self, raw: str, map_name: str | None = None) -> Match | None:
-        best = None
-        for mp, name, lv in self.guide:
-            r = similarity(raw, name)
-            same = map_name is not None and mp.lower() == map_name.lower()
-            key = (r >= self.threshold and same, r)  # 85% 以上なら同じマップのものを優先
-            if best is None or key > best[0]:
-                best = (key, Match(name, lv, mp, r, same))
-        if best is None or best[1].ratio < self.threshold:
+    def match_in_map(self, raw: str, map_name: str, level: int | None = None) -> Match | None:
+        """今いるマップのモンスターだけで照合する (1 段目)。"""
+        cands = sorted(((similarity(raw, name), name, lv, mp) for mp, name, lv in self.guide
+                        if mp.lower() == map_name.lower()), reverse=True)
+        cands = [c for c in cands if c[0] >= self.map_threshold]
+        if not cands:
             return None
-        m = best[1]
-        if map_name is not None and not m.in_map:  # 同じ名前が今いるマップにも載っていないか
-            m.in_map = any(mp.lower() == map_name.lower() and name == m.monster for mp, name, _ in self.guide)
-        return m
+        if level is not None:  # レベルが読めていれば、レベルの合うものに絞る
+            near = [c for c in cands if c[2] is not None and abs(c[2] - level) <= self.level_tol]
+            if len(near) == 1:
+                c = near[0]
+                return Match(c[1], c[2], c[3], c[0], True)
+            if near:
+                cands = near
+        if len(cands) > 1 and cands[0][0] - cands[1][0] < self.margin:
+            return None  # 似た名前が 2 体以上で決めきれない: 登録しない (次の読みで決まるのを待つ)
+        c = cands[0]
+        return Match(c[1], c[2], c[3], c[0], True)
+
+    def match(self, raw: str, map_name: str | None = None, level: int | None = None) -> Match | None:
+        if map_name is not None:
+            m = self.match_in_map(raw, map_name, level)
+            if m is not None:
+                return m
+        best = None
+        for mp, name, lv in self.guide:  # 2 段目: 全マップから 85% 以上
+            r = similarity(raw, name)
+            if r >= self.threshold and (best is None or r > best.ratio):
+                best = Match(name, lv, mp, r, map_name is not None and mp.lower() == map_name.lower())
+        if best is not None and map_name is not None and not best.in_map:  # 同じ名前が今いるマップにも載っていないか
+            best.in_map = any(mp.lower() == map_name.lower() and name == best.monster for mp, name, _ in self.guide)
+        return best
 
     def register(self, raw: str, level: int | None, loc, ts: float | None = None) -> Match | None:
-        """読みがガイドの名前と 85% 以上一致したら、その場所の 10 マス一帯を出現エリアとして登録する。"""
+        """読みがガイドの名前と一致したら (上の 2 段の照合)、その場所の 10 マス一帯を出現エリアとして登録する。"""
         if loc is None or not self.guide:
             return None
-        m = self.match(raw, loc.map)
+        m = self.match(raw, loc.map, level)
         if m is None:
             return None
         ts = ts or time.time()
