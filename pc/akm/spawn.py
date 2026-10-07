@@ -41,8 +41,10 @@ def ensure_schema(db: sqlite3.Connection) -> None:
     for col in ("hp", "dmg_min", "dmg_max", "def"):
         if col not in cols:
             db.execute(f"ALTER TABLE guide_monsters ADD COLUMN {col} INTEGER")
-    if "min_level" not in [r[1] for r in db.execute("PRAGMA table_info(guide_maps)")]:
-        db.execute("ALTER TABLE guide_maps ADD COLUMN min_level INTEGER")  # 入場に必要なレベル
+    gcols = [r[1] for r in db.execute("PRAGMA table_info(guide_maps)")]
+    for col in ("min_level", "zen_cost", "resets"):  # 入場に必要なレベル・移動の Zen・推奨リセット回数
+        if col not in gcols:
+            db.execute(f"ALTER TABLE guide_maps ADD COLUMN {col} INTEGER")
 
 
 def similarity(a: str, b: str) -> float:
@@ -212,6 +214,8 @@ class _SectionWalker:
             self._depth += 1
         elif tag in ("h1", "h2", "h3", "h4", "h5", "h6") and not self._cur["heading"]:
             self._in_heading = True
+        elif tag in ("p", "div", "span", "h3", "h4") and a.get("title") and self._depth == 1:
+            self._cur["items"].append(("name", a["title"].strip()))  # カードの名前 (<p title="Spider">)
         elif tag == "img" and self._depth == 1:
             src = a.get("src") or ""
             if not src or src.startswith("data:"):  # 遅れて読み込む画像は data-src に本物がある
@@ -273,6 +277,9 @@ def parse_guide_sections(html: str) -> list[dict]:
     for sec in _SectionWalker().feed(html):
         mp = _section_map(sec)
         items = sec["items"]
+        if any(it[0] == "name" for it in items):
+            out += _parse_cards(mp, items)
+            continue
         imgs = [i for i, it in enumerate(items) if it[0] == "img"]
         if not imgs:
             lines = "\n".join(it[1] for it in items if it[0] == "text")
@@ -303,6 +310,68 @@ def parse_guide_sections(html: str) -> list[dict]:
     return list(uniq.values())
 
 
+_NUM = re.compile(r"^\d[\d,]*$")
+
+
+def _int(t: str) -> int | None:
+    m = re.search(r"\d[\d,]*", t)
+    return int(m.group().replace(",", "")) if m else None
+
+
+def _parse_cards(mp: str, items: list) -> list[dict]:
+    """wiki.rexmu.online のカード形式:
+         見出し: "Minimum level: 10" / "Zen cost: 1,000" / "Recommended resets: 0 RR"
+         カード: <img alt="Spider" src=…> (無ければ骸骨の印) → <p title="Spider"> → "4~7" (攻撃力)
+                → "Level" "2" / "HP" "30" / "Defense" "1"
+    """
+    out: list[dict] = []
+    head = {"min_level": None, "zen_cost": None, "resets": None}
+    card = None
+    pending_img = None
+    label = None
+    for it in items:
+        if it[0] == "img":
+            pending_img = it[1]
+            continue
+        if it[0] == "name":
+            card = {"map": mp, "monster": it[1], "level": None, "icon": pending_img, "hp": None,
+                    "dmg_min": None, "dmg_max": None, "def": None}
+            pending_img = None
+            out.append(card)
+            label = None
+            continue
+        t = it[1]
+        low = t.lower().rstrip(": ")
+        if card is None:  # 見出しの情報
+            if low.startswith("minimum level"):
+                label = "min_level"
+            elif low.startswith("zen cost"):
+                label = "zen_cost"
+            elif low.startswith("recommended reset"):
+                label = "resets"
+            elif label and _int(t) is not None:
+                head[label] = _int(t)
+                label = None
+            continue
+        if t == card["monster"]:
+            continue
+        m = re.fullmatch(r"(\d[\d,]*)\s*[~\-–]\s*(\d[\d,]*)", t)
+        if m and card["dmg_min"] is None:
+            card["dmg_min"], card["dmg_max"] = _int(m.group(1)), _int(m.group(2))
+        elif low in ("level", "lv", "lvl"):
+            label = "level"
+        elif low in ("hp", "life"):
+            label = "hp"
+        elif low in ("defense", "def", "defence"):
+            label = "def"
+        elif label and _NUM.match(t):
+            card[label] = _int(t)
+            label = None
+    for c in out:
+        c.update(head)
+    return out
+
+
 def section_html(html: str, key: str) -> str | None:
     """id に key を含む map-guide の section の HTML (確認用)。"""
     m = re.search(r'<section[^>]*id=["\']map-?guide-?[^"\']*' + re.escape(key) + r'[^"\']*["\'][^>]*>', html, re.I)
@@ -320,16 +389,21 @@ def save_guide(db: sqlite3.Connection, rows: list[dict], source: str = GUIDE_URL
     ensure_monsters(db)
     now = time.time()
     maps = sorted({r["map"] for r in rows})
-    min_lv = {r["map"]: r["min_level"] for r in rows if r.get("min_level") is not None}
+    def per_map(key):
+        return {r["map"]: r[key] for r in rows if r.get(key) is not None}
+
+    min_lv, zen, resets = per_map("min_level"), per_map("zen_cost"), per_map("resets")
     # 前回の取り込みで入った、今回のガイドに無いもの (読み方を直す前の名前など) は消す
     q = ",".join("?" * len(maps))
     db.execute(f"DELETE FROM guide_monsters WHERE map NOT IN ({q})", maps)
     db.execute(f"DELETE FROM guide_maps WHERE name NOT IN ({q})", maps)
     db.execute(f"DELETE FROM monsters WHERE source='guide:rexmu' AND map NOT IN ({q})", maps)
-    db.executemany("INSERT INTO guide_maps(name, source, updated, min_level) VALUES (?,?,?,?) "
+    db.executemany("INSERT INTO guide_maps(name, source, updated, min_level, zen_cost, resets) VALUES (?,?,?,?,?,?) "
                    "ON CONFLICT(name) DO UPDATE SET source=excluded.source, updated=excluded.updated, "
-                   "min_level=COALESCE(excluded.min_level, guide_maps.min_level)",
-                   [(m, source, now, min_lv.get(m)) for m in maps])
+                   "min_level=COALESCE(excluded.min_level, guide_maps.min_level), "
+                   "zen_cost=COALESCE(excluded.zen_cost, guide_maps.zen_cost), "
+                   "resets=COALESCE(excluded.resets, guide_maps.resets)",
+                   [(m, source, now, min_lv.get(m), zen.get(m), resets.get(m)) for m in maps])
     db.executemany("INSERT INTO guide_monsters(map, monster, level, source, updated, icon, hp, dmg_min, dmg_max, def) "
                    "VALUES (?,?,?,?,?,?,?,?,?,?) "
                    "ON CONFLICT(map, monster) DO UPDATE SET level=COALESCE(excluded.level, guide_monsters.level), "

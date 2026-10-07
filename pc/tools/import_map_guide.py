@@ -112,7 +112,10 @@ def main() -> None:
     for mp, n in sorted(per_map.items()):
         mons = [r for r in rows if r["map"] == mp]
         lv = next((r.get("min_level") for r in mons if r.get("min_level")), None)
-        print(f"  {mp}{f' (入場 Lv{lv}+)' if lv else ''} ({n}): " + ", ".join(
+        zen = next((r.get("zen_cost") for r in mons if r.get("zen_cost")), None)
+        rr = next((r.get("resets") for r in mons if r.get("resets") is not None), None)
+        extra = (f" 入場 Lv{lv}+" if lv else "") + (f" Zen {zen:,}" if zen else "") + (f" 推奨 {rr}RR" if rr is not None else "")
+        print(f"  {mp}{f' ({extra.strip()})' if extra else ''} ({n}): " + ", ".join(
             f"{r['monster']} Lv{r['level'] or '?'}" + (f" HP{r['hp']}" if r.get("hp") else "")
             + (f" 攻{r['dmg_min']}-{r['dmg_max']}" if r.get("dmg_min") is not None else "")
             + (f" 防{r['def']}" if r.get("def") is not None else "") + ("*" if r.get("icon") else "") for r in mons[:6])

@@ -1586,3 +1586,49 @@ def test_map_guide_table_stats():
     save_guide(con, [r])
     assert con.execute("SELECT hp, atk_min, atk_max, def FROM monsters WHERE name='Narcondra'").fetchone() == (
         1250000, 2100, 2400, 950)
+
+
+REXMU_GUIDE = """<div class="space-y-8"><section id="map-guide-lorencia" class="space-y-3 scroll-mt-24"><div class="flex"><h2 class="font-serif">
+<span class="text-[var(--gold-ink)]">--</span>Lorencia</h2><div class="flex"><span>Minimum level: <span class="font-bold">10</span></span>
+<span class="flex"><svg class="lucide lucide-coins"><circle cx="8" cy="8" r="6"></circle></svg>Zen cost: <span class="font-bold">1,000</span></span>
+<span>Recommended resets: <span class="font-bold">0 RR</span></span></div></div><div class="grid">
+<div class="relative flex"><img alt="Spider" title="Spider" loading="lazy" decoding="async" class="object-cover" src="/assets/monsters/Monster10.webp">
+<div class="min-w-0"><p class="text-xs font-bold truncate" title="Spider">Spider</p><div class="flex"><svg class="lucide lucide-swords"><polyline points="1 2"></polyline></svg>
+<span class="text-base">4~7</span></div><div class="flex"><span>Level <span class="font-bold">2</span></span><span>HP <span class="font-bold">30</span></span>
+<span>Defense <span class="font-bold">1</span></span></div></div></div></div></section>
+<section id="map-guide-elbeland" class="space-y-3"><div class="flex"><h2><span>--</span>Elbeland</h2><div><span>Minimum level: <span>10</span></span>
+<span>Zen cost: <span>2,500</span></span><span>Recommended resets: <span>0 RR</span></span></div></div><div class="grid">
+<div class="relative flex"><span class="flex"><svg class="lucide lucide-skull"><path d="m12"></path></svg></span><div class="min-w-0">
+<p class="text-xs" title="Strange Rabbit">Strange Rabbit</p><div><svg class="lucide lucide-swords"></svg><span>57~66</span></div>
+<div><span>Level <span>18</span></span><span>HP <span>710</span></span><span>Defense <span>24</span></span></div></div></div></div></section>
+<section id="map-guide-kanturu"><div><h2><span>--</span>Kanturu</h2><div><span>Minimum level: <span>270</span></span>
+<span>Zen cost: <span>200,000</span></span><span>Recommended resets: <span>10 RR</span></span></div></div><div class="grid">
+<div><span><svg class="lucide lucide-skull"></svg></span><div><p title="Gigantis">Gigantis</p><div><span>1148~1237</span></div>
+<div><span>Level <span>172</span></span><span>HP <span>127,100</span></span><span>Defense <span>927</span></span></div></div></div>
+<div><img alt="Genocider" title="Genocider" src="/assets/monsters/G.webp"><div><p title="Genocider">Genocider</p><div><span>1228~1321</span></div>
+<div><span>Level <span>181</span></span><span>HP <span>142,800</span></span><span>Defense <span>1006</span></span></div></div></div>
+<div><span><svg class="lucide lucide-skull"></svg></span><div><p title="Gigantis">Gigantis</p><div><span>1274~1369</span></div>
+<div><span>Level <span>186</span></span><span>HP <span>152,100</span></span><span>Defense <span>1051</span></span></div></div></div>
+</div></section></div>"""
+
+
+def test_rexmu_map_guide_cards():
+    import sqlite3
+
+    from akm.spawn import parse_guide_sections, save_guide
+
+    rows = parse_guide_sections(REXMU_GUIDE)
+    got = {(r["map"], r["monster"]): r for r in rows}
+    sp = got[("Lorencia", "Spider")]
+    assert (sp["level"], sp["hp"], sp["dmg_min"], sp["dmg_max"], sp["def"], sp["icon"]) == (
+        2, 30, 4, 7, 1, "/assets/monsters/Monster10.webp")
+    assert (sp["min_level"], sp["zen_cost"], sp["resets"]) == (10, 1000, 0)
+    sr = got[("Elbeland", "Strange Rabbit")]   # 画像が無いカード (骸骨の印) は icon なし
+    assert (sr["level"], sr["hp"], sr["icon"], sr["zen_cost"]) == (18, 710, None, 2500)
+    ge = got[("Kanturu", "Genocider")]
+    assert (ge["level"], ge["hp"], ge["icon"], ge["resets"]) == (181, 142800, "/assets/monsters/G.webp", 10)
+    assert got[("Kanturu", "Gigantis")]["level"] == 172 and got[("Kanturu", "Gigantis")]["icon"] is None
+    assert len(rows) == 4
+    con = sqlite3.connect(":memory:")
+    save_guide(con, rows)
+    assert con.execute("SELECT min_level, zen_cost, resets FROM guide_maps WHERE name='Kanturu'").fetchone() == (270, 200000, 10)
