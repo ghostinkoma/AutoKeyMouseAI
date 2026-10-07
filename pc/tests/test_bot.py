@@ -1427,3 +1427,58 @@ def test_sightings_are_one_record_per_monster_and_10_cell_area(tmp_path):
     con = sqlite3.connect(str(tmp_path / "mu.db"))
     rows = con.execute("SELECT monster, x, y, reads FROM sightings ORDER BY id").fetchall()
     assert rows == [("Bahamut", 100, 100, 6), ("Bahamut", 115, 104, 3), ("Vepar", 115, 104, 3)]
+
+
+def test_mirror_only_starts_with_auto_train_without_device(tmp_path, monkeypatch):
+    """mirror_only --auto-train が起動から認識・DB 記録・学習の準備まで通ること (実機・OBS なし)。"""
+    import importlib
+    import types
+
+    import akm.config
+
+    sys.path.insert(0, str(PC / "tools"))
+    mo = importlib.import_module("mirror_only")
+    cfg = yaml.safe_load((PC / "config.example.yaml").read_text(encoding="utf-8"))
+    cfg["device"]["host"] = "127.0.0.1"
+    cfg.setdefault("obs", {})["enabled"] = False
+    cfg["maplog"]["ocr"] = "none"
+    frame = np.zeros((1050, 1680, 3), np.uint8)
+
+    class Screen:
+        def locate(self):
+            pass
+
+        def grab(self):
+            return frame
+
+        grab_preview = grab
+
+    made = {}
+
+    class FakeMirror:
+        def __init__(self, *a, **kw):
+            made["mirror"] = self
+            self.lines = []
+            self.interval = 0.1
+
+        def set_lines(self, lines):
+            self.lines = lines
+
+        def __getattr__(self, name):  # 状態表示で読む値 (fmt, sent, fps …) は 0 でよい
+            return "bad16" if name == "fmt" else "http://127.0.0.1/frame" if name == "url" else 0
+
+    def stop_soon(s):
+        time_mod.sleep(1.5)  # 認識のスレッドが 1 回は回るまで待ってから Ctrl+C
+        raise KeyboardInterrupt
+
+    import time as time_mod
+    monkeypatch.setattr(akm.config, "PC_DIR", tmp_path)
+    monkeypatch.setattr(mo, "load_config", lambda p: cfg)
+    monkeypatch.setattr(mo, "ask_obs_password", lambda *a, **kw: None)
+    monkeypatch.setattr(mo, "GameScreen", types.SimpleNamespace(from_config=lambda c: Screen()))
+    monkeypatch.setattr(mo, "Mirror", FakeMirror)
+    monkeypatch.setattr(mo, "time", types.SimpleNamespace(sleep=stop_soon))
+    monkeypatch.setattr(sys, "argv", ["mirror_only.py", "--auto-train", "--no-ask"])
+    mo.main()
+    assert made["mirror"].lines[0][0] == "MIRROR ONLY"
+    assert (tmp_path / "data" / "mu_map.db").exists()  # 現在地・目撃の記録先を開いた

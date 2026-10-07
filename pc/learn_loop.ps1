@@ -50,10 +50,15 @@ if (-not $NoViewer -and (Test-Path $jar)) {
 }
 
 $run = 0
+$quickFails = 0
 while ($true) {
     $run++
+    $started = Get-Date
     Write-Host ("[loop] start #{0}  {1}" -f $run, (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
-    python tools\mirror_only.py --auto-train --fps $Fps --recognize-every $RecognizeEvery `
+    # 1st start asks the OBS password (Enter = keep saved one). Restarts use the saved password without asking.
+    $ask = @()
+    if ($run -gt 1) { $ask = @("--no-ask") }
+    python tools\mirror_only.py --auto-train @ask --fps $Fps --recognize-every $RecognizeEvery `
         --learn-every $LearnEvery --train-every $TrainEvery --ocr-every $OcrEvery
     $code = $LASTEXITCODE
     if ($code -eq 0) {
@@ -62,6 +67,12 @@ while ($true) {
     }
     Add-Content -Path (Join-Path $pc "models\learn_log.txt") -Value (
         "{0} loop: mirror_only exited with code {1}, restarting" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $code)
+    # Crashing again and again right after start means a setting / code problem: restarting will not help.
+    if (((Get-Date) - $started).TotalSeconds -lt 90) { $quickFails++ } else { $quickFails = 0 }
+    if ($quickFails -ge 3) {
+        Write-Host "[loop] mirror_only failed 3 times right after start. Stopped. Check the error above."
+        exit $code
+    }
     Write-Host "[loop] mirror_only stopped with code $code. Restarting in $RestartWait s (Ctrl+C to quit)"
     Start-Sleep -Seconds $RestartWait
 }

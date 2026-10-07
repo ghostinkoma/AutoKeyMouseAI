@@ -40,6 +40,8 @@ def main() -> None:
     ap.add_argument("--learn-every", type=float, default=30.0, help="画面を保存する間隔 (秒)")
     ap.add_argument("--train-every", type=int, default=60, help="新しい画面が何枚たまったら学習するか")
     ap.add_argument("--ocr-every", type=int, default=3, help="文字認識は何回に 1 回学習するか (0 でしない)")
+    ap.add_argument("--no-ask", action="store_true",
+                    help="保存済みの OBS のパスワードでつながれば聞かない (learn_loop.ps1 の自動再起動用)")
     ap.add_argument("--no-db", action="store_true",
                     help="--recognize で読んだ現在地・相手の名前を DB (ビューアと共通の mu_map.db) に記録しない")
     ap.add_argument("--tolerance", type=int, default=16, help="ブロック差分方式の許容誤差 (大きいほど小さく粗い)")
@@ -49,7 +51,7 @@ def main() -> None:
     if args.auto_train:
         args.recognize = args.learn = True
     cfg = load_config("config.yaml")
-    ask_obs_password(cfg, "config.yaml")
+    ask_obs_password(cfg, "config.yaml", ask=not args.no_ask)
     screen = GameScreen.from_config(cfg)
     obs = cfg.get("obs") or {}
     print(f"[mirror] 設定: game.capture={cfg['game'].get('capture', 'auto')}  "
@@ -124,8 +126,7 @@ def main() -> None:
             except Exception as e:
                 print(f"[harvest] 先生役の OCR が使えないので、自分の読みが続けて同じときだけ見本にします ({str(e).splitlines()[0]})")
             harvester = OcrHarvester(PC_DIR / "dataset" / "ocr_lines", ocr, teacher,
-                                     loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]),
-                                area_cells=int(wcfg.get("area_cells", 10)))
+                                     loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]))
         world = None
         if args.recognize and ocr is not None and not args.no_db:
             # 現在地と相手の名前を、正しい読みか AI (models/record_filter.npz) で判定してから DB に記録する

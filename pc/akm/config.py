@@ -84,10 +84,16 @@ def check_obs(obs: dict) -> str | None:
         return msg
 
 
-def ask_obs_password(cfg: dict, path: str | Path = "config.yaml") -> None:
-    """起動時に OBS のパスワードを聞く (Enter で変更しない)。つながるまで聞き直し、新しいパスワードは保存する。"""
+def ask_obs_password(cfg: dict, path: str | Path = "config.yaml", ask: bool = True) -> None:
+    """起動時に OBS のパスワードを聞く (Enter で変更しない)。つながるまで聞き直し、新しいパスワードは保存する。
+
+    ask=False なら、保存済みのパスワードでつながるときは聞かない (つながらなければ聞く)。
+    """
     obs = cfg.get("obs") or {}
     if not obs.get("enabled"):
+        return
+    if not ask and check_obs(obs) is None:
+        print("[obs] OBS に接続できました (保存済みのパスワード)")
         return
     print("[obs] OBS の「ツール」→「WebSocket サーバー設定」→「接続情報を表示」のパスワードを貼り付けてください")
     while True:
