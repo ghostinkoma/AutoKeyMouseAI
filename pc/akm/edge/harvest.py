@@ -19,7 +19,7 @@ import numpy as np
 
 from ..maploc import KNOWN_MAPS, parse_location, preprocess
 from ..vision import roi_px
-from .synth import CHARS
+from .charset import CHARS
 
 LEXICON = Path(__file__).resolve().parent.parent / "data" / "lexicon.txt"
 

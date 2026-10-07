@@ -15,8 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .glyphs import line_glyphs
 
-CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz()/:,.-+%[]!?'"
-JUNK = len(CHARS)  # 文字ではない (背景の模様など)
+from .charset import CHARS, JUNK  # noqa: F401  (ここからも import できるように)
 
 FONT_URLS = {
     "Montserrat-Bold.ttf": "https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-Bold.ttf",

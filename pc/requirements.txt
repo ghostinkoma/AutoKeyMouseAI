@@ -17,3 +17,5 @@ winrt-Windows.Media.Ocr; sys_platform == "win32"
 winrt-Windows.Graphics.Imaging; sys_platform == "win32"
 winrt-Windows.Storage.Streams; sys_platform == "win32"
 winrt-Windows.Globalization; sys_platform == "win32"
+# 文字認識の学習 (tools/edge_train.py) で文字を描く
+pillow>=10.0
