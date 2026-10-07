@@ -252,10 +252,10 @@ public final class MapViewer extends JFrame {
     /** 地図をクリック (タップ) した場所の近くで見かけたモンスターを出す。 */
     private void showMonstersAt(int x, int y, java.awt.event.MouseEvent e) {
         if (shownMap == null) return;
-        int r = 6;
+        int r = 5;  // 10 マス四方 (10 マス以上離れると出現モンスターが変わる)
         panel.mark(x, y, r);
         JPopupMenu menu = new JPopupMenu();
-        JLabel title = new JLabel(String.format("  %s (%d, %d) 付近 ±%d マスで見かけたモンスター", shownMap, x, y, r));
+        JLabel title = new JLabel(String.format("  %s (%d, %d) 付近 %d マス四方で見かけたモンスター", shownMap, x, y, 2 * r));
         title.setFont(title.getFont().deriveFont(java.awt.Font.BOLD));
         menu.add(title);
         menu.addSeparator();

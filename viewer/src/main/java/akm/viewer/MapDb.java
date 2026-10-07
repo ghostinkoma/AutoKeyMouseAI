@@ -336,26 +336,26 @@ public final class MapDb implements AutoCloseable {
     public record NearMonster(String name, Integer minLevel, Integer maxLevel, int count, double lastTs, boolean confirmed) {
         public String label() {
             String lv = minLevel == null ? "" : " Lv" + (maxLevel == null || maxLevel.equals(minLevel) ? minLevel : minLevel + "-" + maxLevel);
-            return name + lv + "  (" + count + " 回" + (confirmed ? "" : ", 未確認") + ")";
+            return name + lv + "  (読み " + count + " 回" + (confirmed ? "" : ", 未確認") + ")";
         }
     }
 
     /** 新しいマップの候補 (Python の world_log.py が知らないマップ名を読んだとき) と、手で登録したマップ。 */
     public record MapName(String name, String status, boolean reviewed, String raw, int reads, Double lastSeen, Integer x, Integer y) {}
 
-    /** (x, y) から r マス以内で見かけたモンスター。除外 (ng) の目撃は数えない。 */
+    /** (x, y) を中心にした 2r マス四方で見かけたモンスター。除外 (ng) の目撃は数えない。count は読んだ回数の合計。 */
     public List<NearMonster> monstersNear(String map, int x, int y, int r) throws SQLException {
         List<NearMonster> out = new ArrayList<>();
         if (map == null || !hasTable("sightings")) return out;
         try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT monster, MIN(level), MAX(level), COUNT(*), MAX(last_ts), MAX(status='ok') FROM sightings "
+                "SELECT monster, MIN(level), MAX(level), SUM(reads), MAX(last_ts), MAX(status='ok') FROM sightings "
                         + "WHERE map=? AND x BETWEEN ? AND ? AND y BETWEEN ? AND ? AND status!='ng' "
-                        + "GROUP BY monster ORDER BY MAX(status='ok') DESC, COUNT(*) DESC")) {
+                        + "GROUP BY monster ORDER BY MAX(status='ok') DESC, SUM(reads) DESC")) {
             ps.setString(1, map);
             ps.setInt(2, x - r);
-            ps.setInt(3, x + r);
+            ps.setInt(3, x + r - 1);
             ps.setInt(4, y - r);
-            ps.setInt(5, y + r);
+            ps.setInt(5, y + r - 1);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next())
                     out.add(new NearMonster(rs.getString(1), (Integer) rs.getObject(2), (Integer) rs.getObject(3), rs.getInt(4),

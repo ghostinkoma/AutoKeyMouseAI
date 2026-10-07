@@ -1375,3 +1375,55 @@ def test_world_logger_unknown_map_waits_for_approval_and_new_names_join_lexicon(
     assert db.execute("SELECT status, reads FROM sightings WHERE monster='Zorkan Mafa'").fetchone() == ("pending", 4)
     assert db.execute("SELECT COUNT(*) FROM monsters WHERE name='Zorkan Mafa'").fetchone()[0] == 0
     w.close()
+
+
+def test_sightings_are_one_record_per_monster_and_10_cell_area(tmp_path):
+    import sqlite3
+
+    from akm.edge.target import Target
+    from akm.record_filter import RecordFilter
+    from akm.world_log import WorldLogger
+
+    class Ocr:
+        text = ""
+
+        def read(self, img):
+            return self.text, 0.9
+
+    class Rec:
+        target = None
+
+    t = {"now": 1000.0}
+    w = WorldLogger(tmp_path / "mu.db", RecordFilter.load(), loc_every=0, log=lambda *a: None, clock=lambda: t["now"])
+    img = np.zeros((1050, 1680, 3), np.uint8)
+    o = Ocr()
+
+    def stand(x, y, n=5):
+        o.text = f"Atlans ({x}, {y})"
+        for _ in range(n):
+            t["now"] += 1
+            w.feed(img, Rec(), o)
+
+    def hit(name="Bahamut", n=3):
+        rec = Rec()
+        for _ in range(n):
+            t["now"] += 1
+            rec.target = Target(name, "70", 0.5, (0, 0, 1, 1), (0, 0, 1, 1), raw_name=name, conf=0.9)
+            w.feed(img, rec, o)
+
+    stand(100, 100)
+    hit()
+    t["now"] += 120            # 時間がたっても、同じ範囲 (10 マス未満) なら同じ記録
+    for x in (101, 102, 103):  # 歩いて (飛びすぎると読み違いとみなされるので少しずつ)
+        stand(x, x, 3)
+    stand(104, 104)
+    hit()
+    for x in range(105, 116, 3):  # 10 マス以上離れる → 出現モンスターが変わる別の範囲
+        stand(x, 104, 3)
+    stand(115, 104)
+    hit()
+    hit("Vepar")               # 別のモンスターは同じ場所でも別の記録
+    w.close()
+    con = sqlite3.connect(str(tmp_path / "mu.db"))
+    rows = con.execute("SELECT monster, x, y, reads FROM sightings ORDER BY id").fetchall()
+    assert rows == [("Bahamut", 100, 100, 6), ("Bahamut", 115, 104, 3), ("Vepar", 115, 104, 3)]

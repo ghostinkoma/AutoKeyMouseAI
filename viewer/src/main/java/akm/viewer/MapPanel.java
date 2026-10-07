@@ -229,7 +229,7 @@ public final class MapPanel extends JPanel {
             g.setColor(new Color(255, 255, 255, 200));
             g.setStroke(new BasicStroke(1.5f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, new float[] {4f, 3f}, 0f));
             int x0 = (int) (offX + (markX - markR) * cell), y0 = (int) (offY + (markY - markR) * cell);
-            int w = (int) Math.ceil((2 * markR + 1) * cell);
+            int w = (int) Math.ceil(2 * markR * cell);
             g.drawRect(x0, y0, w, w);
             g.setStroke(new BasicStroke(1f));
         }

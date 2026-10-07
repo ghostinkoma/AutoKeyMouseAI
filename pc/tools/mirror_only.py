@@ -124,7 +124,8 @@ def main() -> None:
             except Exception as e:
                 print(f"[harvest] 先生役の OCR が使えないので、自分の読みが続けて同じときだけ見本にします ({str(e).splitlines()[0]})")
             harvester = OcrHarvester(PC_DIR / "dataset" / "ocr_lines", ocr, teacher,
-                                     loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]))
+                                     loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]),
+                                area_cells=int(wcfg.get("area_cells", 10)))
         world = None
         if args.recognize and ocr is not None and not args.no_db:
             # 現在地と相手の名前を、正しい読みか AI (models/record_filter.npz) で判定してから DB に記録する
@@ -141,7 +142,8 @@ def main() -> None:
                 pass
             filt = RecordFilter.load(ok=float(wcfg.get("ok", 0.8)), ng=float(wcfg.get("ng", 0.3)))
             world = WorldLogger(PC_DIR / lcfg.get("db", "data/mu_map.db"), filt, teacher=wteacher,
-                                loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]))
+                                loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]),
+                                area_cells=int(wcfg.get("area_cells", 10)))
             print(f"[world] 現在地と相手の名前を {world.db_path} に記録します (判定 AI: "
                   f"{'あり' if filt.model else 'なし → python tools/record_filter.py train で作成'}、"
                   f"先生役の OCR: {'あり' if wteacher else 'なし'})。ビューア: java -jar viewer\\mapviewer.jar")

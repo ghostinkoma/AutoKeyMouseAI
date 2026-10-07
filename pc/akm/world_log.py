@@ -7,7 +7,8 @@
   ok      → 登録する (辞書に無い新しいモンスター名は ok でも保留にして人が確かめる)
   pending → sightings に保留として残す (ビューアの「目撃一覧」で承認 / 却下。それが次の学習の正解になる)
   ng      → 登録しない (sightings には ng として残す。現在地は捨てる)
-同じ相手を殴り続けている間は 1 件にまとめる (reads が増え、最後に見た時刻と HP の最小値を更新)。
+目撃は「モンスター × マップ × 範囲」で 1 件。最初に見た場所から 10 マス (area_cells) 未満なら同じ記録にまとめ
+(reads が増え、最後に見た時刻と HP の最小値を更新)、10 マス以上離れたら出現モンスターが変わる別の範囲なので新しい記録にする。
 
 知らないマップ (KNOWN_MAPS に無い名前) は位置を記録せず、map_names 表に「新しいマップの候補」(pending) として残す。
 ビューアの「新しいマップ」タブで承認されたら (または手で登録されたら) 既知のマップとして記録を始める。
@@ -59,13 +60,14 @@ class WorldLogger:
     def __init__(self, db_path: str | Path, filt: RecordFilter | None = None, teacher=None,
                  loc_roi=(0.86, 0.955, 0.14, 0.045), loc_every: float = 1.0, merge_s: float = 8.0,
                  here_s: float = 15.0, words: list[str] | None = None, log=print, clock=time.time,
-                 refresh_s: float = 30.0):
+                 refresh_s: float = 30.0, area_cells: int = 10):
         self.db_path = Path(db_path)
         self.filt = filt or RecordFilter.load()
         self.teacher = teacher          # (画像) → 文字列 (Windows の OCR 等)。無ければ None
         self.loc_roi = loc_roi
         self.loc_every = loc_every
-        self.merge_s = merge_s          # この秒数以内に同じ相手を読んだら同じ目撃にまとめる
+        self.merge_s = merge_s          # 場所が分からないとき: この秒数以内に同じ相手を読んだら同じ目撃にまとめる
+        self.area_cells = area_cells    # 同じ範囲とみなす広さ。最初に見た場所から area マス以上離れたら別の記録
         self.here_s = here_s            # 現在地がこの秒数以内に読めていれば目撃の場所にする
         self.log = log
         self.clock = clock
@@ -230,37 +232,51 @@ class WorldLogger:
         level = int(target.level) if target.level.isdigit() and 1 <= int(target.level) <= 400 else None
         here = self.current()
         db = self.open().db
+        area = self.area_cells
+        feat = json.dumps([round(float(v), 4) for v in features(c)])
         cur = self._cur
-        if cur is not None and cur["monster"] == text and now - cur["last_ts"] <= self.merge_s:
-            # 同じ相手: まとめる。判定は良い方を残す (続けて同じに読めるほど repeat が上がり確からしくなる)
-            cur["last_ts"] = now
-            better = score > cur["score"]
-            if better:
-                cur["score"], cur["status"] = score, status
+        recent = cur is not None and cur["monster"] == text and now - cur["last_ts"] <= self.merge_s
+        row = None
+        if here is not None:
+            # 同じモンスターを、同じマップの area マス未満の範囲で見たことがあれば同じ記録 (範囲の中心は最初に見た場所)
+            row = db.execute("SELECT id, status FROM sightings WHERE monster=? AND map=? AND x IS NOT NULL "
+                             "AND ABS(x-?)<? AND ABS(y-?)<? ORDER BY ABS(x-?)+ABS(y-?) LIMIT 1",
+                             (text, here.map, here.x, area, here.y, area, here.x, here.y)).fetchone()
+            if row is None and recent:  # 場所が分からないうちに作った記録に、分かった場所を入れる
+                r0 = db.execute("SELECT id, status FROM sightings WHERE id=? AND map IS NULL", (cur["id"],)).fetchone()
+                if r0 is not None:
+                    db.execute("UPDATE sightings SET map=?, x=?, y=? WHERE id=?", (here.map, here.x, here.y, r0[0]))
+                    row = r0
+        elif recent:  # 場所が分からないときは、続けて読めている間だけまとめる
+            row = db.execute("SELECT id, status FROM sightings WHERE id=?", (cur["id"],)).fetchone()
+        if row is not None:
+            # 同じ記録にまとめる。判定は一番良い読みのものを残す (人が判定したものはそのまま)
+            sid, before = row
             db.execute("UPDATE sightings SET last_ts=?, reads=reads+1, hp_min=MIN(COALESCE(hp_min, 1), ?), "
-                       "level=COALESCE(level, ?), score=MAX(score, ?), status=CASE WHEN reviewed=1 THEN status ELSE ? END, "
-                       "features=CASE WHEN ? THEN ? ELSE features END WHERE id=?",
-                       (now, target.hp_ratio if target.hp_ratio is not None else 1, level, score, cur["status"],
-                        better, json.dumps([round(float(v), 4) for v in features(c)]), cur["id"]))
-            became_ok = better and status == "ok" and not cur["added"]
+                       "level=COALESCE(level, ?), "
+                       "status=CASE WHEN reviewed=1 OR ? <= score THEN status ELSE ? END, "
+                       "features=CASE WHEN reviewed=0 AND ? > score THEN ? ELSE features END, "
+                       "score=MAX(score, ?) WHERE id=?",
+                       (now, target.hp_ratio if target.hp_ratio is not None else 1, level, score, status,
+                        score, feat, score, sid))
         else:
+            before = None
             r = db.execute("INSERT INTO sightings(ts, last_ts, monster, raw, level, map, x, y, hp_min, reads, score, status, "
                            "source, features) VALUES (?,?,?,?,?,?,?,?,?,1,?,?, 'live', ?)",
                            (now, now, text, raw, level, here.map if here else None, here.x if here else None,
-                            here.y if here else None, target.hp_ratio, score, status,
-                            json.dumps([round(float(v), 4) for v in features(c)])))
-            self._cur = cur = {"id": r.lastrowid, "monster": text, "last_ts": now, "score": score, "status": status,
-                               "added": False}
+                            here.y if here else None, target.hp_ratio, score, status, feat))
+            sid = r.lastrowid
             self.stats[status] += 1
-            became_ok = status == "ok"
             mark = {"ok": "登録", "pending": "保留", "ng": "除外"}[status]
             self.log(f"[world] 目撃 {mark} ({score:.2f}): {text}" + (f" Lv{level}" if level else "")
-                     + (f"  @ {here.map} ({here.x}, {here.y})" if here else "") + (f"  (読み {raw!r})" if raw != text else ""))
-        if became_ok:
-            add_monster_from_sighting(db, text, level, here.map if here else None)
-            cur["added"] = True
+                     + (f"  @ {here.map} ({here.x}, {here.y}) から {area} マスの範囲" if here else "")
+                     + (f"  (読み {raw!r})" if raw != text else ""))
+        self._cur = cur = {"id": sid, "monster": text, "last_ts": now}
+        st, sc, mp = db.execute("SELECT status, score, map FROM sightings WHERE id=?", (sid,)).fetchone()
+        if st == "ok" and before != "ok":
+            add_monster_from_sighting(db, text, level, mp)
         db.commit()
-        self.last_judge = (cur["status"], cur["score"])
+        self.last_judge = (st, sc)
         return self.last_judge
 
     def feed(self, img, rec, ocr) -> None:
