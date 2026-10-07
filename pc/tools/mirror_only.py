@@ -109,10 +109,24 @@ def main() -> None:
         print(f"[recognize] 窓・アイコン {len(det.objects)} 種 ({', '.join(o.name for o in det.objects)})"
               f"{'' if det.model else ' (ネット未学習: 一致度だけで判定)'} を {args.recognize_every:.1f} 秒ごとに等倍の画面で認識します"
               + (" / 等倍の画面を dataset/frames に保存します" if args.learn else ""))
+        harvester = None
+        if args.auto_train and ocr is not None:
+            # 正解付きの文字の行を自動で集める。Windows の OCR があれば「先生」として読みを照らし合わせる
+            from akm.edge.harvest import OcrHarvester
+            from akm.maploc import make_ocr
+
+            lcfg = cfg.get("maplog") or {}
+            teacher = None
+            try:
+                teacher = make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd"))
+            except Exception as e:
+                print(f"[harvest] 先生役の OCR が使えないので、自分の読みが続けて同じときだけ見本にします ({str(e).splitlines()[0]})")
+            harvester = OcrHarvester(PC_DIR / "dataset" / "ocr_lines", ocr, teacher,
+                                     loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]))
         rec = LiveRecognizer(grab_full, det, ocr if args.recognize else None, period=args.recognize_every,
                              on_result=(lambda r: m.set_lines(base_lines + overlay_lines(r))) if args.recognize else None,
                              learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None,
-                             learn_every=args.learn_every)
+                             learn_every=args.learn_every, harvester=harvester)
         rec.start()
     cycle = None
     if args.auto_train:
@@ -122,6 +136,8 @@ def main() -> None:
             rec.detector = ObjectDetector.load()  # 新しく登録した窓・アイコンも読み直す
             try:
                 rec.ocr = OcrReader.load()
+                if rec.harvester is not None:
+                    rec.harvester.ocr = rec.ocr
             except FileNotFoundError:
                 pass
 
@@ -147,6 +163,8 @@ def main() -> None:
                     f"前フレーム不要・変化 {enc.changed_blocks}/510 ブロック" if m.b16_prev_free and enc else "面ごと")
             if rec is not None and rec.last.ms:
                 kinds += f"  認識 {rec.last.ms:.0f}ms"
+            if rec is not None and rec.harvester is not None:
+                kinds += f"  文字の見本 +{rec.harvester.saved}"
             if cycle is not None:
                 kinds += ("  学習中…" if cycle.busy else
                           f"  次の学習まで {max(0, cycle.every_frames - cycle.new_frames())} 枚 (済 {cycle.rounds} 回)")

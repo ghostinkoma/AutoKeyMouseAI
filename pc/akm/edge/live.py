@@ -40,7 +40,8 @@ def overlay_lines(r: Recognition) -> list[tuple[str, tuple[int, int, int]]]:
 
 class LiveRecognizer:
     def __init__(self, grab_full, detector, ocr=None, period: float = 1.0, on_result=None,
-                 learn_dir: Path | None = None, learn_every: float = 30.0, learn_max: int = 500, log=print):
+                 learn_dir: Path | None = None, learn_every: float = 30.0, learn_max: int = 500, log=print,
+                 harvester=None):
         self.grab_full = grab_full      # () → 等倍の画面 (BGR)
         self.detector = detector        # akm.edge.objects.ObjectDetector
         self.ocr = ocr                  # akm.edge.ocr.OcrReader (無ければ名前は読まない)
@@ -50,7 +51,9 @@ class LiveRecognizer:
         self.learn_every = learn_every
         self.learn_max = learn_max
         self.log = log
+        self.harvester = harvester      # akm.edge.harvest.OcrHarvester (正解付きの文字の行を自動で集める)
         self.last = Recognition()
+        self.words = None
         self._last_save = 0.0
         self._stop = threading.Event()
         self._thread = None
@@ -73,6 +76,14 @@ class LiveRecognizer:
             from .target import read_target
 
             r.target = read_target(img, self.ocr)
+            if r.target is not None and r.target.name:
+                from .harvest import lexicon_fix, load_lexicon
+
+                if self.words is None:
+                    self.words = load_lexicon()
+                fixed, _ = lexicon_fix(r.target.name, self.words)
+                r.target.raw_name = r.target.name
+                r.target.name = fixed  # 辞書の名前に十分近ければ直す
         r.ms = (time.perf_counter() - t0) * 1000
         return r
 
@@ -91,6 +102,11 @@ class LiveRecognizer:
         img = self.grab_full()
         r = self.recognize(img)
         self._save(img)
+        if self.harvester is not None:
+            try:
+                self.harvester.feed(img, r.target)
+            except Exception as e:
+                self.log(f"[harvest] 失敗: {e}")
         if (r.helper, r.windows, getattr(r.target, "name", None)) != \
                 (self.last.helper, self.last.windows, getattr(self.last.target, "name", None)):
             parts = [f"Helper {'ON' if r.helper else 'OFF' if r.helper is False else '?'}",

@@ -23,6 +23,7 @@ class Target:
     hp_ratio: float | None            # 0..1 (おおよそ)
     bar: tuple[int, int, int, int]    # 赤い部分 x, y, w, h
     name_box: tuple[int, int, int, int]
+    raw_name: str = ""                # 辞書で直す前の読み
 
 
 def find_bar(img: np.ndarray) -> tuple[int, int, int, int] | None:

@@ -1221,3 +1221,39 @@ def test_learn_cycle_trains_when_enough_new_frames_and_reloads(tmp_path):
     c.round()  # 第 2 回: 文字認識も (前より悪ければ採用しない)
     assert calls[-1][:2] == ["tools/edge_train.py", "train"] and "--keep-better" in calls[-1]
     assert len(c.history) == 3 and (tmp_path / "models" / "learn_log.txt").exists()
+
+
+def test_lexicon_fix_and_harvester_only_saves_checked_labels(tmp_path):
+    from akm.edge.harvest import OcrHarvester, lexicon_fix, load_lexicon
+    from akm.edge.target import Target
+
+    words = load_lexicon()
+    assert lexicon_fix("Bahamvt", words) == ("Bahamut", True)
+    assert lexicon_fix("Dev1as", words) == ("Devias", True)
+    assert lexicon_fix("MsMu", words)[1] is False
+
+    class Ocr:
+        def __init__(self, text):
+            self.text = text
+
+        def read(self, img):
+            return self.text, 0.9
+
+    img = np.zeros((1050, 1680, 3), np.uint8)
+    t = {"now": 0.0}
+    # 先生 (Windows の OCR) の読みで現在地の正解を決める
+    h = OcrHarvester(tmp_path, Ocr("D: as(241,85)"), teacher=lambda im: "Devias (241, 85)", log=lambda *a: None,
+                     clock=lambda: t["now"])
+    assert h.location(img) == "Devias (241, 85)"
+    assert "Devias (241, 85)" in (tmp_path / "labels.tsv").read_text(encoding="utf-8")
+    # 書式に合わない / 知らないマップは保存しない
+    assert OcrHarvester(tmp_path, Ocr(""), teacher=lambda im: "hello", log=lambda *a: None).location(img) is None
+    # 相手の名前: 辞書に近く、先生も同じ語なら保存。先生が違う語なら保存しない
+    tg = Target("Bahamvt", "70", 0.9, (800, 66, 50, 10), (740, 30, 200, 30))
+    h.teacher = lambda im: "Bahamut"
+    assert h.target_name(img, tg) == "Bahamut"
+    h2 = OcrHarvester(tmp_path, Ocr(""), teacher=lambda im: "Balrog", log=lambda *a: None)
+    assert h2.target_name(img, tg) is None
+    # 先生がいないとき: 自分の読みが 3 回続けて同じときだけ
+    h3 = OcrHarvester(tmp_path / "b", Ocr("Icarus (50, 29)"), teacher=None, log=lambda *a: None)
+    assert [h3.location(img) for _ in range(3)] == [None, None, "Icarus (50, 29)"]

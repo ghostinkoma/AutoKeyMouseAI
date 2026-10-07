@@ -1,0 +1,92 @@
+# 文字認識の辞書 (1 行 1 語)。読み取った名前がこの中の語に十分近ければ、その語に直す。
+# 自動で集める見本 (akm/edge/harvest.py) は、この辞書か Windows の OCR と一致したものだけ正解として使う。
+# 自由に追加してよい (サーバー独自のモンスター名など)。マップ名は akm/maploc.py の KNOWN_MAPS も使う。
+Spider
+Budge Dragon
+Bull Fighter
+Hound
+Elite Bull Fighter
+Lich
+Giant
+Skeleton Warrior
+Goblin
+Chain Scorpion
+Beetle Monster
+Hunter
+Forest Monster
+Agon
+Stone Golem
+Elite Goblin
+Yeti
+Elite Yeti
+Ice Monster
+Worm
+Hommerd
+Ice Queen
+Larva
+Cyclops
+Gorgon
+Dark Knight
+Ghost
+Poison Bull
+Thunder Lich
+Iron Wheel
+Tantalos
+Beam Knight
+Death Gorgon
+Zaikan
+Bahamut
+Vepar
+Valkyrie
+Lizard King
+Hydra
+Great Bahamut
+Silver Valkyrie
+Death Knight
+Balrog
+Death Cow
+Devil
+Shadow
+Poison Shadow
+Cursed Wizard
+Alquamos
+Queen Rainier
+Mega Crust
+Phantom Knight
+Drakan
+Alpha Crust
+Great Drakan
+Phoenix of Darkness
+Metal Balrog
+Gigantis
+Berserker
+Splinter Wolf
+Iron Rider
+Satyros
+Blade Hunter
+Kentauros
+Gigas Golem
+Genocider
+Persona
+Twin Tale
+Dreadfear
+Dark Elf
+Balram
+Soram
+Death Spirit
+Death Angel
+Death Centurion
+Necron
+Schriker
+Illusion of Kundun
+Kundun
+Silver Medal
+Gold Medal
+Jewel of Bless
+Jewel of Soul
+Jewel of Chaos
+Jewel of Life
+Jewel of Creation
+Zen
+Miss
+Tiffany
