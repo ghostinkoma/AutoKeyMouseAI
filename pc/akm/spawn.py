@@ -24,7 +24,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS guide_maps (
     name TEXT PRIMARY KEY, source TEXT, updated REAL);
 CREATE TABLE IF NOT EXISTS guide_monsters (
-    map TEXT NOT NULL, monster TEXT NOT NULL, level INTEGER, source TEXT, updated REAL,
+    map TEXT NOT NULL, monster TEXT NOT NULL, level INTEGER, source TEXT, updated REAL, icon TEXT,
     PRIMARY KEY (map, monster));
 CREATE TABLE IF NOT EXISTS monster_areas (
     map TEXT NOT NULL, ax INTEGER NOT NULL, ay INTEGER NOT NULL, monster TEXT NOT NULL, level INTEGER,
@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS monster_areas (
 
 def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
+    if "icon" not in [r[1] for r in db.execute("PRAGMA table_info(guide_monsters)")]:
+        db.execute("ALTER TABLE guide_monsters ADD COLUMN icon TEXT")
 
 
 def similarity(a: str, b: str) -> float:
@@ -129,6 +131,155 @@ def parse_guide_text(text: str, known: list[str] | None = None) -> list[dict]:
     return out
 
 
+# <section id="map-guide-lorencia"> … </section> の形 (マップごとの区切り。中にモンスターのアイコン・名前・レベル)
+_SECTION_ID = re.compile(r"^map-?guide-?(.+)$", re.I)
+_LABELS = {"lv", "lvl", "level", "hp", "life", "exp", "monster", "monsters", "name", "icon", "map", "maps", "drop",
+           "drops", "location", "spawn", "spawns", "boss", "bosses", "image", "type", "def", "defense", "attack",
+           "dmg", "damage", "info", "guide", "zone", "area", "coords", "coordinates"}
+_LV_TOKEN = re.compile(r"(?:lv|lvl|level)\s*[.:]?\s*(\d{1,3})", re.I)
+
+
+class _SectionWalker:
+    """HTML を読み、map-guide の section ごとに (見出し, [('img', src, alt) | ('text', 文字)]) を集める。"""
+
+    def __init__(self):
+        from html.parser import HTMLParser
+
+        walker = self
+        self.sections: list[dict] = []
+        self._cur: dict | None = None
+        self._depth = 0
+        self._in_heading = False
+
+        class P(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                walker.start(tag, dict(attrs))
+
+            def handle_startendtag(self, tag, attrs):
+                walker.start(tag, dict(attrs))
+                if tag == "section":
+                    walker.end(tag)
+
+            def handle_endtag(self, tag):
+                walker.end(tag)
+
+            def handle_data(self, data):
+                walker.data(data)
+
+        self.parser = P(convert_charrefs=True)
+
+    def start(self, tag, a):
+        if self._cur is None:
+            if tag == "section":
+                m = _SECTION_ID.match(a.get("id") or "")
+                if m:
+                    self._cur = {"slug": m.group(1), "heading": "", "items": []}
+                    self._depth = 1
+            return
+        if tag == "section":
+            self._depth += 1
+        elif tag in ("h1", "h2", "h3", "h4", "h5", "h6") and not self._cur["heading"]:
+            self._in_heading = True
+        elif tag == "img" and self._depth == 1:
+            src = a.get("src") or ""
+            if not src or src.startswith("data:"):  # 遅れて読み込む画像は data-src に本物がある
+                src = a.get("data-src") or a.get("data-original") or (a.get("srcset") or "").split(" ")[0] or src
+            self._cur["items"].append(("img", src, (a.get("alt") or a.get("title") or "").strip()))
+
+    def end(self, tag):
+        if self._cur is None:
+            return
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            self._in_heading = False
+        elif tag == "section":
+            self._depth -= 1
+            if self._depth == 0:
+                self.sections.append(self._cur)
+                self._cur = None
+
+    def data(self, d):
+        if self._cur is None or self._depth > 1:  # 入れ子の section (説明など) の文字は使わない
+            return
+        t = re.sub(r"\s+", " ", d).strip()
+        if not t:
+            return
+        if self._in_heading:
+            self._cur["heading"] += (" " if self._cur["heading"] else "") + t
+        else:
+            self._cur["items"].append(("text", t))
+
+    def feed(self, html: str) -> list[dict]:
+        self.parser.feed(html)
+        return self.sections
+
+
+def _name_like(t: str) -> bool:
+    t = t.strip(" :-–")
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z '\-.]{2,40}", t)) and t.lower().strip(" .") not in _LABELS
+
+
+def _section_map(sec: dict) -> str:
+    from .maploc import KNOWN_MAPS, normalize_map
+
+    slug = re.sub(r"[-_]+", " ", sec["slug"]).strip().title()
+    head = re.sub(r"\s*[\(\[].*$", "", sec["heading"]).strip(" :-–")
+    for cand in (slug, head):
+        n = normalize_map(cand) if cand else ""
+        if n in KNOWN_MAPS:
+            return n
+    return head if head and re.fullmatch(r"[A-Za-z][A-Za-z0-9 '\-]{1,40}", head) else slug
+
+
+def parse_guide_sections(html: str) -> list[dict]:
+    """<section id="map-guide-…"> ごとに、アイコン (img) と、その後に続く名前・レベルを組にする。
+
+    img の alt が名前ならそれを、そうでなければアイコンの後から次のアイコンまでの文字のうち名前らしい最初のものを名前、
+    "Lv 12" / "Level: 12" の数字 (無ければ 1〜400 の数字だけの文字) をレベルにする。アイコンの無い section は
+    「名前 (Lv 12)」などの行の形で読む。
+    """
+    out = []
+    for sec in _SectionWalker().feed(html):
+        mp = _section_map(sec)
+        items = sec["items"]
+        imgs = [i for i, it in enumerate(items) if it[0] == "img"]
+        if not imgs:
+            lines = "\n".join(it[1] for it in items if it[0] == "text")
+            out += [dict(r, map=mp) for r in parse_guide_text(mp + "\n" + lines, known=[mp])]
+            continue
+        for k, i in enumerate(imgs):
+            texts = [it[1] for it in items[i + 1:(imgs[k + 1] if k + 1 < len(imgs) else len(items))] if it[0] == "text"]
+            alt = items[i][2]
+            # img の alt が名前そのもの ("Cursed Wizard") ならそれを使う。"spider icon" のような説明なら後ろの文字から
+            if _name_like(alt) and not re.search(r"\b(icon|image|img|logo|picture|avatar)\b", alt, re.I):
+                name = alt
+            else:
+                name = next((t.strip(" :-–") for t in texts if _name_like(t)), None)
+            if name is None:
+                continue
+            lv = None
+            joined = " ".join(texts)
+            m = _LV_TOKEN.search(joined)
+            if m:
+                lv = int(m.group(1))
+            else:
+                nums = [int(t) for t in texts if re.fullmatch(r"\d{1,3}", t) and 1 <= int(t) <= 400]
+                lv = nums[0] if nums else None
+            out.append({"map": mp, "monster": name, "level": lv, "icon": items[i][1]})
+    uniq = {}
+    for r in out:
+        uniq.setdefault((r["map"], r["monster"]), r)
+    return list(uniq.values())
+
+
+def section_html(html: str, key: str) -> str | None:
+    """id に key を含む map-guide の section の HTML (確認用)。"""
+    m = re.search(r'<section[^>]*id=["\']map-?guide-?[^"\']*' + re.escape(key) + r'[^"\']*["\'][^>]*>', html, re.I)
+    if not m:
+        return None
+    end = html.find("</section>", m.end())
+    return html[m.start(): end + 10 if end >= 0 else m.start() + 6000]
+
+
 def save_guide(db: sqlite3.Connection, rows: list[dict], source: str = GUIDE_URL) -> tuple[int, int]:
     """ガイドの内容を保存する。モンスター一覧 (monsters) とマップ名の辞書 (map_names) にも入れる。"""
     from .monsters import ensure_schema as ensure_monsters
@@ -140,13 +291,14 @@ def save_guide(db: sqlite3.Connection, rows: list[dict], source: str = GUIDE_URL
     db.executemany("INSERT INTO guide_maps(name, source, updated) VALUES (?,?,?) "
                    "ON CONFLICT(name) DO UPDATE SET source=excluded.source, updated=excluded.updated",
                    [(m, source, now) for m in maps])
-    db.executemany("INSERT INTO guide_monsters(map, monster, level, source, updated) VALUES (?,?,?,?,?) "
+    db.executemany("INSERT INTO guide_monsters(map, monster, level, source, updated, icon) VALUES (?,?,?,?,?,?) "
                    "ON CONFLICT(map, monster) DO UPDATE SET level=COALESCE(excluded.level, guide_monsters.level), "
-                   "source=excluded.source, updated=excluded.updated",
-                   [(r["map"], r["monster"], r["level"], source, now) for r in rows])
-    db.executemany("INSERT INTO monsters(name, level, map, map_en, source, updated) VALUES (?,?,?,?, 'guide:rexmu', ?) "
-                   "ON CONFLICT(name, map) DO UPDATE SET level=COALESCE(monsters.level, excluded.level), updated=excluded.updated",
-                   [(r["monster"], r["level"], r["map"], r["map"], now) for r in rows])
+                   "source=excluded.source, updated=excluded.updated, icon=COALESCE(excluded.icon, guide_monsters.icon)",
+                   [(r["map"], r["monster"], r["level"], source, now, r.get("icon") or None) for r in rows])
+    db.executemany("INSERT INTO monsters(name, level, map, map_en, source, updated, icon) VALUES (?,?,?,?, 'guide:rexmu', ?, ?) "
+                   "ON CONFLICT(name, map) DO UPDATE SET level=COALESCE(monsters.level, excluded.level), "
+                   "updated=excluded.updated, icon=COALESCE(NULLIF(excluded.icon, ''), monsters.icon)",
+                   [(r["monster"], r["level"], r["map"], r["map"], now, r.get("icon") or "") for r in rows])
     # 英字だけのマップ名は、画面右下の現在地の読みでも既知のマップとして扱う
     db.execute("CREATE TABLE IF NOT EXISTS map_names (name TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', "
                "reviewed INTEGER NOT NULL DEFAULT 0, raw TEXT, reads INTEGER NOT NULL DEFAULT 0, first_seen REAL, "

@@ -4,6 +4,12 @@
     python tools\\import_map_guide.py --dump             取り込まずに、読み取れた内容を表示するだけ (確認用)
     python tools\\import_map_guide.py --file page.html   ブラウザで「名前を付けて保存」した HTML から
     python tools\\import_map_guide.py --text page.txt    ブラウザで全選択 (Ctrl+A) → コピーして貼った文字から
+    python tools\\import_map_guide.py --section lorencia  <section id="map-guide-…lorencia…"> の HTML をそのまま表示
+                                                       (読み取りがおかしいとき、これを見せてもらえれば読み方を合わせます)
+    python tools\\import_map_guide.py --no-icons         アイコン画像を取得しない
+
+読み取りの順番: <section id="map-guide-マップ名"> (アイコン・名前・レベル) → 表 (<table>) → 文字の並び。
+アイコンは DB と同じフォルダの monster_icons\\ に保存し、ビューアのモンスター一覧に付く。
 
 取り込むもの:
   guide_maps / guide_monsters   ガイドのマップとモンスター・レベル (認識した名前との照合に使う)
@@ -20,7 +26,7 @@ from pathlib import Path
 import _path  # noqa: F401
 
 from akm.config import PC_DIR, load_config
-from akm.spawn import GUIDE_URL, parse_guide_tables, parse_guide_text, save_guide
+from akm.spawn import GUIDE_URL, parse_guide_sections, parse_guide_tables, parse_guide_text, save_guide, section_html
 
 
 def html_to_text(html: str) -> str:
@@ -48,6 +54,8 @@ def main() -> None:
     ap.add_argument("--file", help="保存した HTML ファイル")
     ap.add_argument("--text", help="ページの文字をコピーして保存したテキスト")
     ap.add_argument("--dump", action="store_true", help="取り込まずに内容を表示する")
+    ap.add_argument("--section", help="id にこの文字を含む map-guide の section の HTML を表示する (確認用)")
+    ap.add_argument("--no-icons", action="store_true", help="アイコン画像を取得しない")
     args = ap.parse_args()
 
     if args.text:
@@ -66,9 +74,22 @@ def main() -> None:
             r.encoding = r.apparent_encoding or "utf-8"
             html = r.text
             src = args.url
-        rows = parse_guide_tables(html)
+        if args.section:
+            sec = section_html(html, args.section)
+            if sec is None:
+                import re
+
+                ids = re.findall(r'<section[^>]*id=["\']([^"\']+)', html)
+                print(f"[guide] id に {args.section!r} を含む map-guide の section がありません。section の id: {ids[:40]}")
+            else:
+                print(sec[:8000] + ("\n… (以下略)" if len(sec) > 8000 else ""))
+            return
+        rows, how = parse_guide_sections(html), "section"
+        if not rows:
+            rows, how = parse_guide_tables(html), "表"
         if not rows:  # 表になっていないページ: 文字から読む
-            rows = parse_guide_text(html_to_text(html))
+            rows, how = parse_guide_text(html_to_text(html)), "文字"
+        print(f"[guide] 読み取り方: {how}")
     # 同じマップ・同じモンスターは 1 つに
     uniq = {}
     for r in rows:
@@ -76,10 +97,12 @@ def main() -> None:
     rows = list(uniq.values())
 
     per_map = Counter(r["map"] for r in rows)
-    print(f"[guide] {src}: マップ {len(per_map)} 個、モンスター {len(rows)} 件")
+    print(f"[guide] {src}: マップ {len(per_map)} 個、モンスター {len(rows)} 件 (アイコンあり {sum(1 for r in rows if r.get('icon'))}。"
+          "一覧の * がアイコンあり)")
     for mp, n in sorted(per_map.items()):
         mons = [r for r in rows if r["map"] == mp]
-        print(f"  {mp} ({n}): " + ", ".join(f"{r['monster']} Lv{r['level'] or '?'}" for r in mons[:8])
+        print(f"  {mp} ({n}): " + ", ".join(f"{r['monster']} Lv{r['level'] or '?'}{'*' if r.get('icon') else ''}"
+                                            for r in mons[:8])
               + (" …" if n > 8 else ""))
     if not rows:
         print("[guide] マップとモンスターを読み取れませんでした。")
@@ -103,6 +126,15 @@ def main() -> None:
     cfg = load_config("config.yaml") if (PC_DIR / "config.yaml").exists() else {}
     db_path = PC_DIR / ((cfg.get("maplog") or {}).get("db", "data/mu_map.db"))
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not args.no_icons and any(r.get("icon") for r in rows):
+        from akm.monsters import download_icons
+
+        base = args.url if not args.file else GUIDE_URL
+        n = download_icons(rows, base, db_path.parent / "monster_icons")
+        print(f"[guide] アイコンを {n} 枚取得しました ({db_path.parent / 'monster_icons'})")
+    else:
+        for r in rows:
+            r["icon"] = ""
     con = sqlite3.connect(str(db_path))
     try:
         n_maps, n_mons = save_guide(con, rows, src)

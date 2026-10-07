@@ -1523,3 +1523,31 @@ def test_map_guide_parsing_and_spawn_area_registration(tmp_path):
     assert reg.register("Yeti", 30, Location("Atlans", 10, 10), 5.0).in_map is False
     # ガイドのモンスターはビューアの一覧にも入る
     assert con.execute("SELECT level FROM monsters WHERE name='Vepar' AND map_en='Atlans'").fetchone() == (45,)
+
+
+def test_map_guide_sections_with_icons():
+    from akm.spawn import parse_guide_sections, section_html
+
+    html = """<html><body><nav>Maps</nav>
+    <section id="map-guide-lorencia" class="map"><h2>Lorencia <small>(Lv 1-15)</small></h2>
+      <div class="grid">
+        <div class="card"><img src="/img/monsters/spider.png" alt="spider icon"><div class="name">Spider</div>
+          <div class="lv">Lv. 2</div></div>
+        <div class="card"><img src="data:image/gif;base64,R0lG" data-src="/img/monsters/budge.png">
+          <div><b>Budge Dragon</b></div><span>Level: 4</span><span>HP 80</span></div>
+      </div></section>
+    <section id="map-guide-lost-tower"><h3>Lost Tower</h3><table>
+      <tr><th>Icon</th><th>Monster</th><th>Level</th></tr>
+      <tr><td><img src="shadow.webp"></td><td>Shadow</td><td>47</td></tr>
+      <tr><td><img src="cursed.webp" alt="Cursed Wizard"></td><td></td><td>54</td></tr></table>
+      <section id="sub"><p>Tips</p></section></section>
+    <section id="mapguide_atlans"><h2>Atlans</h2><ul><li>Bahamut (Lv 43)</li><li>Vepar - Lv 45</li></ul></section>
+    </body></html>"""
+    rows = {(r["map"], r["monster"], r["level"], r.get("icon")) for r in parse_guide_sections(html)}
+    assert rows == {
+        ("Lorencia", "Spider", 2, "/img/monsters/spider.png"),
+        ("Lorencia", "Budge Dragon", 4, "/img/monsters/budge.png"),   # 遅れて読み込む画像 (data-src)
+        ("Lost Tower", "Shadow", 47, "shadow.webp"),
+        ("Lost Tower", "Cursed Wizard", 54, "cursed.webp"),          # 名前が alt にしか無い
+        ("Atlans", "Bahamut", 43, None), ("Atlans", "Vepar", 45, None)}  # アイコンの無い section は行の形で
+    assert section_html(html, "lost").startswith('<section id="map-guide-lost-tower">')
