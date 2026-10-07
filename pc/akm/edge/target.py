@@ -24,6 +24,7 @@ class Target:
     bar: tuple[int, int, int, int]    # 赤い部分 x, y, w, h
     name_box: tuple[int, int, int, int]
     raw_name: str = ""                # 辞書で直す前の読み
+    conf: float = 0.0                 # 名前の文字認識の確信度 (各文字の確率の最小値)
 
 
 def find_bar(img: np.ndarray) -> tuple[int, int, int, int] | None:
@@ -74,10 +75,10 @@ def read_target(img: np.ndarray, ocr) -> Target | None:
     # 名前: バーの上 (バーの左から右へ広めに)
     nx0, nx1 = max(0, int(x - 60 * s)), min(img.shape[1], int(x + max(full, 120 * s) + 60 * s))
     ny0, ny1 = max(0, int(y - 32 * s)), max(1, int(y - 3 * s))
-    name, _ = ocr.read(img[ny0:ny1, nx0:nx1]) if ny1 - ny0 >= 4 else ("", 0.0)
+    name, conf = ocr.read(img[ny0:ny1, nx0:nx1]) if ny1 - ny0 >= 4 else ("", 0.0)
     # レベル: バーの左の箱
     lx0, lx1 = max(0, int(x - 48 * s)), max(1, int(x - 2 * s))
     ly0, ly1 = max(0, int(y - 8 * s)), int(y + h + 8 * s)
     level, _ = ocr.read(img[ly0:ly1, lx0:lx1]) if lx1 - lx0 >= 4 else ("", 0.0)
     level = "".join(c for c in level if c.isdigit())
-    return Target(name.strip(), level, hp, bar, (nx0, ny0, nx1 - nx0, ny1 - ny0))
+    return Target(name.strip(), level, hp, bar, (nx0, ny0, nx1 - nx0, ny1 - ny0), conf=conf)

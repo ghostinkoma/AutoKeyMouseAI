@@ -1215,12 +1215,13 @@ def test_learn_cycle_trains_when_enough_new_frames_and_reloads(tmp_path):
         (frames / f"f{i}.png").write_bytes(b"x")
     assert c.due()
     c.round()  # 第 1 回: 窓・アイコンだけ
-    assert calls == [["tools/edge_objects.py", "train"]] and reloaded == [1] and not c.due()
+    assert calls == [["tools/edge_objects.py", "train"], ["tools/record_filter.py", "train"]]
+    assert reloaded == [1] and not c.due()
     for i in range(3, 6):
         (frames / f"f{i}.png").write_bytes(b"x")
     c.round()  # 第 2 回: 文字認識も (前より悪ければ採用しない)
-    assert calls[-1][:2] == ["tools/edge_train.py", "train"] and "--keep-better" in calls[-1]
-    assert len(c.history) == 3 and (tmp_path / "models" / "learn_log.txt").exists()
+    assert calls[-2][:2] == ["tools/edge_train.py", "train"] and "--keep-better" in calls[-2]
+    assert len(c.history) == 5 and (tmp_path / "models" / "learn_log.txt").exists()
 
 
 def test_lexicon_fix_and_harvester_only_saves_checked_labels(tmp_path):
@@ -1257,3 +1258,67 @@ def test_lexicon_fix_and_harvester_only_saves_checked_labels(tmp_path):
     # 先生がいないとき: 自分の読みが 3 回続けて同じときだけ
     h3 = OcrHarvester(tmp_path / "b", Ocr("Icarus (50, 29)"), teacher=None, log=lambda *a: None)
     assert [h3.location(img) for _ in range(3)] == [None, None, "Icarus (50, 29)"]
+
+
+def test_record_filter_separates_good_and_bad_readings():
+    from akm.edge.harvest import load_lexicon
+    from akm.record_filter import Candidate, RecordFilter, synth_dataset, train_model
+
+    words = load_lexicon()
+    X, y = synth_dataset(6000, words, seed=3)
+    Xt, yt = synth_dataset(1500, words, seed=4)
+    m = train_model(X, y, epochs=250)
+    assert ((m.prob(Xt) >= 0.5) == yt).mean() > 0.93
+    f = RecordFilter(m)
+    good = Candidate("monster", "Budge Drag0n", "Budge Dragon", conf=0.9, in_lex=True, repeat=0.8, level="6", hp_ok=True)
+    junk = Candidate("monster", "x;|q:", "x;|q:", conf=0.2, repeat=0.2)
+    assert f.judge(good)[0] == "ok" and f.judge(junk)[0] == "ng"
+    jumpy = Candidate("location", "Devias (241, 85)", "Devias (241, 85)", conf=0.3, in_lex=True, repeat=0.2,
+                      map_known=True, coord_ok=True, jump=80, teacher=0.0)
+    assert f.judge(jumpy)[0] != "ok"
+    # 同梱の学習済みモデルも読める
+    assert RecordFilter.load().model is not None
+
+
+def test_world_logger_records_location_and_sightings(tmp_path):
+    import sqlite3
+
+    from akm.edge.target import Target
+    from akm.record_filter import RecordFilter
+    from akm.world_log import WorldLogger
+
+    class Ocr:
+        text = "Devias (241, 85)"
+
+        def read(self, img):
+            return self.text, 0.9
+
+    class Rec:
+        target = None
+
+    t = {"now": 1000.0}
+    w = WorldLogger(tmp_path / "mu.db", RecordFilter.load(), loc_every=0, log=lambda *a: None, clock=lambda: t["now"])
+    img = np.zeros((1050, 1680, 3), np.uint8)
+    for i in range(3):
+        t["now"] += 1
+        w.feed(img, Rec(), Ocr())
+    assert w.current() is not None and w.current().map == "Devias"
+    # 相手を殴り続ける: 1 件にまとまり、monsters にも入る
+    rec = Rec()
+    for hp in (0.9, 0.6, 0.3):
+        t["now"] += 1
+        rec.target = Target("Budge Dragon", "6", hp, (0, 0, 1, 1), (0, 0, 1, 1), raw_name="Budge Drag0n", conf=0.85)
+        w.feed(img, rec, Ocr())
+    # でたらめな読みは登録しない
+    t["now"] += 20
+    rec.target = Target("x;|q:", "", None, (0, 0, 1, 1), (0, 0, 1, 1), raw_name="x;|q:", conf=0.1)
+    w.feed(img, rec, Ocr())
+    w.close()
+    con = sqlite3.connect(str(tmp_path / "mu.db"))
+    rows = con.execute("SELECT monster, level, map, x, y, reads, status, hp_min FROM sightings ORDER BY id").fetchall()
+    assert rows[0][:7] == ("Budge Dragon", 6, "Devias", 241, 85, 3, "ok") and abs(rows[0][7] - 0.3) < 1e-6
+    assert rows[1][6] == "ng"
+    assert con.execute("SELECT level, map_en, source FROM monsters WHERE name='Budge Dragon'").fetchone() == \
+        (6, "Devias", "sighting")
+    assert con.execute("SELECT COUNT(*) FROM positions").fetchone()[0] >= 1
+    assert con.execute("SELECT COUNT(*) FROM monsters WHERE name='x;|q:'").fetchone()[0] == 0

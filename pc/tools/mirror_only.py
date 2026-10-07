@@ -40,6 +40,8 @@ def main() -> None:
     ap.add_argument("--learn-every", type=float, default=30.0, help="画面を保存する間隔 (秒)")
     ap.add_argument("--train-every", type=int, default=60, help="新しい画面が何枚たまったら学習するか")
     ap.add_argument("--ocr-every", type=int, default=3, help="文字認識は何回に 1 回学習するか (0 でしない)")
+    ap.add_argument("--no-db", action="store_true",
+                    help="--recognize で読んだ現在地・相手の名前を DB (ビューアと共通の mu_map.db) に記録しない")
     ap.add_argument("--tolerance", type=int, default=16, help="ブロック差分方式の許容誤差 (大きいほど小さく粗い)")
     ap.add_argument("--max-ratio", type=float, default=1.5,
                     help="ブロック差分が JPEG の何倍までならそのまま送るか (大きくすると JPEG を使わない。99 で常にブロック差分)")
@@ -123,10 +125,32 @@ def main() -> None:
                 print(f"[harvest] 先生役の OCR が使えないので、自分の読みが続けて同じときだけ見本にします ({str(e).splitlines()[0]})")
             harvester = OcrHarvester(PC_DIR / "dataset" / "ocr_lines", ocr, teacher,
                                      loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]))
+        world = None
+        if args.recognize and ocr is not None and not args.no_db:
+            # 現在地と相手の名前を、正しい読みか AI (models/record_filter.npz) で判定してから DB に記録する
+            from akm.maploc import make_ocr
+            from akm.record_filter import MODEL as FILTER_MODEL, RecordFilter
+            from akm.world_log import WorldLogger
+
+            lcfg = cfg.get("maplog") or {}
+            wcfg = cfg.get("world_log") or {}
+            wteacher = None
+            try:
+                wteacher = make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd"))
+            except Exception:
+                pass
+            filt = RecordFilter.load(ok=float(wcfg.get("ok", 0.8)), ng=float(wcfg.get("ng", 0.3)))
+            world = WorldLogger(PC_DIR / lcfg.get("db", "data/mu_map.db"), filt, teacher=wteacher,
+                                loc_roi=lcfg.get("roi", [0.86, 0.955, 0.14, 0.045]))
+            print(f"[world] 現在地と相手の名前を {world.db_path} に記録します (判定 AI: "
+                  f"{'あり' if filt.model else 'なし → python tools/record_filter.py train で作成'}、"
+                  f"先生役の OCR: {'あり' if wteacher else 'なし'})。ビューア: java -jar viewer\\mapviewer.jar")
+            if not FILTER_MODEL.exists():
+                print("[world] 判定 AI のモデルがありません。規則で代わりに判定します")
         rec = LiveRecognizer(grab_full, det, ocr if args.recognize else None, period=args.recognize_every,
                              on_result=(lambda r: m.set_lines(base_lines + overlay_lines(r))) if args.recognize else None,
                              learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None,
-                             learn_every=args.learn_every, harvester=harvester)
+                             learn_every=args.learn_every, harvester=harvester, world=world)
         rec.start()
     cycle = None
     if args.auto_train:
@@ -140,6 +164,12 @@ def main() -> None:
                     rec.harvester.ocr = rec.ocr
             except FileNotFoundError:
                 pass
+            if rec.world is not None:
+                from akm.record_filter import RecordFilter
+
+                old = rec.world.filt
+                rec.world.filt = RecordFilter.load(ok=old.ok, ng=old.ng)
+                rec.world._words = None  # 承認された名前を辞書に入れ直す
 
         cycle = LearnCycle(PC_DIR, PC_DIR / "dataset" / "frames", every_frames=args.train_every,
                            ocr_every=args.ocr_every, reload=reload_models)
@@ -165,6 +195,9 @@ def main() -> None:
                 kinds += f"  認識 {rec.last.ms:.0f}ms"
             if rec is not None and rec.harvester is not None:
                 kinds += f"  文字の見本 +{rec.harvester.saved}"
+            if rec is not None and rec.world is not None:
+                st = rec.world.stats
+                kinds += f"  DB 目撃 登録{st['ok']}/保留{st['pending']}/除外{st['ng']} 位置{st['loc_ok']}"
             if cycle is not None:
                 kinds += ("  学習中…" if cycle.busy else
                           f"  次の学習まで {max(0, cycle.every_frames - cycle.new_frames())} 枚 (済 {cycle.rounds} 回)")

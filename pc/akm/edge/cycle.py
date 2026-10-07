@@ -4,6 +4,7 @@
   学習: 新しい画面が every_frames 枚たまったら、別のプロセスで学習する (優先度を下げてゲームの邪魔をしない)
           窓・アイコン: 毎回 (tools/edge_objects.py train)
           文字認識:     ocr_every 回に 1 回 (時間がかかるので)。評価用の実画面で前より悪ければ採用しない
+          登録の判定 AI: 毎回 (tools/record_filter.py train。ビューアで人が承認 / 却下した目撃も学ぶ)
   出力: models/*.npz と ESP32 用の firmware/AutoKeyMouse/edge_*_model.h を書き出す
   反映: 動いている認識 (LiveRecognizer) に新しいモデルを差し替える → また蓄積へ
 記録は models/learn_log.txt に 1 行ずつ残す。
@@ -90,6 +91,12 @@ class LearnCycle:
                     self._record(f"第 {n} 回 文字認識: {res2[-1][9:] if res2 else '出力しました'}")
                 else:
                     self._record(f"第 {n} 回 文字認識: 失敗 ({out2.strip().splitlines()[-1] if out2.strip() else code2})")
+            code3, out3 = self.runner([py, "tools/record_filter.py", "train"], self.pc)
+            res3 = [l for l in out3.splitlines() if l.startswith("[result]")]
+            if code3 == 0:
+                self._record(f"第 {n} 回 登録の判定 AI: {res3[-1][9:] if res3 else '出力しました'}")
+            else:
+                self._record(f"第 {n} 回 登録の判定 AI: 失敗 ({out3.strip().splitlines()[-1] if out3.strip() else code3})")
             if self.reload:
                 self.reload()
             self.log(f"[learn] 第 {n} 回を反映しました ({time.time() - t0:.0f} 秒)。また画面を貯めます")

@@ -22,6 +22,8 @@ class Recognition:
     windows: list[str] = field(default_factory=list)
     icons: list[str] = field(default_factory=list)
     target: object = None                       # akm.edge.target.Target
+    loc: object = None                          # 現在地 (akm.maploc.Location。world を渡したとき)
+    judge: tuple | None = None                  # 相手の名前の判定 ('ok' / 'pending' / 'ng', 確率)
     ms: float = 0.0
 
 
@@ -34,14 +36,17 @@ def overlay_lines(r: Recognition) -> list[tuple[str, tuple[int, int, int]]]:
     t = r.target
     if t is not None:
         hp = f" {t.hp_ratio * 100:.0f}%" if t.hp_ratio is not None else ""
-        lines.append((f"{t.name or '?'}" + (f" Lv{t.level}" if t.level else "") + hp, MAGENTA))
+        mark = {"ok": "", "pending": " ?", "ng": " x"}.get(r.judge[0], "") if r.judge else ""
+        lines.append((f"{t.name or '?'}" + (f" Lv{t.level}" if t.level else "") + hp + mark, MAGENTA))
+    if r.loc is not None:
+        lines.append((f"{r.loc.map} {r.loc.x},{r.loc.y}", GRAY))
     return lines
 
 
 class LiveRecognizer:
     def __init__(self, grab_full, detector, ocr=None, period: float = 1.0, on_result=None,
                  learn_dir: Path | None = None, learn_every: float = 30.0, learn_max: int = 500, log=print,
-                 harvester=None):
+                 harvester=None, world=None):
         self.grab_full = grab_full      # () → 等倍の画面 (BGR)
         self.detector = detector        # akm.edge.objects.ObjectDetector
         self.ocr = ocr                  # akm.edge.ocr.OcrReader (無ければ名前は読まない)
@@ -52,6 +57,7 @@ class LiveRecognizer:
         self.learn_max = learn_max
         self.log = log
         self.harvester = harvester      # akm.edge.harvest.OcrHarvester (正解付きの文字の行を自動で集める)
+        self.world = world              # akm.world_log.WorldLogger (現在地と相手を DB に記録する)
         self.last = Recognition()
         self.words = None
         self._last_save = 0.0
@@ -107,6 +113,14 @@ class LiveRecognizer:
                 self.harvester.feed(img, r.target)
             except Exception as e:
                 self.log(f"[harvest] 失敗: {e}")
+        if self.world is not None:
+            try:
+                self.world.feed(img, r, self.ocr)
+                r.loc = self.world.current()
+                if r.target is not None:
+                    r.judge = self.world.last_judge
+            except Exception as e:
+                self.log(f"[world] 記録に失敗: {e}")
         if (r.helper, r.windows, getattr(r.target, "name", None)) != \
                 (self.last.helper, self.last.windows, getattr(self.last.target, "name", None)):
             parts = [f"Helper {'ON' if r.helper else 'OFF' if r.helper is False else '?'}",

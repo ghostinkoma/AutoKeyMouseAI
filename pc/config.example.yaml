@@ -76,6 +76,12 @@ maplog:
   heartbeat_s: 10      # 止まっていてもこの間隔で位置を記録
   db: data/mu_map.db   # 記録先 (SQLite)
 
+# mirror_only --recognize で読んだ現在地・相手の名前を DB (maplog.db) に記録するときの判定 AI のしきい値
+# (models/record_filter.npz。python tools/record_filter.py train で作り直せる)
+world_log:
+  ok: 0.8              # これ以上なら登録
+  ng: 0.3              # これ未満なら登録しない。間は保留 (ビューアの「目撃一覧」で承認 / 却下)
+
 # OBS Studio のゲームキャプチャから画面をもらう (別の仮想デスクトップにゲームを置いても液晶に映し続けたい場合)
 #   1. OBS で「ソース +」→「ゲームキャプチャ」→ モード「特定のウィンドウをキャプチャ」→ MU (Main.exe) を選ぶ。
 #      ソース名を下の source と同じにする (既定の名前は「ゲームキャプチャ」)

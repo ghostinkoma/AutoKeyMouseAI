@@ -21,6 +21,7 @@ public final class MapPanel extends JPanel {
     private List<MapDb.Pos> trail = List.of();
     private List<MapDb.Spot> spots = List.of();
     private MapDb.Pos current;
+    private List<MapDb.Sighting> sightings = List.of();
     private double cell = 3.0;     // 1 マスのピクセル数
     private double offX = 10, offY = 10;
     private Point dragFrom;
@@ -83,6 +84,23 @@ public final class MapPanel extends JPanel {
         this.spots = spots;
         this.current = current;
         repaint();
+    }
+
+    /** 相手 (モンスター) を見かけた場所。同じ名前は 1 つの色の点で描く。 */
+    public void setSightings(List<MapDb.Sighting> s) {
+        if (!s.equals(sightings)) {
+            sightings = s;
+            repaint();
+        }
+    }
+
+    /** その近く (2 マス以内) で見かけたモンスターの名前。 */
+    public List<String> sightingsNear(int x, int y) {
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        for (MapDb.Sighting s : sightings)
+            if (s.x() != null && Math.abs(s.x() - x) <= 2 && Math.abs(s.y() - y) <= 2)
+                out.add(s.monster() + (s.level() == null ? "" : " Lv" + s.level()));
+        return new java.util.ArrayList<>(out);
     }
 
     public int visits(int x, int y) {
@@ -157,6 +175,13 @@ public final class MapPanel extends JPanel {
                 if (Math.abs(a.x() - b.x()) > 6 || Math.abs(a.y() - b.y()) > 6) continue; // ワープは結ばない
                 g.drawLine(cx(a.x()), cy(a.y()), cx(b.x()), cy(b.y()));
             }
+        }
+        // 相手を見かけた場所 (名前ごとに色を変える)
+        for (MapDb.Sighting s : sightings) {
+            float hue = (s.monster().hashCode() & 0xffff) / 65536f;
+            g.setColor(Color.getHSBColor(hue, 0.75f, 1f));
+            int r = (int) Math.max(3, cell * 0.8);
+            g.fillRect(cx(s.x()) - r / 2, cy(s.y()) - r / 2, r, r);
         }
         // 登録地点 (狩場など)
         g.setStroke(new BasicStroke(2f));

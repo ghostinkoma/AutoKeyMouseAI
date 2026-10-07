@@ -27,6 +27,7 @@ import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
+import javax.swing.JTabbedPane;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.UIManager;
@@ -47,6 +48,8 @@ public final class MapViewer extends JFrame {
 
     private MapDb db;
     private final MapPanel panel = new MapPanel();
+    private final SightingsPanel sightingsPanel;
+    private final JTabbedPane tabs = new JTabbedPane();
     private final JComboBox<String> mapBox = new JComboBox<>();
     private final JCheckBox follow = new JCheckBox("現在地のマップを表示", true);
     private final JCheckBox center = new JCheckBox("現在地を中央に", false);
@@ -65,6 +68,10 @@ public final class MapViewer extends JFrame {
     public MapViewer(MapDb db) {
         super("MU Map Viewer - " + db.path);
         this.db = db;
+        sightingsPanel = new SightingsPanel(new SightingsPanel.MapViewerContext() {
+            @Override public MapDb db() { return MapViewer.this.db; }
+            @Override public void changed() { refresh(); }
+        });
         setDefaultCloseOperation(EXIT_ON_CLOSE);
 
         JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -114,11 +121,12 @@ public final class MapViewer extends JFrame {
         JPanel side = new JPanel(new BorderLayout());
         JPanel sp = spotPane;
         JScrollPane ep = new JScrollPane(new JList<>(events));
-        ep.setBorder(BorderFactory.createTitledBorder("出来事 (マップ移動・ワープ)"));
-        JSplitPane sideSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, sp, ep);
+        tabs.addTab("目撃 (相手の名前)", sightingsPanel);
+        tabs.addTab("出来事 (マップ移動・ワープ)", ep);
+        JSplitPane sideSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, sp, tabs);
         sideSplit.setResizeWeight(0.4);
         side.add(sideSplit, BorderLayout.CENTER);
-        side.setPreferredSize(new Dimension(430, 600));
+        side.setPreferredSize(new Dimension(560, 600));
 
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, panel, side);
         split.setResizeWeight(1.0);
@@ -132,8 +140,16 @@ public final class MapViewer extends JFrame {
         add(split, BorderLayout.CENTER);
         add(bottom, BorderLayout.SOUTH);
 
-        panel.onHover((x, y) -> hover.setText(x < 0 ? " " :
-                String.format("(%d, %d)  %s", x, y, panel.visits(x, y) > 0 ? "歩けるマス 訪問 " + panel.visits(x, y) + " 回" : "未記録")));
+        panel.onHover((x, y) -> {
+            if (x < 0) {
+                hover.setText(" ");
+                return;
+            }
+            List<String> near = panel.sightingsNear(x, y);
+            hover.setText(String.format("(%d, %d)  %s%s", x, y,
+                    panel.visits(x, y) > 0 ? "歩けるマス 訪問 " + panel.visits(x, y) + " 回" : "未記録",
+                    near.isEmpty() ? "" : "  見かけた: " + String.join(", ", near)));
+        });
         panel.onContext(this::contextMenu);
 
         setSize(1200, 860);
@@ -174,6 +190,10 @@ public final class MapViewer extends JFrame {
                 panel.fit();
                 fitted = true;
             }
+            panel.setSightings(db.sightingsOn(map, 3000));
+            sightingsPanel.refresh();
+            int pending = db.pendingSightings();
+            tabs.setTitleAt(0, pending > 0 ? "目撃 (相手の名前)  保留 " + pending : "目撃 (相手の名前)");
             if (center.isSelected() && cur != null && Objects.equals(cur.map(), map)) panel.centerOn(cur.x(), cur.y());
 
             lastPos = cur;
@@ -197,7 +217,7 @@ public final class MapViewer extends JFrame {
                 events.addElement(TIME.format(new Date((long) (e.ts() * 1000))) + "  " + e.kind() + "  " + where
                         + (e.detail() == null || e.detail().isEmpty() ? "" : "  " + e.detail()));
             }
-            status.setText(cur == null ? "まだ位置の記録がありません (python tools\\map_logger.py を実行してください)"
+            status.setText(cur == null ? "まだ位置の記録がありません (python tools\\mirror_only.py --recognize か tools\\map_logger.py を実行してください)"
                     : String.format("現在地: %s (%d, %d)  %s 更新   表示中: %s", cur.map(), cur.x(), cur.y(),
                     TIME.format(new Date((long) (cur.ts() * 1000))), map));
         } catch (SQLException ex) {

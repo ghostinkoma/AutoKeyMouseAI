@@ -23,6 +23,9 @@ public final class MapDb implements AutoCloseable {
         }
     }
     public record Event(double ts, String kind, String map, Integer x, Integer y, String detail) {}
+    /** 認識した相手の目撃 (Python の akm/world_log.py が書く)。status は ok / pending / ng、reviewed は人が判定したか。 */
+    public record Sighting(long id, double ts, double lastTs, String monster, String raw, Integer level, String map,
+                           Integer x, Integer y, Double hpMin, int reads, Double score, String status, boolean reviewed) {}
 
     private final Connection conn;
     public final String path;
@@ -327,6 +330,69 @@ public final class MapDb implements AutoCloseable {
             ps.executeUpdate();
         }
         if (hasTable("spot_monsters")) setSpotMonsters(id, List.of());
+    }
+
+    /** 目撃の一覧 (新しい順)。unchecked なら人がまだ見ていない保留・除外だけ (除外の中の正しい名前も拾えるように)。 */
+    public List<Sighting> sightings(boolean unchecked, int limit) throws SQLException {
+        List<Sighting> out = new ArrayList<>();
+        if (!hasTable("sightings")) return out;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT id, ts, last_ts, monster, raw, level, map, x, y, hp_min, reads, score, status, reviewed FROM sightings"
+                        + (unchecked ? " WHERE status!='ok' AND reviewed=0" : "")
+                        + " ORDER BY " + (unchecked ? "status='ng', " : "") + "ts DESC LIMIT ?")) {
+            ps.setInt(1, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next())
+                    out.add(new Sighting(rs.getLong(1), rs.getDouble(2), rs.getDouble(3), rs.getString(4), rs.getString(5),
+                            (Integer) rs.getObject(6), rs.getString(7), (Integer) rs.getObject(8), (Integer) rs.getObject(9),
+                            rs.getObject(10) == null ? null : rs.getDouble(10), rs.getInt(11),
+                            rs.getObject(12) == null ? null : rs.getDouble(12), rs.getString(13), rs.getInt(14) != 0));
+            }
+        }
+        return out;
+    }
+
+    public int pendingSightings() throws SQLException {
+        if (!hasTable("sightings")) return 0;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM sightings WHERE status='pending' AND reviewed=0")) {
+            return rs.next() ? rs.getInt(1) : 0;
+        }
+    }
+
+    /**
+     * 人が目撃を判定する。ok なら (name を直したならその名前で) monsters に足す。
+     * 判定は次の学習 (python tools\record_filter.py train) で「正解」として使われる。
+     */
+    public void reviewSighting(Sighting s, boolean ok, String name) throws Exception {
+        String n = name == null || name.isBlank() ? s.monster() : name.trim();
+        try (PreparedStatement ps = conn.prepareStatement("UPDATE sightings SET status=?, reviewed=1, monster=? WHERE id=?")) {
+            ps.setString(1, ok ? "ok" : "ng");
+            ps.setString(2, n);
+            ps.setLong(3, s.id());
+            ps.executeUpdate();
+        }
+        if (!ok) return;
+        ensureBuiltinMonsters(); // 表と列を用意
+        String map = s.map() == null ? "" : s.map();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO monsters(name, level, map, map_en, source, updated) VALUES (?,?,?,?,'sighting',?) "
+                        + "ON CONFLICT(name, map) DO UPDATE SET level=COALESCE(monsters.level, excluded.level), updated=excluded.updated")) {
+            ps.setString(1, n);
+            setInt(ps, 2, s.level());
+            ps.setString(3, map);
+            ps.setString(4, map);
+            ps.setDouble(5, System.currentTimeMillis() / 1000.0);
+            ps.executeUpdate();
+        }
+    }
+
+    /** そのマップで正しいと判定した目撃 (地図に印を付ける)。 */
+    public List<Sighting> sightingsOn(String map, int limit) throws SQLException {
+        List<Sighting> out = new ArrayList<>();
+        for (Sighting s : sightings(false, limit))
+            if (map != null && map.equals(s.map()) && "ok".equals(s.status()) && s.x() != null) out.add(s);
+        return out;
     }
 
     /** DB からの相対パスを絶対パスに (アイコンは DB と同じフォルダの monster_icons/ に保存される)。 */
