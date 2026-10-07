@@ -31,12 +31,15 @@ FRAME_DIRS = ["frames", "helper_state", "screens", "ui"]
 
 
 def frames(limit: int = 300) -> list[np.ndarray]:
+    """学習に使う画面: 新しいもの (直近の蓄積) を多めに、古いものからも少し。"""
     files = []
     for d in FRAME_DIRS:
         files += list((PC_DIR / "dataset" / d).rglob("*.png"))
-    random.Random(0).shuffle(files)
+    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    newest, older = files[:limit * 2 // 3], files[limit * 2 // 3:]
+    random.Random(0).shuffle(older)
     out = []
-    for f in files[:limit]:
+    for f in newest + older[:limit - len(newest)]:
         img = cv2.imread(str(f))
         if img is not None and img.shape[0] >= 300:
             out.append(img)
@@ -112,6 +115,7 @@ def cmd_train(args) -> None:
     q.save(MODEL)
     q.export_c(HEADER, name="edge_obj", note=f"窓・アイコン {len(objs)} 種: {', '.join(labels[:-1])}")
     print(f"[train] 学習した見本での正解率 {acc:.1%}。保存: {MODEL} と {HEADER}")
+    print(f"[result] objects adopted {acc:.4f} {len(Y)} {len(shots)}")
     if shots:
         d = ObjectDetector.load()
         for img in shots[:5]:

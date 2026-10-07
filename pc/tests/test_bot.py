@@ -1194,3 +1194,30 @@ def test_target_bar_found_and_live_overlay():
     assert r.helper is True and r.windows == ["inventory"] and got == [r]
     texts = [t for t, _ in overlay_lines(r)]
     assert texts == ["HELPER ON", "WIN: inventory"]
+
+
+def test_learn_cycle_trains_when_enough_new_frames_and_reloads(tmp_path):
+    from akm.edge.cycle import LearnCycle
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "old.png").write_bytes(b"x")  # 始めからある画面は学習済みとみなす
+    calls, reloaded = [], []
+
+    def runner(cmd, cwd):
+        calls.append(cmd[1:])
+        return 0, "[result] ok\n"
+
+    c = LearnCycle(tmp_path, frames, every_frames=3, ocr_every=2, reload=lambda: reloaded.append(1),
+                   runner=runner, log=lambda *a: None)
+    assert not c.due()
+    for i in range(3):
+        (frames / f"f{i}.png").write_bytes(b"x")
+    assert c.due()
+    c.round()  # 第 1 回: 窓・アイコンだけ
+    assert calls == [["tools/edge_objects.py", "train"]] and reloaded == [1] and not c.due()
+    for i in range(3, 6):
+        (frames / f"f{i}.png").write_bytes(b"x")
+    c.round()  # 第 2 回: 文字認識も (前より悪ければ採用しない)
+    assert calls[-1][:2] == ["tools/edge_train.py", "train"] and "--keep-better" in calls[-1]
+    assert len(c.history) == 3 and (tmp_path / "models" / "learn_log.txt").exists()

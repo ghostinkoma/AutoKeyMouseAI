@@ -35,10 +35,17 @@ def main() -> None:
     ap.add_argument("--learn", action="store_true",
                     help="等倍の画面をときどき dataset/frames に保存する (窓・アイコン・文字の学習の素材)")
     ap.add_argument("--recognize-every", type=float, default=1.0, help="認識の間隔 (秒)")
+    ap.add_argument("--auto-train", action="store_true",
+                    help="蓄積 → 学習 → 出力 → 反映 を自動で繰り返す (--recognize --learn を含む)")
+    ap.add_argument("--learn-every", type=float, default=30.0, help="画面を保存する間隔 (秒)")
+    ap.add_argument("--train-every", type=int, default=60, help="新しい画面が何枚たまったら学習するか")
+    ap.add_argument("--ocr-every", type=int, default=3, help="文字認識は何回に 1 回学習するか (0 でしない)")
     ap.add_argument("--tolerance", type=int, default=16, help="ブロック差分方式の許容誤差 (大きいほど小さく粗い)")
     ap.add_argument("--max-ratio", type=float, default=1.5,
                     help="ブロック差分が JPEG の何倍までならそのまま送るか (大きくすると JPEG を使わない。99 で常にブロック差分)")
     args = ap.parse_args()
+    if args.auto_train:
+        args.recognize = args.learn = True
     cfg = load_config("config.yaml")
     ask_obs_password(cfg, "config.yaml")
     screen = GameScreen.from_config(cfg)
@@ -104,8 +111,26 @@ def main() -> None:
               + (" / 等倍の画面を dataset/frames に保存します" if args.learn else ""))
         rec = LiveRecognizer(grab_full, det, ocr if args.recognize else None, period=args.recognize_every,
                              on_result=(lambda r: m.set_lines(base_lines + overlay_lines(r))) if args.recognize else None,
-                             learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None)
+                             learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None,
+                             learn_every=args.learn_every)
         rec.start()
+    cycle = None
+    if args.auto_train:
+        from akm.edge.cycle import LearnCycle
+
+        def reload_models():
+            rec.detector = ObjectDetector.load()  # 新しく登録した窓・アイコンも読み直す
+            try:
+                rec.ocr = OcrReader.load()
+            except FileNotFoundError:
+                pass
+
+        cycle = LearnCycle(PC_DIR, PC_DIR / "dataset" / "frames", every_frames=args.train_every,
+                           ocr_every=args.ocr_every, reload=reload_models)
+        cycle.start()
+        print(f"[learn] 自動学習: 画面を {args.learn_every:.0f} 秒ごとに保存し、新しい画面が {args.train_every} 枚"
+              f" (約 {args.learn_every * args.train_every / 60:.0f} 分) たまるたびに 学習 → 出力 → 反映 します"
+              f" (文字認識は {args.ocr_every} 回に 1 回)。記録: models/learn_log.txt")
     print(f"[mirror] {host} に毎秒 {1 / m.interval:.0f} 枚で送信中 ({m.fmt}) Ctrl+C で終了  (--fps で変更)")
     import requests
 
@@ -122,6 +147,9 @@ def main() -> None:
                     f"前フレーム不要・変化 {enc.changed_blocks}/510 ブロック" if m.b16_prev_free and enc else "面ごと")
             if rec is not None and rec.last.ms:
                 kinds += f"  認識 {rec.last.ms:.0f}ms"
+            if cycle is not None:
+                kinds += ("  学習中…" if cycle.busy else
+                          f"  次の学習まで {max(0, cycle.every_frames - cycle.new_frames())} 枚 (済 {cycle.rounds} 回)")
             print(f"[mirror] 送信 {m.sent} 枚  失敗 {m.errors}  {m.fps:.1f}fps  形式 {m.fmt}{kinds}  {m.last_bytes} バイト/枚  "
                   f"(PC: 撮影 {m.t_capture:.0f}ms 圧縮 {m.t_encode:.0f}ms 送信 {m.t_post:.0f}ms)")
             try:
@@ -140,6 +168,8 @@ def main() -> None:
     except KeyboardInterrupt:
         if rec is not None:
             rec.stop()
+        if cycle is not None:
+            cycle.stop()
 
 
 if __name__ == "__main__":

@@ -72,14 +72,15 @@ def edit_distance(a: str, b: str) -> int:
     return d[-1]
 
 
-def evaluate(reader: OcrReader, lines) -> float:
+def evaluate(reader: OcrReader, lines, quiet: bool = False) -> float:
     err = tot = 0
     for img, text in lines:
         got, _ = reader.read(img)
         want = text.replace(" ", "")
         err += edit_distance(got.replace(" ", ""), want)
         tot += len(want)
-        print(f"  {text!r:40s} → {got!r}")
+        if not quiet:
+            print(f"  {text!r:40s} → {got!r}")
     return 1 - err / max(1, tot)
 
 
@@ -133,6 +134,17 @@ def cmd_train(args) -> None:
         model = train(np.concatenate([X] + [RX] * rep), np.concatenate([F] + [RF] * rep),
                       np.concatenate([Y] + [RY] * rep), LABELS, hidden=args.hidden, epochs=args.epochs, log=log)
     q = model.quantize(X[:5000], F[:5000])
+    te = real_lines("test")
+    if args.keep_better and te and MODEL.exists():
+        # 評価用の実画面で前のモデルより悪くなったら採用しない (学習を繰り返しても悪くならないように)
+        old = evaluate(OcrReader.load(), te, quiet=True)
+        new = evaluate(OcrReader(q), te, quiet=True)
+        if new < old - 0.005:
+            print(f"[train] 新しいモデル {new:.1%} が前 {old:.1%} より悪いので採用しません")
+            print(f"[result] ocr kept {old:.4f} {new:.4f}")
+            return
+        print(f"[train] 採用: 実画面の評価 {old:.1%} → {new:.1%}")
+        print(f"[result] ocr adopted {old:.4f} {new:.4f}")
     MODEL.parent.mkdir(parents=True, exist_ok=True)
     q.save(MODEL)
     q.export_c(HEADER, note=f"合成 {len(Y)} 文字 + 実画面 {len(tr)} 行, 隠れ層 {args.hidden}")
@@ -205,6 +217,7 @@ def main() -> None:
     t.add_argument("--hidden", type=int, default=160)
     t.add_argument("--epochs", type=int, default=30)
     t.add_argument("-v", "--verbose", action="store_true")
+    t.add_argument("--keep-better", action="store_true", help="評価用の実画面で前のモデルより悪ければ保存しない")
     sub.add_parser("eval")
     r = sub.add_parser("read")
     r.add_argument("image")
