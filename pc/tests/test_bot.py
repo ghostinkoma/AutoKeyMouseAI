@@ -1148,3 +1148,49 @@ def test_ocr_reads_real_text_and_matches_esp32_inference():
     finally:
         exe.unlink(missing_ok=True)
     assert MODEL.exists()
+
+
+# ------------------------------------------------------------------ 窓・アイコン・相手の認識 --
+def test_object_detector_finds_registered_icons_at_any_scale():
+    from akm.edge.objects import ObjectDetector, load_objects
+
+    objs = {o.name: o for o in load_objects()}
+    assert {"helper_panel", "helper_running", "helper_stopped", "hunting_log"} <= set(objs)
+    det = ObjectDetector.load()
+    rng = np.random.default_rng(5)
+    bg = cv2.GaussianBlur(rng.integers(0, 255, (1050, 1680, 3), dtype=np.uint8), (0, 0), 5)
+    img = bg.copy()
+    p, st = objs["helper_panel"].image, objs["helper_stopped"].image
+    img[17:17 + p.shape[0], 60:60 + p.shape[1]] = p
+    img[21:21 + st.shape[0], 275:275 + st.shape[1]] = st
+    for scale in (0.7, 1.0, 1.3):  # 画面の大きさが違っても
+        im = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+        got = {d.name for d in det.detect(im) if d.present}
+        assert got == {"helper_panel", "helper_stopped"}, (scale, got)  # ■ と ▶ は同時に出ない (group)
+    assert not {d.name for d in det.detect(bg) if d.present}
+
+
+def test_target_bar_found_and_live_overlay():
+    from akm.edge.live import LiveRecognizer, overlay_lines
+    from akm.edge.target import find_bar
+
+    img = np.full((1050, 1680, 3), 40, np.uint8)
+    assert find_bar(img) is None
+    img[66:76, 780:900] = (20, 20, 200)   # 画面上部の赤い HP バー (BGR)
+    x, y, w, h = find_bar(img)
+    assert abs(x - 780) <= 1 and abs(w - 120) <= 2
+
+    class FakeDet:
+        def detect(self, img):
+            from akm.edge.objects import Detection
+
+            return [Detection("helper_running", "icon", True, 1.0, 1.0, (0, 0, 1, 1)),
+                    Detection("inventory", "window", True, 0.9, 0.9, (0, 0, 1, 1)),
+                    Detection("character", "window", False, 0.3, 0.0, (0, 0, 1, 1))]
+
+    got = []
+    rec = LiveRecognizer(lambda: img, FakeDet(), None, on_result=got.append, log=lambda *a: None)
+    r = rec.step()
+    assert r.helper is True and r.windows == ["inventory"] and got == [r]
+    texts = [t for t, _ in overlay_lines(r)]
+    assert texts == ["HELPER ON", "WIN: inventory"]

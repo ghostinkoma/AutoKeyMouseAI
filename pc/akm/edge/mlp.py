@@ -96,7 +96,7 @@ class QModel:
 
         labels = "".join(l if len(l) == 1 else "?" for l in self.labels)
         esc = labels.replace("\\", "\\\\").replace('"', '\\"')
-        txt = f"""// 自動生成: pc/tools/edge_train.py ({note})。手で編集しない
+        txt = f"""// 自動生成: pc/tools/edge_train.py / edge_objects.py ({note})。手で編集しない
 // 推論は edge_nn.h
 #pragma once
 #include <stdint.h>

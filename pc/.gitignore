@@ -6,3 +6,4 @@ dataset/
 models/*
 runs/
 !models/edge_ocr.npz
+!models/edge_obj.npz

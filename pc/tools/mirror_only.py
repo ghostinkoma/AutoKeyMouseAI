@@ -30,6 +30,11 @@ def main() -> None:
                     help="bad16 で各色を Gray 符号にしてから送る (可逆のまま 1 割強小さい。firmware frame-stream-10 以降)")
     ap.add_argument("--color", help="bad16 の色のビット数 R G B を 3 桁で (例 343 = 10 面, 342 = 9 面, 332 = 8 面)。"
                                     "--drop-bits より優先")
+    ap.add_argument("--recognize", action="store_true",
+                    help="縮小前の画面で窓・アイコン・相手の名前を認識し、液晶に重ねて表示する")
+    ap.add_argument("--learn", action="store_true",
+                    help="等倍の画面をときどき dataset/frames に保存する (窓・アイコン・文字の学習の素材)")
+    ap.add_argument("--recognize-every", type=float, default=1.0, help="認識の間隔 (秒)")
     ap.add_argument("--tolerance", type=int, default=16, help="ブロック差分方式の許容誤差 (大きいほど小さく粗い)")
     ap.add_argument("--max-ratio", type=float, default=1.5,
                     help="ブロック差分が JPEG の何倍までならそのまま送るか (大きくすると JPEG を使わない。99 で常にブロック差分)")
@@ -59,14 +64,48 @@ def main() -> None:
             bits = parse_color(mcfg.get("color", "343"))  # 既定: R3 G4 B3 (10 面)
     except ValueError as e:
         raise SystemExit(str(e))
+    import threading
+
+    shot_lock = threading.Lock()  # OBS への問い合わせはミラーと認識で同時にしない
+
+    def grab_preview():
+        with shot_lock:
+            return screen.grab_preview()
+
+    def grab_full():
+        with shot_lock:
+            return screen.grab()
+
     m = Mirror(host, 1.0 / max(0.5, args.fps), fmt=args.format or mcfg.get("format", "bad16"),
-               quality=int(mcfg.get("quality", 70)), grab=screen.grab_preview,
+               quality=int(mcfg.get("quality", 70)), grab=grab_preview,
                transport=mcfg.get("transport", "auto"), port=int(mcfg.get("port", 5005)),
                b16_bits=bits, b16_prev_free=not (args.with_prev or mcfg.get("with_prev", False)),
                b16_gray=args.gray or bool(mcfg.get("gray", False)))
     m.bc_tolerance = args.tolerance
     m.bc_max_ratio = args.max_ratio
-    m.set_lines([("MIRROR ONLY", (0, 200, 255))])
+    base_lines = [("MIRROR ONLY", (0, 200, 255))]
+    m.set_lines(base_lines)
+    rec = None
+    if args.recognize or args.learn:
+        from akm.config import PC_DIR
+        from akm.edge.live import LiveRecognizer, overlay_lines
+        from akm.edge.objects import ObjectDetector
+
+        det = ObjectDetector.load()
+        ocr = None
+        try:
+            from akm.edge.ocr import OcrReader
+
+            ocr = OcrReader.load()
+        except FileNotFoundError as e:
+            print(f"[recognize] {e}")
+        print(f"[recognize] 窓・アイコン {len(det.objects)} 種 ({', '.join(o.name for o in det.objects)})"
+              f"{'' if det.model else ' (ネット未学習: 一致度だけで判定)'} を {args.recognize_every:.1f} 秒ごとに等倍の画面で認識します"
+              + (" / 等倍の画面を dataset/frames に保存します" if args.learn else ""))
+        rec = LiveRecognizer(grab_full, det, ocr if args.recognize else None, period=args.recognize_every,
+                             on_result=(lambda r: m.set_lines(base_lines + overlay_lines(r))) if args.recognize else None,
+                             learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None)
+        rec.start()
     print(f"[mirror] {host} に毎秒 {1 / m.interval:.0f} 枚で送信中 ({m.fmt}) Ctrl+C で終了  (--fps で変更)")
     import requests
 
@@ -81,6 +120,8 @@ def main() -> None:
                 kinds = " (色 R{}G{}B{} = {} 面, {})".format(
                     *m.b16_bits, sum(m.b16_bits),
                     f"前フレーム不要・変化 {enc.changed_blocks}/510 ブロック" if m.b16_prev_free and enc else "面ごと")
+            if rec is not None and rec.last.ms:
+                kinds += f"  認識 {rec.last.ms:.0f}ms"
             print(f"[mirror] 送信 {m.sent} 枚  失敗 {m.errors}  {m.fps:.1f}fps  形式 {m.fmt}{kinds}  {m.last_bytes} バイト/枚  "
                   f"(PC: 撮影 {m.t_capture:.0f}ms 圧縮 {m.t_encode:.0f}ms 送信 {m.t_post:.0f}ms)")
             try:
@@ -97,7 +138,8 @@ def main() -> None:
             except Exception:
                 pass
     except KeyboardInterrupt:
-        pass
+        if rec is not None:
+            rec.stop()
 
 
 if __name__ == "__main__":

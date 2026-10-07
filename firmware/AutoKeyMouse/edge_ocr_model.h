@@ -1,4 +1,4 @@
-// 自動生成: pc/tools/edge_train.py (合成 23 万文字 + 実画面 17 行, 隠れ層 160。実画面の評価 83.1%)。手で編集しない
+// 自動生成: pc/tools/edge_train.py / edge_objects.py (合成 23 万文字 + 実画面 17 行, 隠れ層 160。実画面の評価 83.1%)。手で編集しない
 // 推論は edge_nn.h
 #pragma once
 #include <stdint.h>
