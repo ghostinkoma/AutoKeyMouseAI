@@ -228,6 +228,11 @@ class WorldLogger:
 
         raw = target.raw_name or target.name
         text, in_lex = lexicon_fix(raw, self.words)
+        here0 = self.current()
+        if here0 is not None and self.spawn is not None:  # マップガイドと一致すれば、その名前でまとめる
+            gm = self.spawn.match(raw, here0.map, int(target.level) if target.level.isdigit() else None)
+            if gm is not None:
+                text, in_lex = gm.monster, True
         self._name_hist.append(text)
         streak = 0  # 直前から続けて同じに読めた回数 (前の相手の読みで薄まらないように)
         for t in reversed(self._name_hist):
@@ -291,6 +296,17 @@ class WorldLogger:
             # 生の読みがマップガイドの名前と同じか 85% 以上似ていれば、その 10 マス一帯を出現エリアに
             m = self.spawn.register(raw, level, here, now)
             if m is not None:
+                # ガイドと一致した = 判定済み: 目撃をガイドの名前で確定し、モンスター一覧にも入れる (人の確認は要らない)
+                upd = db.execute("UPDATE sightings SET status='ok', monster=?, score=MAX(score, ?) "
+                                 "WHERE id=? AND reviewed=0 AND (status!='ok' OR monster!=?)",
+                                 (m.monster, m.ratio, sid, m.monster))
+                if upd.rowcount:
+                    add_monster_from_sighting(db, m.monster, level if level is not None else m.level, here.map)
+                    a = self.area_cells
+                    self.spawn.log(now, "confirm", here.map, here.x // a * a, here.y // a * a, m, level, raw,
+                                   f"目撃を確定 (判定 AI {sc:.2f}{' → ' + st if st != 'ok' else ''}, ガイド一致 {m.ratio:.0%})")
+                    self._cur["monster"] = m.monster
+                    st, sc = "ok", max(sc, m.ratio)
                 first = self.last_spawn is None or (self.last_spawn.monster, self.last_spawn_area) != (
                     m.monster, (here.map, here.x // self.area_cells, here.y // self.area_cells))
                 self.last_spawn, self.last_spawn_area = m, (here.map, here.x // self.area_cells, here.y // self.area_cells)

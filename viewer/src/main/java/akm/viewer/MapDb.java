@@ -373,6 +373,29 @@ public final class MapDb implements AutoCloseable {
         return out;
     }
 
+    /** 登録ログ (Python の akm/spawn.py が書く)。kind: area = 新しい出現エリア / confirm = ガイドと一致して目撃を確定。 */
+    public record SpawnLog(long id, double ts, String kind, String map, Integer ax, Integer ay, String monster,
+                           Integer level, Double ratio, String raw, String detail) {}
+
+    /** 新しい順に limit 件。afterId より新しいものだけ (0 で全部)。 */
+    public List<SpawnLog> spawnLog(long afterId, int limit) throws SQLException {
+        List<SpawnLog> out = new ArrayList<>();
+        if (!hasTable("spawn_log")) return out;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT id, ts, kind, map, ax, ay, monster, level, ratio, raw, detail FROM spawn_log WHERE id>? "
+                        + "ORDER BY id DESC LIMIT ?")) {
+            ps.setLong(1, afterId);
+            ps.setInt(2, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next())
+                    out.add(new SpawnLog(rs.getLong(1), rs.getDouble(2), rs.getString(3), rs.getString(4),
+                            (Integer) rs.getObject(5), (Integer) rs.getObject(6), rs.getString(7), (Integer) rs.getObject(8),
+                            rs.getObject(9) == null ? null : rs.getDouble(9), rs.getString(10), rs.getString(11)));
+            }
+        }
+        return out;
+    }
+
     /** 新しいマップの候補 (Python の world_log.py が知らないマップ名を読んだとき) と、手で登録したマップ。 */
     public record MapName(String name, String status, boolean reviewed, String raw, int reads, Double lastSeen, Integer x, Integer y) {}
 

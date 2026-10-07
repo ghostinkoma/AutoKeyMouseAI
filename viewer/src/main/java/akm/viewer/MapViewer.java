@@ -50,6 +50,7 @@ public final class MapViewer extends JFrame {
     private final MapPanel panel = new MapPanel();
     private final SightingsPanel sightingsPanel;
     private final MapsPanel mapsPanel;
+    private final SpawnLogPanel logPanel;
     private final JTabbedPane tabs = new JTabbedPane();
     private final JComboBox<String> mapBox = new JComboBox<>();
     private final JCheckBox follow = new JCheckBox("現在地のマップを表示", true);
@@ -75,6 +76,7 @@ public final class MapViewer extends JFrame {
         };
         sightingsPanel = new SightingsPanel(ctx);
         mapsPanel = new MapsPanel(ctx);
+        logPanel = new SpawnLogPanel(ctx);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
 
         JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -140,6 +142,7 @@ public final class MapViewer extends JFrame {
         JPanel side = new JPanel(new BorderLayout());
         JPanel sp = spotPane;
         JScrollPane ep = new JScrollPane(new JList<>(events));
+        tabs.addTab("登録ログ", logPanel);
         tabs.addTab("目撃 (相手の名前)", sightingsPanel);
         tabs.addTab("新しいマップ", mapsPanel);
         tabs.addTab("出来事 (マップ移動・ワープ)", ep);
@@ -216,9 +219,11 @@ public final class MapViewer extends JFrame {
             sightingsPanel.refresh();
             mapsPanel.refresh();
             int newMaps = db.pendingMaps();
-            tabs.setTitleAt(1, newMaps > 0 ? "新しいマップ  候補 " + newMaps : "新しいマップ");
+            tabs.setTitleAt(2, newMaps > 0 ? "新しいマップ  候補 " + newMaps : "新しいマップ");
             int pending = db.pendingSightings();
-            tabs.setTitleAt(0, pending > 0 ? "目撃 (相手の名前)  保留 " + pending : "目撃 (相手の名前)");
+            tabs.setTitleAt(1, pending > 0 ? "目撃 (相手の名前)  保留 " + pending : "目撃 (相手の名前)");
+            if (logPanel.refresh() > 0 && logPanel.latest() != null) hover.setText("登録: " + logPanel.latest());
+            tabs.setTitleAt(0, logPanel.unseen() > 0 ? "登録ログ  +" + logPanel.unseen() : "登録ログ");
             if (center.isSelected() && cur != null && Objects.equals(cur.map(), map)) panel.centerOn(cur.x(), cur.y());
 
             lastPos = cur;
@@ -264,7 +269,7 @@ public final class MapViewer extends JFrame {
             List<MapDb.Area> areas = panel.areasAt(x, y);
             if (!areas.isEmpty()) {
                 int ax = areas.get(0).ax(), ay = areas.get(0).ay();
-                JLabel h = new JLabel(String.format("  出現エリア (%d-%d, %d-%d)  ※マップガイドと 85%% 以上一致したもの", ax, ax + 9, ay, ay + 9));
+                JLabel h = new JLabel(String.format("  出現エリア (%d-%d, %d-%d)  ※マップガイドと一致して自動で登録したもの", ax, ax + 9, ay, ay + 9));
                 h.setFont(h.getFont().deriveFont(java.awt.Font.BOLD));
                 menu.add(h);
                 for (MapDb.Area a : areas)

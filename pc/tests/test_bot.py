@@ -1708,3 +1708,44 @@ def test_spawn_match_rates_on_rexmu_master():
         ok += m is not None and m.monster == r["monster"]
         bad += m is not None and m.monster != r["monster"]
     assert ok / n > 0.9 and bad / n < 0.01
+
+
+def test_guide_match_confirms_sighting_and_writes_spawn_log(tmp_path):
+    import sqlite3
+
+    from akm.edge.target import Target
+    from akm.record_filter import RecordFilter
+    from akm.spawn import save_guide
+    from akm.world_log import WorldLogger
+
+    db_path = tmp_path / "mu.db"
+    con = sqlite3.connect(str(db_path))
+    save_guide(con, [{"map": "Swamp of Calmness", "monster": m, "level": lv} for m, lv in
+                     (("Shadow Pawn", 214), ("Shadow Knight", 218), ("Shadow Look", 222), ("Sapi-Tres", 209))])
+    con.close()
+
+    class Ocr:
+        def read(self, img):
+            return "Swamp of Calmness (120, 45)", 0.9
+
+    class Rec:
+        target = None
+
+    t = {"now": 1000.0}
+    w = WorldLogger(db_path, RecordFilter.load(), loc_every=0, log=lambda *a: None, clock=lambda: t["now"])
+    img = np.zeros((1050, 1680, 3), np.uint8)
+    for _ in range(5):
+        t["now"] += 1
+        w.feed(img, Rec(), Ocr())
+    rec = Rec()
+    for raw in ("Sapi-Tr3s", "Sapl-Tres", "Sapi-Tr3s"):  # 判定 AI だけなら保留になりうる読み違い
+        t["now"] += 1
+        rec.target = Target(raw, "209", 0.5, (0, 0, 1, 1), (0, 0, 1, 1), raw_name=raw, conf=0.4)
+        w.feed(img, rec, Ocr())
+    w.close()
+    con = sqlite3.connect(str(db_path))
+    # ガイドと一致したので確定 (人の承認なし)、ガイドの名前で 1 件にまとまる
+    assert con.execute("SELECT monster, status, reads FROM sightings").fetchall() == [("Sapi-Tres", "ok", 3)]
+    assert con.execute("SELECT COUNT(*) FROM monsters WHERE name='Sapi-Tres' AND map_en='Swamp of Calmness'").fetchone()[0] == 1
+    log = con.execute("SELECT kind, map, ax, ay, monster FROM spawn_log ORDER BY id").fetchall()
+    assert ("area", "Swamp of Calmness", 120, 40, "Sapi-Tres") in log

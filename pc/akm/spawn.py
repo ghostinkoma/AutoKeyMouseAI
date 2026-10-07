@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS monster_areas (
     map TEXT NOT NULL, ax INTEGER NOT NULL, ay INTEGER NOT NULL, monster TEXT NOT NULL, level INTEGER,
     reads INTEGER NOT NULL DEFAULT 0, first_seen REAL, last_seen REAL, best_ratio REAL, in_guide_map INTEGER,
     PRIMARY KEY (map, ax, ay, monster));
+CREATE TABLE IF NOT EXISTS spawn_log (
+    id INTEGER PRIMARY KEY, ts REAL NOT NULL, kind TEXT NOT NULL, map TEXT, ax INTEGER, ay INTEGER, monster TEXT,
+    level INTEGER, ratio REAL, raw TEXT, detail TEXT);
+CREATE INDEX IF NOT EXISTS spawn_log_ts ON spawn_log(ts);
 """
 
 
@@ -441,6 +445,7 @@ class Match:
     map: str              # ガイドで載っているマップ
     ratio: float          # 読みとの似ている度合い (0..1)
     in_map: bool          # 今いるマップのモンスターとして載っているか
+    new_area: bool = False  # この区画にこのモンスターを初めて登録したか
 
 
 class SpawnRegistry:
@@ -505,6 +510,12 @@ class SpawnRegistry:
             best.in_map = any(mp.lower() == map_name.lower() and name == best.monster for mp, name, _ in self.guide)
         return best
 
+    def log(self, ts, kind, map_name, ax, ay, m: Match, level, raw, detail) -> None:
+        """登録ログ (ビューアの「登録ログ」タブに出る)。kind: area = 新しい出現エリア / confirm = 目撃を確定"""
+        self.db.execute("INSERT INTO spawn_log(ts, kind, map, ax, ay, monster, level, ratio, raw, detail) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (ts, kind, map_name, ax, ay, m.monster, level if level is not None else m.level, m.ratio, raw, detail))
+
     def register(self, raw: str, level: int | None, loc, ts: float | None = None) -> Match | None:
         """読みがガイドの名前と一致したら (上の 2 段の照合)、その場所の 10 マス一帯を出現エリアとして登録する。"""
         if loc is None or not self.guide:
@@ -514,6 +525,11 @@ class SpawnRegistry:
             return None
         ts = ts or time.time()
         ax, ay = loc.x // self.area * self.area, loc.y // self.area * self.area
+        m.new_area = self.db.execute("SELECT 1 FROM monster_areas WHERE map=? AND ax=? AND ay=? AND monster=?",
+                                     (loc.map, ax, ay, m.monster)).fetchone() is None
+        if m.new_area:
+            self.log(ts, "area", loc.map, ax, ay, m, level, raw,
+                     "新しい出現エリア" + ("" if m.in_map else f" (ガイドでは {m.map})"))
         self.db.execute(
             "INSERT INTO monster_areas(map, ax, ay, monster, level, reads, first_seen, last_seen, best_ratio, in_guide_map) "
             "VALUES (?,?,?,?,?,1,?,?,?,?) ON CONFLICT(map, ax, ay, monster) DO UPDATE SET reads=reads+1, "
