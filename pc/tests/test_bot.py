@@ -1071,3 +1071,80 @@ def test_button_model_learns_on_off_at_fixed_position(tmp_path):
     model.save(tmp_path / "templates" / "helper_button.npz")
     r = HelperStateReader(tmp_path).read(frame(off))
     assert r.state is False and r.how.startswith("学習した")
+
+
+# ------------------------------------------------------------------ エッジ AI (文字認識) --
+def _ocr_lines(split):
+    d = PC / "akm" / "data" / "ocr_lines"
+    out = []
+    for row in (d / "labels.tsv").read_text(encoding="utf-8").splitlines():
+        if row.startswith("#") or not row.strip():
+            continue
+        name, sp, text = row.split("\t", 2)
+        if sp == split:
+            out.append((cv2.imread(str(d / name)), text))
+    return out
+
+
+def test_glyph_segmentation_on_real_lines():
+    """実画面の行で、1 文字ずつ正しい数に切り出せる (きれいに切れる行)。"""
+    from akm.edge.glyphs import line_glyphs
+
+    good = {"Icarus (50, 29)", "Hunting Time", "Life: 2994 / 2994", "00:12:58", "02:05:44", "Devias (241, 85)",
+            "Silver Medal", "Tiffany", "Miss"}
+    seen = 0
+    for split in ("train", "test"):
+        for img, text in _ocr_lines(split):
+            if text in good:
+                seen += 1
+                assert len(line_glyphs(img)[0]) == len(text.replace(" ", "")), text
+    assert seen >= 8
+
+
+def test_align_handles_extra_and_missing_glyphs():
+    from akm.edge.align import align
+
+    K = 5
+    target = [1, 2, 3]
+    # 切り出し 4 つ: 0 番は背景の点、1..3 番が文字。正解の文字の確率を高くしておく
+    logp = np.full((4, K), np.log(0.01))
+    logp[1, 1] = logp[2, 2] = logp[3, 3] = np.log(0.9)
+    assert align(logp, target) == [(1, 0), (2, 1), (3, 2)]
+    # 1 文字切り出せていない
+    assert align(logp[[1, 3]], target) == [(0, 0), (1, 2)]
+
+
+def test_ocr_reads_real_text_and_matches_esp32_inference():
+    import shutil
+    import subprocess
+
+    from akm.edge.glyphs import line_glyphs
+    from akm.edge.ocr import MODEL, OcrReader
+
+    reader = OcrReader.load()
+    img = dict((t, i) for i, t in _ocr_lines("test"))["Devias (241, 85)"]  # 学習に使っていない実画面
+    assert reader.read(img)[0] == "Devias (241, 85)"
+    small = cv2.resize(img, None, fx=0.75, fy=0.75, interpolation=cv2.INTER_AREA)  # 画面が小さくても
+    assert reader.read(cv2.resize(img, None, fx=2, fy=2))[0].replace(" ", "") == "Devias(241,85)"
+    assert reader.read(small)[0]  # 何かしら読める (小さすぎると精度は落ちる)
+
+    gxx = shutil.which("g++")
+    if not gxx:
+        return
+    exe = PC / "tests" / "_edge_nn_test"
+    subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(PC / "tests" / "edge_nn_test.cpp")], check=True)
+    try:
+        bits, feats = [], []
+        for im, _ in _ocr_lines("train") + _ocr_lines("test"):
+            gl, _ = line_glyphs(im)
+            bits += [g.bits.ravel() for g in gl]
+            feats += [g.feats for g in gl]
+        bits = np.array(bits, np.uint8)
+        feats = np.array(feats, np.float32)
+        packed = np.packbits(bits, axis=1, bitorder="little")
+        inp = b"".join(packed[i].tobytes() + feats[i].astype("<f4").tobytes() for i in range(len(bits)))
+        out = subprocess.run([str(exe)], input=inp, capture_output=True, check=True).stdout.decode().split()
+        assert (np.array(out[0::2], int) == reader.m.predict(bits, feats)[0]).all()  # ESP32 と PC の答えが同じ
+    finally:
+        exe.unlink(missing_ok=True)
+    assert MODEL.exists()

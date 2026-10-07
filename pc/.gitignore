@@ -3,5 +3,6 @@ __pycache__/
 .venv/
 config.yaml
 dataset/
-models/
+models/*
 runs/
+!models/edge_ocr.npz

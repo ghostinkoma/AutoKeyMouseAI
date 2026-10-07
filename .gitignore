@@ -14,3 +14,4 @@ pc/tests/_bad16_decode_test*
 pc/native/libbad_encode.so
 pc/templates/helper_button.npz
 pc/templates/hunting_log.json
+tests/_edge_nn_test

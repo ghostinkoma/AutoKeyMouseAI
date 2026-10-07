@@ -1,0 +1,27 @@
+# 画像	用途 (train=学習 / test=評価だけ)	正解の文字列
+3_train_00.png	train	Icarus (50, 29)
+3_train_01.png	train	Obtained 764800 Exp
+3_train_02.png	train	Obtained 764800 Exp
+3_train_03.png	train	Obtained 764800 Exp
+3_train_04.png	train	Hunting Time
+3_train_05.png	train	Life: 2994 / 2994
+3_train_06.png	train	Normal DMG
+3_train_07.png	train	00:12:58
+3_train_08.png	train	Time to 400
+3_train_09.png	train	02:05:44
+3_train_10.png	train	ZESSTRA : [MARKET] Albatross Bow +9
+3_train_11.png	train	Goodnight : [MARKET] Spite Staff +8
+3_train_12.png	train	Goodnight : [MARKET] Sylph Wind Bow +7
+3_train_13.png	train	cedg : [SELL] Bone Blade +13
+3_train_14.png	train	naCHUPS : [REX-GLOBAL] HHAA
+3_train_15.png	train	Welcome to Rex Project
+3_train_16.png	train	Tiffany
+1_test_00.png	test	Devias (241, 85)
+1_test_01.png	test	Silver Medal
+1_test_02.png	test	Zen 1530
+1_test_03.png	test	Zen 1530
+1_test_04.png	test	Miss
+1_test_05.png	test	Tiffany
+1_test_06.png	test	Welcome to Rex Project
+1_test_07.png	test	1991 : [MARKET] Dark Master Pants
+1_test_08.png	test	Brunoh : [MARKET] Phantom Boots
