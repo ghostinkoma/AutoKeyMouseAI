@@ -1482,3 +1482,44 @@ def test_mirror_only_starts_with_auto_train_without_device(tmp_path, monkeypatch
     mo.main()
     assert made["mirror"].lines[0][0] == "MIRROR ONLY"
     assert (tmp_path / "data" / "mu_map.db").exists()  # 現在地・目撃の記録先を開いた
+
+
+def test_map_guide_parsing_and_spawn_area_registration(tmp_path):
+    import sqlite3
+
+    from akm.maploc import Location
+    from akm.spawn import SpawnRegistry, parse_guide_tables, parse_guide_text, save_guide
+
+    # 表の形 1: マップごとの見出し + 名前・レベルの表
+    html = """<h2>Lorencia</h2><table><tr><th>Monster</th><th>Level</th></tr>
+      <tr><td>Spider</td><td>2</td></tr><tr><td>Budge Dragon</td><td>4</td></tr></table>
+      <h2>Atlans</h2><table><tr><th>Icon</th><th>Name</th><th>Lv</th><th>HP</th></tr>
+      <tr><td></td><td>Bahamut</td><td>43</td><td>2400</td></tr><tr><td></td><td>Vepar</td><td>45</td><td>2700</td></tr></table>"""
+    rows = parse_guide_tables(html)
+    assert {(r["map"], r["monster"], r["level"]) for r in rows} == {
+        ("Lorencia", "Spider", 2), ("Lorencia", "Budge Dragon", 4), ("Atlans", "Bahamut", 43), ("Atlans", "Vepar", 45)}
+    # 表の形 2: 「マップ」列がある 1 つの表
+    html2 = """<table><tr><th>Map</th><th>Monster</th><th>Level</th></tr>
+      <tr><td>Devias</td><td>Yeti</td><td>30</td></tr><tr><td>Lost Tower, Dungeon</td><td>Shadow</td><td>47</td></tr></table>"""
+    assert {(r["map"], r["monster"]) for r in parse_guide_tables(html2)} == {
+        ("Devias", "Yeti"), ("Lost Tower", "Shadow"), ("Dungeon", "Shadow")}
+    # 文字の形 (ページを全選択してコピー)
+    text = "Map Guide\nNoria (Lv 1-20)\nGoblin (Lv 3)\nChain Scorpion Lv. 5\n\n## Icarus\n70 Alquamos\nQueen Rainier - Lv 75\n"
+    assert {(r["map"], r["monster"], r["level"]) for r in parse_guide_text(text)} == {
+        ("Noria", "Goblin", 3), ("Noria", "Chain Scorpion", 5), ("Icarus", "Alquamos", 70), ("Icarus", "Queen Rainier", 75)}
+
+    con = sqlite3.connect(str(tmp_path / "mu.db"))
+    assert save_guide(con, rows + parse_guide_tables(html2)) == (5, 7)
+    reg = SpawnRegistry(con)
+    # 同じ名前 / 85% 以上なら登録。10 マスの格子 (40-49, 60-69) の一帯
+    assert reg.register("Bahamut", 43, Location("Atlans", 45, 63), 1.0).monster == "Bahamut"
+    m = reg.register("Bahamvt", None, Location("Atlans", 41, 69), 2.0)   # 1 文字違い (86%)
+    assert m.monster == "Bahamut" and m.ratio >= 0.85 and m.in_map
+    assert reg.register("Bahanot", None, Location("Atlans", 45, 63), 3.0) is None  # 2 文字違い (71%) は登録しない
+    reg.register("Bahamut", 43, Location("Atlans", 50, 63), 4.0)  # 隣の区画
+    rows = con.execute("SELECT map, ax, ay, monster, reads, in_guide_map FROM monster_areas ORDER BY ax").fetchall()
+    assert rows == [("Atlans", 40, 60, "Bahamut", 2, 1), ("Atlans", 50, 60, "Bahamut", 1, 1)]
+    # ガイドで別のマップに載っているモンスターも登録するが、印 (in_guide_map = 0) を付ける
+    assert reg.register("Yeti", 30, Location("Atlans", 10, 10), 5.0).in_map is False
+    # ガイドのモンスターはビューアの一覧にも入る
+    assert con.execute("SELECT level FROM monsters WHERE name='Vepar' AND map_en='Atlans'").fetchone() == (45,)

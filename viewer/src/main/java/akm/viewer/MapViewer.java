@@ -212,6 +212,7 @@ public final class MapViewer extends JFrame {
                 fitted = true;
             }
             panel.setSightings(db.sightingsOn(map, 3000));
+            panel.setAreas(db.areas(map));
             sightingsPanel.refresh();
             mapsPanel.refresh();
             int newMaps = db.pendingMaps();
@@ -260,6 +261,17 @@ public final class MapViewer extends JFrame {
         menu.add(title);
         menu.addSeparator();
         try {
+            List<MapDb.Area> areas = panel.areasAt(x, y);
+            if (!areas.isEmpty()) {
+                int ax = areas.get(0).ax(), ay = areas.get(0).ay();
+                JLabel h = new JLabel(String.format("  出現エリア (%d-%d, %d-%d)  ※マップガイドと 85%% 以上一致したもの", ax, ax + 9, ay, ay + 9));
+                h.setFont(h.getFont().deriveFont(java.awt.Font.BOLD));
+                menu.add(h);
+                for (MapDb.Area a : areas)
+                    menu.add(new JLabel("    " + a.monster() + (a.level() == null ? "" : " Lv" + a.level()) + "  (読み " + a.reads() + " 回"
+                            + (a.inGuide() ? "" : ", ガイドでは別のマップ") + ")"));
+                menu.addSeparator();
+            }
             List<MapDb.NearMonster> near = db.monstersNear(shownMap, x, y, r);
             if (near.isEmpty()) menu.add(new JLabel("  (まだ記録がありません)"));
             for (MapDb.NearMonster m : near) {
@@ -275,6 +287,17 @@ public final class MapViewer extends JFrame {
                 List<String> target = spotMonsters.get(s.id());
                 if (target != null && !target.isEmpty())
                     menu.add(new JLabel("  狩場「" + s.name() + "」の狙い: " + String.join(", ", target)));
+            }
+            List<MapDb.GuideMonster> guide = db.guideMonsters(shownMap);
+            if (!guide.isEmpty()) {
+                menu.addSeparator();
+                StringBuilder sb = new StringBuilder();
+                for (MapDb.GuideMonster gm : guide) {
+                    if (sb.length() > 0) sb.append(", ");
+                    sb.append(gm.monster()).append(gm.level() == null ? "" : " " + gm.level());
+                }
+                String all = sb.toString();
+                menu.add(new JLabel("  ガイドの " + shownMap + " のモンスター: " + (all.length() > 110 ? all.substring(0, 110) + "…" : all)));
             }
         } catch (SQLException ex) {
             menu.add(new JLabel("  DB を読めません: " + ex.getMessage()));

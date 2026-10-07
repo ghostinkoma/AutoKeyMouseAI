@@ -22,6 +22,7 @@ public final class MapPanel extends JPanel {
     private List<MapDb.Spot> spots = List.of();
     private MapDb.Pos current;
     private List<MapDb.Sighting> sightings = List.of();
+    private List<MapDb.Area> areas = List.of();
     private double cell = 3.0;     // 1 マスのピクセル数
     private double offX = 10, offY = 10;
     private Point dragFrom;
@@ -111,6 +112,25 @@ public final class MapPanel extends JPanel {
         }
     }
 
+    /** 出現エリア (10 マス四方の区画ごとに、一番多く見たモンスターの色で塗る)。 */
+    public void setAreas(List<MapDb.Area> a) {
+        if (!a.equals(areas)) {
+            areas = a;
+            repaint();
+        }
+    }
+
+    /** そのマスを含む区画の出現モンスター (よく見た順)。 */
+    public List<MapDb.Area> areasAt(int x, int y) {
+        List<MapDb.Area> out = new java.util.ArrayList<>();
+        for (MapDb.Area a : areas) if (x >= a.ax() && x < a.ax() + 10 && y >= a.ay() && y < a.ay() + 10) out.add(a);
+        return out;
+    }
+
+    static Color monsterColor(String name) {
+        return Color.getHSBColor((name.hashCode() & 0xffff) / 65536f, 0.75f, 1f);
+    }
+
     /** その近く (2 マス以内) で見かけたモンスターの名前。 */
     public List<String> sightingsNear(int x, int y) {
         java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
@@ -193,10 +213,26 @@ public final class MapPanel extends JPanel {
                 g.drawLine(cx(a.x()), cy(a.y()), cx(b.x()), cy(b.y()));
             }
         }
+        // 出現エリア (マップガイドと照合して登録した 10 マス一帯)
+        java.util.Set<Long> painted = new java.util.HashSet<>();
+        g.setFont(getFont().deriveFont(Font.PLAIN, 11f));
+        for (MapDb.Area a : areas) {  // reads の多い順に並んでいる: 区画ごとに最初のもので塗る
+            long key = ((long) a.ax() << 16) | a.ay();
+            if (!painted.add(key)) continue;
+            Color c = monsterColor(a.monster());
+            int px = (int) (offX + a.ax() * cell), py = (int) (offY + a.ay() * cell), w = (int) Math.ceil(10 * cell);
+            g.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), 55));
+            g.fillRect(px, py, w, w);
+            g.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), 160));
+            g.drawRect(px, py, w, w);
+            if (w >= 70) {
+                long cnt = areas.stream().filter(b -> b.ax() == a.ax() && b.ay() == a.ay()).count();
+                g.drawString(a.monster() + (cnt > 1 ? " +" + (cnt - 1) : ""), px + 3, py + 13);
+            }
+        }
         // 相手を見かけた場所 (名前ごとに色を変える)
         for (MapDb.Sighting s : sightings) {
-            float hue = (s.monster().hashCode() & 0xffff) / 65536f;
-            g.setColor(Color.getHSBColor(hue, 0.75f, 1f));
+            g.setColor(monsterColor(s.monster()));
             int r = (int) Math.max(3, cell * 0.8);
             g.fillRect(cx(s.x()) - r / 2, cy(s.y()) - r / 2, r, r);
         }

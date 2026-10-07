@@ -60,7 +60,7 @@ class WorldLogger:
     def __init__(self, db_path: str | Path, filt: RecordFilter | None = None, teacher=None,
                  loc_roi=(0.86, 0.955, 0.14, 0.045), loc_every: float = 1.0, merge_s: float = 8.0,
                  here_s: float = 15.0, words: list[str] | None = None, log=print, clock=time.time,
-                 refresh_s: float = 30.0, area_cells: int = 10):
+                 refresh_s: float = 30.0, area_cells: int = 10, spawn_threshold: float = 0.85):
         self.db_path = Path(db_path)
         self.filt = filt or RecordFilter.load()
         self.teacher = teacher          # (画像) → 文字列 (Windows の OCR 等)。無ければ None
@@ -76,6 +76,10 @@ class WorldLogger:
         self._maps: list[str] = list(KNOWN_MAPS)
         self.refresh_s = refresh_s
         self._lists_ts = -1e9
+        self.spawn_threshold = spawn_threshold  # ガイドの名前とこれ以上似ていたら出現エリアに登録
+        self.spawn = None               # akm.spawn.SpawnRegistry (open で作る)
+        self.last_spawn = None          # 最後に登録した出現エリアの照合結果 (akm.spawn.Match)
+        self.last_spawn_area = None
         self.map: MapDB | None = None   # 認識のスレッドで開く (SQLite は開いたスレッドで使う)
         self.here: Location | None = None
         self.here_ts = 0.0
@@ -91,6 +95,9 @@ class WorldLogger:
         if self.map is None:
             self.map = MapDB(self.db_path)
             ensure_sightings(self.map.db)
+            from .spawn import SpawnRegistry
+
+            self.spawn = SpawnRegistry(self.map.db, self.spawn_threshold, self.area_cells)
             self.map.db.commit()
             self.here = self.map.latest()
             self.here_ts = 0.0
@@ -111,10 +118,11 @@ class WorldLogger:
         except sqlite3.Error:
             pass
         self._maps = sorted(maps)
+        self.spawn.reload()  # マップガイドを取り込み直したときのため
         if self._fixed_words is not None:
             self._words = sorted(set(self._fixed_words) | maps)
             return
-        w = set(load_lexicon()) | maps
+        w = set(load_lexicon()) | maps | set(self.spawn.names)  # マップガイドのモンスター名も辞書に
         for sql in ("SELECT DISTINCT monster FROM sightings WHERE status='ok' AND reviewed=1",
                     "SELECT DISTINCT name FROM monsters WHERE source IN ('manual', 'sighting')"):
             try:
@@ -275,6 +283,18 @@ class WorldLogger:
         st, sc, mp = db.execute("SELECT status, score, map FROM sightings WHERE id=?", (sid,)).fetchone()
         if st == "ok" and before != "ok":
             add_monster_from_sighting(db, text, level, mp)
+        if here is not None:
+            # 生の読みがマップガイドの名前と同じか 85% 以上似ていれば、その 10 マス一帯を出現エリアに
+            m = self.spawn.register(raw, level, here, now)
+            if m is not None:
+                first = self.last_spawn is None or (self.last_spawn.monster, self.last_spawn_area) != (
+                    m.monster, (here.map, here.x // self.area_cells, here.y // self.area_cells))
+                self.last_spawn, self.last_spawn_area = m, (here.map, here.x // self.area_cells, here.y // self.area_cells)
+                if first:
+                    a = self.area_cells
+                    self.log(f"[spawn] 出現エリア: {m.monster} (ガイド Lv{m.level or '?'}, 一致 {m.ratio:.0%}"
+                             + ("" if m.in_map else f", ガイドでは {m.map}") + f") @ {here.map} "
+                             f"({here.x // a * a}-{here.x // a * a + a - 1}, {here.y // a * a}-{here.y // a * a + a - 1})")
         db.commit()
         self.last_judge = (st, sc)
         return self.last_judge

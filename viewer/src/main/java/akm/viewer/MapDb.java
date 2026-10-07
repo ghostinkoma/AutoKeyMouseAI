@@ -340,6 +340,39 @@ public final class MapDb implements AutoCloseable {
         }
     }
 
+    /** 出現エリア: 10 マス四方の区画 (ax, ay は左上) で見たモンスター。inGuide はマップガイドでもこのマップのモンスターか。 */
+    public record Area(int ax, int ay, String monster, Integer level, int reads, boolean inGuide) {}
+    /** マップガイドに載っているモンスター。 */
+    public record GuideMonster(String monster, Integer level) {}
+
+    public List<Area> areas(String map) throws SQLException {
+        List<Area> out = new ArrayList<>();
+        if (map == null || !hasTable("monster_areas")) return out;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT ax, ay, monster, level, reads, in_guide_map FROM monster_areas WHERE map=? ORDER BY reads DESC")) {
+            ps.setString(1, map);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next())
+                    out.add(new Area(rs.getInt(1), rs.getInt(2), rs.getString(3), (Integer) rs.getObject(4), rs.getInt(5),
+                            rs.getInt(6) != 0));
+            }
+        }
+        return out;
+    }
+
+    public List<GuideMonster> guideMonsters(String map) throws SQLException {
+        List<GuideMonster> out = new ArrayList<>();
+        if (map == null || !hasTable("guide_monsters")) return out;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT monster, level FROM guide_monsters WHERE lower(map)=lower(?) ORDER BY level IS NULL, level, monster")) {
+            ps.setString(1, map);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) out.add(new GuideMonster(rs.getString(1), (Integer) rs.getObject(2)));
+            }
+        }
+        return out;
+    }
+
     /** 新しいマップの候補 (Python の world_log.py が知らないマップ名を読んだとき) と、手で登録したマップ。 */
     public record MapName(String name, String status, boolean reviewed, String raw, int reads, Double lastSeen, Integer x, Integer y) {}
 
