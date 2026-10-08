@@ -2,6 +2,7 @@
 
   蓄積: ミラーを続けながら等倍の画面を dataset/frames に貯める (akm/edge/live.py の learn_dir)
   学習: 新しい画面が every_frames 枚たまったら、別のプロセスで学習する (優先度を下げてゲームの邪魔をしない)
+          窓の発見:     毎回 (tools/discover_windows.py --register: 貯めた画面から新しい窓を見つけて登録)
           窓・アイコン: 毎回 (tools/edge_objects.py train)
           文字認識:     ocr_every 回に 1 回 (時間がかかるので)。評価用の実画面で前より悪ければ採用しない
           登録の判定 AI: 毎回 (tools/record_filter.py train。ビューアで人が承認 / 却下した目撃も学ぶ)
@@ -77,6 +78,10 @@ class LearnCycle:
             self.log(f"[learn] 第 {n} 回の学習を始めます (新しい画面 {self.new_frames()} 枚、合計 {self._count()} 枚)")
             self._last_names = self._names()
             py = sys.executable
+            code0, out0 = self.runner([py, "tools/discover_windows.py", "--register", "--n", "300"], self.pc)
+            new_w = [l for l in out0.splitlines() if "を登録しました (見た画面" in l]
+            if code0 == 0 and new_w:
+                self._record(f"第 {n} 回 窓の発見: " + " / ".join(l.split("「")[1].split("」")[0] for l in new_w))
             code, out = self.runner([py, "tools/edge_objects.py", "train"], self.pc)
             res = [l for l in out.splitlines() if l.startswith("[result]")]
             if code == 0:

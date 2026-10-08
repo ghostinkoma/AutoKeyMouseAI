@@ -1225,7 +1225,8 @@ def test_learn_cycle_trains_when_enough_new_frames_and_reloads(tmp_path):
         (frames / f"f{i}.png").write_bytes(b"x")
     assert c.due()
     c.round()  # 第 1 回: 窓・アイコンだけ
-    assert calls == [["tools/edge_objects.py", "train"], ["tools/record_filter.py", "train"]]
+    assert [c[:2] for c in calls] == [["tools/discover_windows.py", "--register"], ["tools/edge_objects.py", "train"],
+                                      ["tools/record_filter.py", "train"]]
     assert reloaded == [1] and not c.due()
     for i in range(3, 6):
         (frames / f"f{i}.png").write_bytes(b"x")
@@ -1859,3 +1860,36 @@ def test_harvester_keeps_location_samples_from_flooding(tmp_path):
             saved += h.location(img) is not None
         Ocr.n += 1
     assert h.kinds.get("loc", 0) <= 41  # 名前の見本が 0 なら 40 まで
+
+
+
+def test_discover_windows_finds_titled_panels_and_registers_them(tmp_path):
+    from akm.edge.objects import load_objects
+    from akm.edge.windows import discover, find_panels, match_title, register
+
+    assert match_title("Inventory") == "inventory" and match_title("lnventory (V)") == "inventory"
+    assert match_title("Character Info") == "character" and match_title("Zen 1530") is None
+
+    def frame(title, x, y, w=300, h=420):
+        img = np.full((1050, 1680, 3), (70, 140, 110), np.uint8)       # 明るい地面
+        cv2.rectangle(img, (x, y), (x + w, y + h), (25, 22, 20), -1)    # 暗いパネル
+        cv2.rectangle(img, (x, y), (x + w, y + h), (150, 170, 190), 3)  # 枠
+        cv2.putText(img, title, (x + 80, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+        return img
+
+    p = find_panels(frame("Inventory", 1300, 120))
+    assert len(p) == 1 and abs(p[0].x - 1300) <= 4 and abs(p[0].w - 300) <= 8
+
+    class Ocr:  # タイトルの帯を読んだことにする (中身は画像の位置で決める)
+        def read(self, img):
+            return ("Inventory" if img.shape[1] > 250 else "Party"), 0.9
+
+    frames = [("a", frame("Inventory", 1300, 120)), ("b", frame("Inventory", 1300, 120)),
+              ("c", frame("Inventory", 1300, 120)), ("d", np.full((1050, 1680, 3), 120, np.uint8))]
+    types = discover(frames, Ocr())
+    inv = [t for t in types if t.name == "inventory"]
+    assert inv and inv[0].count == 3
+    done = register(types, 3, set(), log=lambda *a: None, base=tmp_path)
+    assert done == ["inventory"]
+    objs = load_objects(tmp_path)
+    assert objs[0].name == "inventory" and objs[0].kind == "window" and objs[0].key == "v"
