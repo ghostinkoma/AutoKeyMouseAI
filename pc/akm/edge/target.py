@@ -62,6 +62,45 @@ def _bar_extent(img: np.ndarray, bar) -> tuple[int, int]:
     return x, right - gap
 
 
+def name_span(img: np.ndarray, y0: int, y1: int, cx: int, s: float) -> tuple[int, int]:
+    """名前の行 (y0..y1) で、cx を含む文字のまとまりの左右。
+
+    明るい画素 (文字) のある列を、隙間が gap 以下なら同じまとまりとしてつなぐ (単語の間の空白はつなぐ)。
+    cx を含むまとまりが無ければ cx に一番近いもの。何も無ければ中央の固定幅。
+    """
+    W = img.shape[1]
+    half = int(260 * s)
+    bx0, bx1 = max(0, cx - half), min(W, cx + half)
+    band = img[y0:y1, bx0:bx1]
+    if band.size == 0:
+        return max(0, cx - int(90 * s)), min(W, cx + int(90 * s))
+    v = band.max(axis=2).astype(np.int16)
+    bright = v > max(150, int(np.percentile(v, 85)))
+    cols = bright.sum(axis=0) >= max(1, int(round(1 * s)))
+    gap = max(4, int(round(9 * s)))
+    runs = []
+    i = 0
+    n = len(cols)
+    while i < n:
+        if cols[i]:
+            j = i
+            while j < n and cols[j]:
+                j += 1
+            if runs and i - runs[-1][1] <= gap:
+                runs[-1][1] = j
+            else:
+                runs.append([i, j])
+            i = j
+        else:
+            i += 1
+    c = cx - bx0
+    if not runs:
+        return max(0, cx - int(90 * s)), min(W, cx + int(90 * s))
+    best = min(runs, key=lambda r: 0 if r[0] <= c < r[1] else min(abs(r[0] - c), abs(r[1] - c)))
+    pad = max(2, int(round(4 * s)))
+    return max(0, bx0 + best[0] - pad), min(W, bx0 + best[1] + pad)
+
+
 def read_target(img: np.ndarray, ocr) -> Target | None:
     bar = find_bar(img)
     if bar is None:
@@ -72,13 +111,17 @@ def read_target(img: np.ndarray, ocr) -> Target | None:
     left, right = _bar_extent(img, bar)
     full = max(w, right - left)
     hp = min(1.0, w / full) if full > 0 else None
-    # 名前: バーの上 (バーの左から右へ広めに)
-    nx0, nx1 = max(0, int(x - 60 * s)), min(img.shape[1], int(x + max(full, 120 * s) + 60 * s))
+    # 名前: バーの上。名前はバー全体の中央に置かれるので、中央から左右に広く取ってから、
+    # 文字のある列のまとまりのうち中央を含むものだけを切り出す (長い名前の頭が切れない・右の別の表示を含めない)
     ny0, ny1 = max(0, int(y - 32 * s)), max(1, int(y - 3 * s))
-    name, conf = ocr.read(img[ny0:ny1, nx0:nx1]) if ny1 - ny0 >= 4 else ("", 0.0)
+    cx = (left + left + full) // 2
+    nx0, nx1 = name_span(img, ny0, ny1, cx, s)
+    name, conf = ocr.read(img[ny0:ny1, nx0:nx1]) if ny1 - ny0 >= 4 and nx1 - nx0 >= 4 else ("", 0.0)
     # レベル: バーの左の箱
     lx0, lx1 = max(0, int(x - 48 * s)), max(1, int(x - 2 * s))
     ly0, ly1 = max(0, int(y - 8 * s)), int(y + h + 8 * s)
     level, _ = ocr.read(img[ly0:ly1, lx0:lx1]) if lx1 - lx0 >= 4 else ("", 0.0)
     level = "".join(c for c in level if c.isdigit())
+    if not (level.isdigit() and 1 <= int(level) <= 400):  # HP の数字などを読んだもの
+        level = ""
     return Target(name.strip(), level, hp, bar, (nx0, ny0, nx1 - nx0, ny1 - ny0), conf=conf)

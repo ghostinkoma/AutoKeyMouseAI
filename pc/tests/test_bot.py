@@ -1799,3 +1799,20 @@ def test_teacher_ocr_rescues_unreadable_monster_name(tmp_path):
     con = sqlite3.connect(str(db_path))
     assert con.execute("SELECT monster, status FROM sightings").fetchone() == ("Bahamut", "ok")
     assert con.execute("SELECT monster FROM monster_areas").fetchone() == ("Bahamut",)
+
+
+def test_name_box_covers_long_centered_name_and_skips_text_on_the_right():
+    from akm.edge.target import find_bar, name_span
+
+    img = np.full((1050, 1680, 3), 35, np.uint8)
+    img[66:76, 800:880] = (20, 20, 200)            # HP バー (中央 840)
+    name = "Chief Skeleton Warrior"
+    (tw, th), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+    nx = 840 - tw // 2                              # 名前はバーの中央に置かれ、バーより長い
+    cv2.putText(img, name, (nx, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(img, "Bolts: 25s (0)", (nx + tw + 60, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1)
+    assert nx < 800 - 60                            # 前の切り出し (バーの左 60 px から) では頭が切れていた
+    x, y, w, h = find_bar(img)
+    x0, x1 = name_span(img, y - 32, y - 3, 840, 1.0)
+    assert x0 <= nx and x1 >= nx + tw - 2           # 名前全体を含む
+    assert x1 < nx + tw + 60                        # 右の別の表示は含まない
