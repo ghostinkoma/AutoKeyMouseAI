@@ -203,7 +203,9 @@ def main() -> None:
                 kinds += f"  文字の見本 +{rec.harvester.saved}"
             if rec is not None and rec.world is not None:
                 st = rec.world.stats
-                kinds += f"  DB 目撃 登録{st['ok']}/保留{st['pending']}/除外{st['ng']} 位置{st['loc_ok']}"
+                kinds += (f"  DB 目撃 登録{st['ok']}/保留{st['pending']}/除外{st['ng']} 位置{st['loc_ok']}"
+                          f"  名前 {st['names']} 回 (ガイド一致: 自分 {st['names_own']} / 先生 {st['names_teacher']},"
+                          f" 不一致 {st['names_nomatch']}" + (f" 最後 {rec.world.last_unmatched!r}" if rec.world.last_unmatched else "") + ")")
             if cycle is not None:
                 kinds += ("  学習中…" if cycle.busy else
                           f"  次の学習まで {max(0, cycle.every_frames - cycle.new_frames())} 枚 (済 {cycle.rounds} 回)")

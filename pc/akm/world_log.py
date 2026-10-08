@@ -90,7 +90,9 @@ class WorldLogger:
         self._loc_hist: deque[str] = deque(maxlen=5)
         self._name_hist: deque[str] = deque(maxlen=6)
         self._cur: dict | None = None   # まとめ中の目撃
-        self.stats = {"loc_ok": 0, "loc_ng": 0, "ok": 0, "pending": 0, "ng": 0}
+        self.stats = {"loc_ok": 0, "loc_ng": 0, "ok": 0, "pending": 0, "ng": 0,
+                      "names": 0, "names_own": 0, "names_teacher": 0, "names_nomatch": 0}
+        self.last_unmatched = ""
         self.last_judge: tuple[str, float] | None = None
 
     # ------------------------------------------------------------ 準備
@@ -221,7 +223,24 @@ class WorldLogger:
         return loc
 
     # ------------------------------------------------------------ 相手
-    def sighting(self, target) -> tuple[str, float] | None:
+    def _teacher_name(self, img, target) -> str | None:
+        """先生役の OCR (Windows) で相手の名前の枠を読む (自分の文字認識でガイドと一致しなかったとき)。"""
+        if self.teacher is None or img is None:
+            return None
+        x, y, w, h = target.name_box
+        crop = img[max(0, y):y + h, max(0, x):x + w]
+        if crop.size == 0:
+            return None
+        for method in ("bright", "otsu"):
+            try:
+                t = " ".join(self.teacher(preprocess(crop, 3, method, 130)).split())
+            except Exception:
+                return None
+            if len(t) >= 3:
+                return t
+        return None
+
+    def sighting(self, target, img=None) -> tuple[str, float] | None:
         if target is None or not (target.raw_name or target.name):
             return None
         from .edge.harvest import lexicon_fix
@@ -229,10 +248,23 @@ class WorldLogger:
         raw = target.raw_name or target.name
         text, in_lex = lexicon_fix(raw, self.words)
         here0 = self.current()
+        self.stats["names"] += 1
         if here0 is not None and self.spawn is not None:  # マップガイドと一致すれば、その名前でまとめる
-            gm = self.spawn.match(raw, here0.map, int(target.level) if target.level.isdigit() else None)
+            lvl = int(target.level) if target.level.isdigit() else None
+            gm = self.spawn.match(raw, here0.map, lvl)
+            if gm is None:  # 自分の文字認識では一致しない: 先生役の OCR でもう一度
+                t = self._teacher_name(img, target)
+                gm2 = self.spawn.match(t, here0.map, lvl) if t else None
+                if gm2 is not None:
+                    gm, raw = gm2, t
+                    self.stats["names_teacher"] += 1
+            else:
+                self.stats["names_own"] += 1
             if gm is not None:
                 text, in_lex = gm.monster, True
+            else:
+                self.stats["names_nomatch"] += 1
+                self.last_unmatched = raw
         self._name_hist.append(text)
         streak = 0  # 直前から続けて同じに読めた回数 (前の相手の読みで薄まらないように)
         for t in reversed(self._name_hist):
@@ -326,7 +358,7 @@ class WorldLogger:
             self._last_loc_read = now
             self.location(img, ocr)
         if getattr(rec, "target", None) is not None:
-            self.sighting(rec.target)
+            self.sighting(rec.target, img)
 
     def close(self) -> None:
         if self.map is not None:

@@ -1759,3 +1759,43 @@ def test_guide_match_confirms_sighting_and_writes_spawn_log(tmp_path):
     assert con.execute("SELECT COUNT(*) FROM monsters WHERE name='Sapi-Tres' AND map_en='Swamp of Calmness'").fetchone()[0] == 1
     log = con.execute("SELECT kind, map, ax, ay, monster FROM spawn_log ORDER BY id").fetchall()
     assert ("area", "Swamp of Calmness", 120, 40, "Sapi-Tres") in log
+
+
+def test_teacher_ocr_rescues_unreadable_monster_name(tmp_path):
+    import sqlite3
+
+    from akm.edge.target import Target
+    from akm.record_filter import RecordFilter
+    from akm.spawn import save_guide
+    from akm.world_log import WorldLogger
+
+    db_path = tmp_path / "mu.db"
+    con = sqlite3.connect(str(db_path))
+    save_guide(con, [{"map": "Atlans", "monster": "Bahamut", "level": 70}, {"map": "Atlans", "monster": "Vepar", "level": 75}])
+    con.close()
+
+    class Ocr:
+        def read(self, img):
+            return "Atlans (32, 68)", 0.9
+
+    class Rec:
+        target = None
+
+    t = {"now": 1000.0}
+    w = WorldLogger(db_path, RecordFilter.load(), teacher=lambda im: "Bahamut", loc_every=0, log=lambda *a: None,
+                    clock=lambda: t["now"])
+    img = np.zeros((1050, 1680, 3), np.uint8)
+    w.teacher = None  # 現在地は自分の読みで
+    for _ in range(5):
+        t["now"] += 1
+        w.feed(img, Rec(), Ocr())
+    w.teacher = lambda im: "Bahamut"
+    rec = Rec()
+    t["now"] += 1
+    rec.target = Target("x;|q", "70", 0.5, (0, 0, 1, 1), (700, 40, 200, 30), raw_name="x;|q", conf=0.2)  # 自分では読めない
+    w.feed(img, rec, Ocr())
+    assert w.stats["names_teacher"] == 1 and w.stats["names_nomatch"] == 0
+    w.close()
+    con = sqlite3.connect(str(db_path))
+    assert con.execute("SELECT monster, status FROM sightings").fetchone() == ("Bahamut", "ok")
+    assert con.execute("SELECT monster FROM monster_areas").fetchone() == ("Bahamut",)

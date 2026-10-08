@@ -122,11 +122,6 @@ class LiveRecognizer:
         img = self.grab_full()
         r = self.recognize(img)
         self._save(img)
-        if self.harvester is not None:
-            try:
-                self.harvester.feed(img, r.target)
-            except Exception as e:
-                self.log(f"[harvest] 失敗: {e}")
         if self.world is not None:
             try:
                 self.world.feed(img, r, self.ocr)
@@ -138,6 +133,13 @@ class LiveRecognizer:
                         r.target.name = cur["monster"]  # マップガイドで直した名前を出す
             except Exception as e:
                 self.log(f"[world] 記録に失敗: {e}")
+        if self.harvester is not None:  # 記録の後: マップガイドで直した名前を正解の見本として集められる
+            try:
+                if self.world is not None:
+                    self.harvester.words = self.world.words
+                self.harvester.feed(img, r.target)
+            except Exception as e:
+                self.log(f"[harvest] 失敗: {e}")
         now = time.monotonic()
         if r.loc is not None:
             self._last_loc = r.loc
