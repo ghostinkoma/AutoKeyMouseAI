@@ -156,8 +156,62 @@ def cmd_train(args) -> None:
 
 
 def cmd_eval(args) -> None:
-    acc = evaluate(OcrReader.load(), real_lines("test"))
-    print(f"[eval] 文字正解率 {acc:.1%}")
+    """文字認識の正解率を、正解付きの実画面の行 (学習に使っていない test、--all で全部) で調べる。"""
+    from akm.edge.harvest import lexicon_fix, load_lexicon
+    from akm.maploc import parse_location
+
+    reader = OcrReader.load()
+    lines = real_lines(None if args.all else "test")
+    if not lines:
+        raise SystemExit("正解付きの行がありません (dataset/ocr_lines は learn_loop で自動で貯まります)")
+    words = load_lexicon()
+    try:  # マップガイドのモンスター名も辞書に (記録のときと同じ)
+        import sqlite3
+
+        from akm.config import load_config
+
+        cfg = load_config("config.yaml") if (PC_DIR / "config.yaml").exists() else {}
+        db = PC_DIR / (cfg.get("maplog") or {}).get("db", "data/mu_map.db")
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        words = sorted(set(words) | {r[0] for r in con.execute("SELECT monster FROM guide_monsters")})
+        con.close()
+    except Exception:
+        pass
+    stats = {}
+    bad = []
+    for img, text in lines:
+        got, conf = reader.read(img)
+        kind = "現在地" if parse_location(text) else "名前など"
+        want = text.replace(" ", "")
+        e = edit_distance(got.replace(" ", ""), want)
+        loc = parse_location(got)
+        fixed = (f"{loc.map} ({loc.x}, {loc.y})" if loc else got) if kind == "現在地" else lexicon_fix(got, words)[0]
+        for k in (kind, "全体"):
+            st = stats.setdefault(k, [0, 0, 0, 0, 0])  # 行数, 文字の誤り, 文字数, 行がそのまま正解, 辞書で直して正解
+            st[0] += 1
+            st[1] += e
+            st[2] += len(want)
+            st[3] += got.replace(" ", "") == want
+            st[4] += " ".join(fixed.split()) == " ".join(text.split())
+        if e:
+            bad.append((e / max(1, len(want)), text, got))
+    print(f"[eval] 調べた行: {len(lines)} 行 ({'全部' if args.all else '学習に使っていない test の行'})")
+    print(f"  {'':8s} {'行数':>5s}  {'文字の正解率':>10s}  {'行がそのまま正解':>12s}  {'辞書で直して正解':>12s}")
+    for k in ("全体", "現在地", "名前など"):
+        if k in stats:
+            n, err, tot, exact, fixed = stats[k]
+            print(f"  {k:8s} {n:5d}  {1 - err / max(1, tot):10.1%}  {exact / n:14.1%}  {fixed / n:14.1%}")
+    if bad:
+        print("  読み違いの多い行:")
+        for r, text, got in sorted(bad, reverse=True)[:args.show]:
+            print(f"    {text!r:32s} → {got!r}  (文字の誤り {r:.0%})")
+    log = PC_DIR / "models" / "learn_log.txt"
+    if log.exists():
+        hist = [l for l in log.read_text(encoding="utf-8").splitlines() if "文字認識" in l][-5:]
+        if hist:
+            print("  最近の文字認識の学習 (models/learn_log.txt):")
+            for l in hist:
+                print("    " + l)
 
 
 def cmd_read(args) -> None:
@@ -218,7 +272,9 @@ def main() -> None:
     t.add_argument("--epochs", type=int, default=30)
     t.add_argument("-v", "--verbose", action="store_true")
     t.add_argument("--keep-better", action="store_true", help="評価用の実画面で前のモデルより悪ければ保存しない")
-    sub.add_parser("eval")
+    ev = sub.add_parser("eval")
+    ev.add_argument("--all", action="store_true", help="学習に使った行も含めて全部で調べる")
+    ev.add_argument("--show", type=int, default=10, help="読み違いの多い行を何行表示するか")
     r = sub.add_parser("read")
     r.add_argument("image")
     lb = sub.add_parser("label")
