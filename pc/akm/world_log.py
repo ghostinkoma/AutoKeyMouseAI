@@ -223,11 +223,11 @@ class WorldLogger:
         return loc
 
     # ------------------------------------------------------------ 相手
-    def _teacher_name(self, img, target) -> str | None:
+    def _teacher_name(self, img, target, box=None) -> str | None:
         """先生役の OCR (Windows) で相手の名前の枠を読む (自分の文字認識でガイドと一致しなかったとき)。"""
         if self.teacher is None or img is None:
             return None
-        x, y, w, h = target.name_box
+        x, y, w, h = box or target.name_box
         crop = img[max(0, y):y + h, max(0, x):x + w]
         if crop.size == 0:
             return None
@@ -240,6 +240,26 @@ class WorldLogger:
                 return t
         return None
 
+    def best_name_match(self, target, img, map_name):
+        """切り出し方を変えた読みのうち、マップガイドと一番よく一致するもの。だめなら先生役の OCR で。
+        戻り値: (照合結果 Match または None, 使った読み, 先生の読みか)"""
+        lvl = int(target.level) if target.level.isdigit() else None
+        raws = [target.raw_name or target.name] + [a[0] for a in getattr(target, "alts", []) if a[0]]
+        best = None
+        for r in dict.fromkeys(raws):
+            m = self.spawn.match(r, map_name, lvl)
+            if m is not None and (best is None or m.ratio > best[0].ratio):
+                best = (m, r)
+        if best is not None:
+            return best[0], best[1], False
+        boxes = [a[2] for a in getattr(target, "alts", []) if a[3] != 2] or [target.name_box]
+        for box in boxes[:3]:  # 先生は時間がかかるので 3 通りまで (固定の枠 2 は使わない)
+            t = self._teacher_name(img, target, box)
+            m = self.spawn.match(t, map_name, lvl) if t else None
+            if m is not None:
+                return m, t, True
+        return None, target.raw_name or target.name, False
+
     def sighting(self, target, img=None) -> tuple[str, float] | None:
         if target is None or not (target.raw_name or target.name):
             return None
@@ -250,18 +270,11 @@ class WorldLogger:
         here0 = self.current()
         self.stats["names"] += 1
         if here0 is not None and self.spawn is not None:  # マップガイドと一致すれば、その名前でまとめる
-            lvl = int(target.level) if target.level.isdigit() else None
-            gm = self.spawn.match(raw, here0.map, lvl)
-            if gm is None:  # 自分の文字認識では一致しない: 先生役の OCR でもう一度
-                t = self._teacher_name(img, target)
-                gm2 = self.spawn.match(t, here0.map, lvl) if t else None
-                if gm2 is not None:
-                    gm, raw = gm2, t
-                    self.stats["names_teacher"] += 1
-            else:
-                self.stats["names_own"] += 1
+            gm, r2, by_teacher = self.best_name_match(target, img, here0.map)
             if gm is not None:
+                raw = r2
                 text, in_lex = gm.monster, True
+                self.stats["names_teacher" if by_teacher else "names_own"] += 1
             else:
                 self.stats["names_nomatch"] += 1
                 self.last_unmatched = raw

@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -25,6 +25,7 @@ class Target:
     name_box: tuple[int, int, int, int]
     raw_name: str = ""                # 辞書で直す前の読み
     conf: float = 0.0                 # 名前の文字認識の確信度 (各文字の確率の最小値)
+    alts: list = field(default_factory=list)  # 切り出し方を変えた読み [(読み, 確信度, (x, y, w, h), 切り出し方), ...]
 
 
 def find_bar(img: np.ndarray) -> tuple[int, int, int, int] | None:
@@ -55,8 +56,10 @@ def _bar_extent(img: np.ndarray, bar) -> tuple[int, int]:
     v = row.max(axis=1)
     right = x + w
     W = img.shape[1]
+    s = img.shape[0] / 1050
+    limit = min(W - 1, x + int(260 * s))  # バーの幅は基準で 260 ほどまで (暗い背景で画面の端まで行かないように)
     gap = 0
-    while right < W - 1 and gap < max(2, h):
+    while right < limit and gap < max(2, h):
         right += 1
         gap = gap + 1 if v[right] > 110 else 0
     return x, right - gap
@@ -111,12 +114,27 @@ def read_target(img: np.ndarray, ocr) -> Target | None:
     left, right = _bar_extent(img, bar)
     full = max(w, right - left)
     hp = min(1.0, w / full) if full > 0 else None
-    # 名前: バーの上。名前はバー全体の中央に置かれるので、中央から左右に広く取ってから、
-    # 文字のある列のまとまりのうち中央を含むものだけを切り出す (長い名前の頭が切れない・右の別の表示を含めない)
+    # 名前: バーの上。切り出し方を何通りか試し、それぞれ読む (呼ぶ側がマップガイドと一致するものを選ぶ)
+    #   span_full: バー全体の中央を含む文字のまとまり (長い名前の頭が切れない・右の別の表示を含めない)
+    #   span_red : 赤い部分の中央を含む文字のまとまり (バー全体の幅を見誤ったとき用)
+    #   box      : バーの左から右へ広めの固定の枠 (前からのやり方)
+    #   box_wide : box を左に広げたもの
     ny0, ny1 = max(0, int(y - 32 * s)), max(1, int(y - 3 * s))
-    cx = (left + left + full) // 2
-    nx0, nx1 = name_span(img, ny0, ny1, cx, s)
-    name, conf = ocr.read(img[ny0:ny1, nx0:nx1]) if ny1 - ny0 >= 4 and nx1 - nx0 >= 4 else ("", 0.0)
+    W = img.shape[1]
+    boxes = [name_span(img, ny0, ny1, left + full // 2, s), name_span(img, ny0, ny1, x + w // 2, s),
+             (max(0, int(x - 60 * s)), min(W, int(x + max(full, 120 * s) + 60 * s))),
+             (max(0, int(x - 170 * s)), min(W, int(x + max(full, 120 * s) + 60 * s)))]
+    alts, seen = [], set()
+    for k, (bx0, bx1) in enumerate(boxes):
+        if (bx0, bx1) in seen or bx1 - bx0 < 4 or ny1 - ny0 < 4:
+            continue
+        seen.add((bx0, bx1))
+        t, c = ocr.read(img[ny0:ny1, bx0:bx1])
+        alts.append((t.strip(), c, (bx0, ny0, bx1 - bx0, ny1 - ny0), k))  # k: 切り出し方の番号
+    if alts:
+        name, conf, nbox, _ = max(alts, key=lambda a: a[1])
+    else:
+        name, conf, nbox = "", 0.0, (0, ny0, 1, max(1, ny1 - ny0))
     # レベル: バーの左の箱
     lx0, lx1 = max(0, int(x - 48 * s)), max(1, int(x - 2 * s))
     ly0, ly1 = max(0, int(y - 8 * s)), int(y + h + 8 * s)
@@ -124,4 +142,4 @@ def read_target(img: np.ndarray, ocr) -> Target | None:
     level = "".join(c for c in level if c.isdigit())
     if not (level.isdigit() and 1 <= int(level) <= 400):  # HP の数字などを読んだもの
         level = ""
-    return Target(name.strip(), level, hp, bar, (nx0, ny0, nx1 - nx0, ny1 - ny0), conf=conf)
+    return Target(name, level, hp, bar, nbox, conf=conf, alts=alts)

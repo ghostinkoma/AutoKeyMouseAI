@@ -79,6 +79,7 @@ def main() -> None:
     for f in out.glob("*.png"):
         f.unlink()
     n = {"frames": 0, "bar": 0, "own": 0, "teacher": 0, "none": 0, "loc": 0}
+    n_strategy: dict[int, int] = {}
     for f in files:
         img = cv2.imread(str(f))
         if img is None:
@@ -92,32 +93,54 @@ def main() -> None:
             continue
         n["bar"] += 1
         t = read_target(img, ocr)
-        raw = t.name
         lvl = int(t.level) if t.level.isdigit() else None
         mp = loc.map if loc else None
-        m = reg.match(raw, mp, lvl)
-        how = "own" if m else None
+        best = None  # (Match, 読み, 切り出し方, 先生か)
+        for raw, conf, box, k in t.alts:
+            m = reg.match(raw, mp, lvl) if raw else None
+            if m is not None and (best is None or m.ratio > best[0].ratio):
+                best = (m, raw, k, False)
         tr = ""
-        if m is None and teacher is not None:
-            x, y, w, h = t.name_box
-            crop = img[y:y + h, x:x + w]
-            try:
-                tr = " ".join(teacher(preprocess(crop, 3, "bright", 130)).split())
-            except Exception:
-                tr = ""
-            m = reg.match(tr, mp, lvl) if tr else None
-            how = "teacher" if m else None
+        if best is None and teacher is not None:
+            for _, _, box, k in t.alts:
+                if k == 2:
+                    continue
+                x, y, w, h = box
+                try:
+                    tr = " ".join(teacher(preprocess(img[y:y + h, x:x + w], 3, "bright", 130)).split())
+                except Exception:
+                    tr = ""
+                m = reg.match(tr, mp, lvl) if tr else None
+                if m is not None:
+                    best = (m, tr, k, True)
+                    break
+        how = None if best is None else "teacher" if best[3] else "own"
         n[how or "none"] += 1
-        x, y, w, h = t.name_box
-        tag = f"{how or 'NG'}_{safe(raw)}" + (f"_t-{safe(tr)}" if tr else "") + (f"_{safe(m.monster)}" if m else "")
-        cv2.imwrite(str(out / f"{f.stem}_{tag}.png"), img[y:y + h, x:x + w])
-        print(f"  {f.name}: 読み {raw!r} (確信度 {t.conf:.2f}, Lv {t.level or '?'})" + (f" 先生 {tr!r}" if tr else "")
-              + f" @ {mp or '?'} → " + (f"{m.monster} ({'自分' if how == 'own' else '先生'} {m.ratio:.0%})" if m else "一致なし"))
+        if best is not None:
+            n_strategy[best[2]] = n_strategy.get(best[2], 0) + 1
+        # 確認用の画像: 名前の行の周り。赤 = バー、黄 = 中央、色付きの枠 = 切り出し方 (0 緑 1 水色 2 白 3 灰)
+        x, y, w, h = t.bar
+        y0, y1 = max(0, y - 45), min(img.shape[0], y + h + 12)
+        xs = [a[2][0] for a in t.alts] + [x]
+        xe = [a[2][0] + a[2][2] for a in t.alts] + [x + w]
+        x0, x1 = max(0, min(xs) - 20), min(img.shape[1], max(xe) + 20)
+        dbg = img[y0:y1, x0:x1].copy()
+        cv2.rectangle(dbg, (x - x0, y - y0), (x + w - x0, y + h - y0), (0, 0, 255), 1)
+        colors = [(0, 255, 0), (255, 255, 0), (255, 255, 255), (128, 128, 128)]
+        for _, _, (bx, by, bw, bh), k in t.alts:
+            cv2.rectangle(dbg, (bx - x0, by - y0 + k), (bx + bw - x0, by + bh - y0 - k), colors[k % 4], 1)
+        tag = f"{how or 'NG'}" + (f"_{safe(best[0].monster)}" if best else f"_{safe(t.name)}")
+        cv2.imwrite(str(out / f"{f.stem}_{tag}.png"), cv2.resize(dbg, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST))
+        reads = " | ".join(f"{a[3]}:{a[0]!r}" for a in t.alts)
+        print(f"  {f.name}: {reads} (Lv {t.level or '?'})" + (f" 先生 {tr!r}" if tr else "") + f" @ {mp or '?'} → "
+              + (f"{best[0].monster} ({'先生' if best[3] else '自分'} {best[0].ratio:.0%}, 切り出し {best[2]})" if best else "一致なし"))
     b = max(1, n["bar"])
     print(f"\n[check] 画面 {n['frames']} 枚 / 現在地が読めた {n['loc']} 枚 / HP バーが見つかった {n['bar']} 枚")
     print(f"[check] HP バーのあった画面のうち: 自分の文字認識でガイドと一致 {n['own']} ({n['own'] / b:.0%}) / "
           f"先生で一致 {n['teacher']} ({n['teacher'] / b:.0%}) / 一致なし {n['none']} ({n['none'] / b:.0%})")
-    print(f"[check] 名前の枠の切り抜き: {out}")
+    names = ["0 全体の中央", "1 赤の中央", "2 固定の枠", "3 左に広い枠"]
+    print("[check] 一致した切り出し方: " + ", ".join(f"{names[k]} {v}" for k, v in sorted(n_strategy.items())))
+    print(f"[check] 確認用の画像: {out} (赤 = バー、緑/水色/白/灰の枠 = 切り出し方 0/1/2/3)")
     if n["frames"] and n["bar"] < n["frames"] * 0.05:
         print("[check] HP バーがほとんど見つかっていません。攻撃中の画面が少ないか、バーの探し方が合っていません。"
               "攻撃中の画面 (上部に名前と赤いバー) を 1 枚 dataset/screens に入れて見せてください")
