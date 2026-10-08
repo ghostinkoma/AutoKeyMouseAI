@@ -60,6 +60,7 @@ class OcrHarvester:
         self._loc_hist: list[str] = []
         self.saved = 0
         self._counts: dict[str, int] = {}
+        self.kinds: dict[str, int] = {}  # 貯まった見本の数 (loc = 現在地 / name = 名前)
         self._load_counts()
 
     def _load_counts(self) -> None:
@@ -69,6 +70,8 @@ class OcrHarvester:
                 if row and not row.startswith("#"):
                     t = row.split("\t", 2)[-1]
                     self._counts[t] = self._counts.get(t, 0) + 1
+                    k = "loc" if parse_location(t) else "name"
+                    self.kinds[k] = self.kinds.get(k, 0) + 1
 
     def _teach(self, crop: np.ndarray) -> str | None:
         if self.teacher is None:
@@ -99,11 +102,16 @@ class OcrHarvester:
         return True
 
     def location(self, img: np.ndarray) -> str | None:
+        # 現在地の行ばかり貯まらないように (名前の見本の 2 倍 + 40 まで)
+        if self.kinds.get("loc", 0) > 2 * self.kinds.get("name", 0) + 40:
+            return None
         x0, y0, x1, y1 = roi_px(img.shape, self.loc_roi)
         crop = img[y0:y1, x0:x1]
         if crop.size == 0:
             return None
-        ours = parse_location(self.ocr.read(crop)[0])
+        from ..maploc import read_location_own
+
+        ours = read_location_own(self.ocr, crop)[0]
         teach = self._teach(crop)
         loc = parse_location(teach) if teach is not None else None
         if teach is None:  # 先生がいない: 自分の読みが 3 回続けて同じときだけ
@@ -113,7 +121,10 @@ class OcrHarvester:
         if loc is None or loc.map not in KNOWN_MAPS:
             return None
         text = f"{loc.map} ({loc.x}, {loc.y})"
-        return text if self._save(crop, text, "現在地") else None
+        if self._save(crop, text, "現在地"):
+            self.kinds["loc"] = self.kinds.get("loc", 0) + 1
+            return text
+        return None
 
     def target_name(self, img: np.ndarray, target) -> str | None:
         if target is None:
@@ -128,7 +139,10 @@ class OcrHarvester:
         teach = self._teach(crop)
         if teach is not None and lexicon_fix(teach, self.words, cutoff=0.8)[0] != word:
             return None
-        return word if self._save(crop, word, "相手の名前") else None
+        if self._save(crop, word, "相手の名前"):
+            self.kinds["name"] = self.kinds.get("name", 0) + 1
+            return word
+        return None
 
     def feed(self, img: np.ndarray, target=None) -> None:
         now = self.clock()

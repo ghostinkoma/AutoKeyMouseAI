@@ -184,8 +184,13 @@ def cmd_eval(args) -> None:
         kind = "現在地" if parse_location(text) else "名前など"
         want = text.replace(" ", "")
         e = edit_distance(got.replace(" ", ""), want)
-        loc = parse_location(got)
-        fixed = (f"{loc.map} ({loc.x}, {loc.y})" if loc else got) if kind == "現在地" else lexicon_fix(got, words)[0]
+        if kind == "現在地":  # 記録のときと同じく、読めなければ白い文字だけにして読み直す
+            from akm.maploc import read_location_own
+
+            loc = read_location_own(reader, img)[0]
+            fixed = f"{loc.map} ({loc.x}, {loc.y})" if loc else got
+        else:
+            fixed = lexicon_fix(got, words)[0]
         for k in (kind, "全体"):
             st = stats.setdefault(k, [0, 0, 0, 0, 0])  # 行数, 文字の誤り, 文字数, 行がそのまま正解, 辞書で直して正解
             st[0] += 1

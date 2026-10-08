@@ -1816,3 +1816,46 @@ def test_name_box_covers_long_centered_name_and_skips_text_on_the_right():
     x0, x1 = name_span(img, y - 32, y - 3, 840, 1.0)
     assert x0 <= nx and x1 >= nx + tw - 2           # 名前全体を含む
     assert x1 < nx + tw + 60                        # 右の別の表示は含まない
+
+
+def test_white_text_only_drops_colored_background_and_location_is_still_read():
+    from akm.edge.ocr import OcrReader
+    from akm.maploc import read_location_own, white_text_only
+
+    rng = np.random.default_rng(0)
+    crop = np.zeros((24, 230, 3), np.uint8)
+    crop[:] = (40, 90, 60)                                       # 地形の色 (緑っぽい)
+    for _ in range(120):                                         # 明るい色の点 (草・ミニマップの印)
+        y, x = rng.integers(0, 24), rng.integers(0, 230)
+        crop[y, x] = (30, 200, 230)
+    cv2.putText(crop, "Atlans (32, 68)", (4, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    clean = white_text_only(crop)
+    hsv = cv2.cvtColor(clean, cv2.COLOR_BGR2HSV)
+    assert (hsv[..., 1][clean.max(axis=2) > 0] < 100).all()     # 色の付いた画素は残らない
+    assert clean.max() == 255                                    # 白い文字は残る
+    reader = OcrReader.load()
+    assert "(32, 68)" not in reader.read(crop)[0]               # そのままでは背景の点を文字と読んで崩れる
+    loc, raw, conf = read_location_own(reader, crop)             # 白い文字だけにして読み直すと座標が読める
+    assert loc is not None and (loc.x, loc.y) == (32, 68), raw
+
+
+def test_harvester_keeps_location_samples_from_flooding(tmp_path):
+    from akm.edge.harvest import OcrHarvester
+
+    class Ocr:
+        n = 0
+
+        def read(self, img):
+            Ocr.n += 1
+            return f"Devias ({Ocr.n}, 85)", 0.9
+
+    h = OcrHarvester(tmp_path, Ocr(), teacher=None, log=lambda *a: None)
+    img = np.zeros((1050, 1680, 3), np.uint8)
+    h._loc_hist = []
+    saved = 0
+    for _ in range(400):  # 先生がいないときは 3 回続けて同じ読みが要るので、同じ読みを 3 回ずつ
+        for _ in range(3):
+            Ocr.n -= 1
+            saved += h.location(img) is not None
+        Ocr.n += 1
+    assert h.kinds.get("loc", 0) <= 41  # 名前の見本が 0 なら 40 まで

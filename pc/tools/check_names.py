@@ -86,7 +86,9 @@ def main() -> None:
             continue
         n["frames"] += 1
         x0, y0, x1, y1 = roi_px(img.shape, roi)
-        loc = parse_location(ocr.read(img[y0:y1, x0:x1])[0], [m for m, _, _ in reg.guide] or None)
+        from akm.maploc import read_location_own
+
+        loc = read_location_own(ocr, img[y0:y1, x0:x1], [m for m, _, _ in reg.guide] or None)[0]
         if loc is not None:
             n["loc"] += 1
         if find_bar(img) is None:

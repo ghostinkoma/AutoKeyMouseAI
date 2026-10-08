@@ -80,6 +80,34 @@ def parse_location(text: str, maps: list[str] | None = None) -> Location | None:
 
 
 # ------------------------------------------------------------------- OCR --
+def white_text_only(crop: np.ndarray, threshold: int = 130) -> np.ndarray:
+    """白っぽい文字 (明るく色の薄い画素) だけを残し、ほかを黒にする (背景の地形やミニマップを文字と読まないように)。
+    大きさはそのまま (akm.edge の文字認識用。preprocess は Windows の OCR 用)。"""
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask = ((hsv[:, :, 2] > threshold) & (hsv[:, :, 1] < 100)).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    keep = np.zeros(n, bool)
+    keep[1:] = st[1:, cv2.CC_STAT_AREA] >= 2  # 1 画素の点は捨てる
+    out = np.zeros_like(crop)
+    sel = keep[lab]
+    out[sel] = crop[sel]
+    return out
+
+
+def read_location_own(ocr, crop: np.ndarray, maps: list[str] | None = None):
+    """自分の文字認識 (akm.edge.ocr.OcrReader) で現在地を読む。読めなければ白い文字だけにして読み直す。
+    戻り値: (Location または None, 読み, 確信度)"""
+    known = set(maps or KNOWN_MAPS)
+    raw, conf = ocr.read(crop)
+    loc = parse_location(raw, maps)
+    if loc is None or loc.map not in known:  # 読めない / 知らないマップ名: 白い文字だけにして読み直す
+        raw2, conf2 = ocr.read(white_text_only(crop))
+        loc2 = parse_location(raw2, maps)
+        if loc2 is not None and (loc is None or loc2.map in known):
+            return loc2, raw2, conf2
+    return loc, raw, conf
+
+
 def preprocess(crop: np.ndarray, scale: int = 3, method: str = "bright", threshold: int = 130) -> np.ndarray:
     """小さいゲーム文字を拡大し、白地に黒文字にする (OCR が読みやすい形)。
 

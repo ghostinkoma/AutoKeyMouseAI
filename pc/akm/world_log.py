@@ -179,9 +179,13 @@ class WorldLogger:
         crop = img[y0:y1, x0:x1]
         if crop.size == 0:
             return None
-        raw, conf = ocr.read(crop) if ocr is not None else ("", 0.0)
         maps = self.known_maps
-        loc = parse_location(raw, maps)
+        if ocr is not None:
+            from .maploc import read_location_own
+
+            loc, raw, conf = read_location_own(ocr, crop, maps)
+        else:
+            loc, raw, conf = None, "", 0.0
         teach = None
         if self.teacher is not None:
             try:
