@@ -183,7 +183,7 @@ class WorldLogger:
         if ocr is not None:
             from .maploc import read_location_own
 
-            loc, raw, conf = read_location_own(ocr, crop, maps)
+            loc, raw, conf = read_location_own(ocr, crop, maps, self.here)
         else:
             loc, raw, conf = None, "", 0.0
         teach = None

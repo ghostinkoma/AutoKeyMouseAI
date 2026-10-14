@@ -94,8 +94,57 @@ def white_text_only(crop: np.ndarray, threshold: int = 130) -> np.ndarray:
     return out
 
 
-def read_location_own(ocr, crop: np.ndarray, maps: list[str] | None = None):
-    """自分の文字認識 (akm.edge.ocr.OcrReader) で現在地を読む。読めなければ白い文字だけにして読み直す。
+_COORD = re.compile(r"(?<![0-9])([0-9]{1,3})(?![0-9])")
+
+
+def _map_score(text: str, name: str) -> float:
+    """読みの中に、マップ名に一番近い部分があるか (前後に余計な文字があってもよい)。0..1"""
+    t = re.sub(r"[^a-z]", "", text.lower().translate(str.maketrans("0156", "olsb"))).replace("l", "i")
+    m = re.sub(r"[^a-z]", "", name.lower()).replace("l", "i")  # I と l は読み違えやすいので同じに扱う
+    if len(t) < max(3, len(m) // 2) or not m:
+        return 0.0
+    best = 0.0
+    for w in range(max(3, len(m) - 2), len(m) + 3):
+        for i in range(0, max(1, len(t) - w + 1)):
+            best = max(best, difflib.SequenceMatcher(None, t[i:i + w], m).ratio())
+    return best
+
+
+def parse_location_fuzzy(text: str, maps: list[str] | None = None, last: "Location | None" = None,
+                         min_score: float = 0.75, max_step: int = 15) -> Location | None:
+    """崩れた読みからマスター (既知のマップ名) と照らし合わせて現在地を取り出す。
+
+    座標: 0〜255 の数 2 つ (括弧・区切りが付いているものを優先)。
+    マップ名: 座標の前の文字の中で、既知のマップ名に一番近い部分 (似ている度合い min_score 以上)。
+    マップ名が読めなくても、前の位置 last から max_step マス以内なら同じマップとみなす (マップはめったに変わらない)。
+    """
+    t = text.replace("\n", " ").translate(_DIGIT_FIX)
+    nums = [(m.start(), m.end(), int(m.group(1))) for m in _COORD.finditer(t)]
+    best = None
+    for (s1, e1, a), (s2, e2, b) in zip(nums, nums[1:]):
+        if a > 255 or b > 255 or s2 - e1 > 4:
+            continue
+        sc = (2 if "(" in t[max(0, s1 - 3):s1] else 0) + (1 if re.fullmatch(r"\s*[,.]?\s*", t[e1:s2]) else 0) \
+            + (1 if ")" in t[e2:e2 + 2] else 0)
+        if best is None or sc >= best[0]:
+            best = (sc, s1, a, b)
+    if best is None:
+        return None
+    _, start, x, y = best
+    names = list(maps or KNOWN_MAPS)
+    head = t[:start]
+    score, name = max(((_map_score(head, m), m) for m in names), default=(0.0, None))
+    near = last is not None and abs(x - last.x) <= max_step and abs(y - last.y) <= max_step
+    if near and (name == last.map or score < 0.85):  # 前の位置の近く: 別のマップとはっきり読めない限り同じマップ
+        return Location(last.map, x, y)
+    if name is not None and score >= min_score:
+        return Location(name, x, y)
+    return None
+
+
+def read_location_own(ocr, crop: np.ndarray, maps: list[str] | None = None, last: "Location | None" = None):
+    """自分の文字認識 (akm.edge.ocr.OcrReader) で現在地を読む。読めなければ白い文字だけにして読み直し、
+    それでもだめならマスター (既知のマップ名) と照らし合わせて崩れた読みから取り出す (parse_location_fuzzy)。
     戻り値: (Location または None, 読み, 確信度)"""
     from .edge.charset import LOC_CHARS
 
@@ -111,7 +160,18 @@ def read_location_own(ocr, crop: np.ndarray, maps: list[str] | None = None):
     if loc is None or loc.map not in known:  # 読めない / 知らないマップ名: 白い文字だけにして読み直す
         raw2, conf2 = read(white_text_only(crop))
         loc2 = parse_location(raw2, maps)
-        if loc2 is not None and (loc is None or loc2.map in known):
+        if loc2 is not None and loc2.map in known:
+            return loc2, raw2, conf2
+        for lc, r, c in ((loc, raw, conf), (loc2, raw2, conf2)):
+            # 崩れずに読めた知らないマップ名 (英字だけ) は、新しいマップの候補としてそのまま返す
+            if lc is not None and re.fullmatch(r"[A-Za-z][A-Za-z '\-]{3,}", lc.map) and \
+                    re.fullmatch(r"\s*[A-Za-z][A-Za-z '\-]+\s*\(\s*\d{1,3}\s*,\s*\d{1,3}\s*\)\s*", r):
+                return lc, r, c
+        for r, c in ((raw2, conf2), (raw, conf)):  # マスターと照らし合わせる
+            loc3 = parse_location_fuzzy(r, list(known), last)
+            if loc3 is not None:
+                return loc3, r, c * 0.8
+        if loc2 is not None and loc is None:
             return loc2, raw2, conf2
     return loc, raw, conf
 

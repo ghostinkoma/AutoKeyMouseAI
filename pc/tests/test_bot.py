@@ -1911,3 +1911,19 @@ def test_ocr_allowed_chars_drop_stray_symbols():
     assert all(c in LOC_CHARS + " " for c in got)  # 現在地に出てこない記号 (: [ + など) は出さない
     assert ":" in r.read(crop)[0] and ":" not in got
     assert all(c in NAME_CHARS + " " for c in r.read(crop, allowed=NAME_CHARS)[0])
+
+
+def test_location_fuzzy_uses_master_map_names_and_previous_map():
+    from akm.maploc import Location, parse_location_fuzzy as f
+
+    # 前後に余計な文字が付いた読みから、既知のマップ名と座標を取り出す (eval の実際の読み違いから)
+    assert f("E7,1n,arkan(202,64) ,e,6a") == Location("Tarkan", 202, 64)
+    assert f("lcarus (63, 3)") == Location("Icarus", 63, 3)            # I と l
+    assert f("Lost Towr (12, 34)") == Location("Lost Tower", 12, 34)
+    # マップ名が読めなくても、前の位置の近くなら同じマップ
+    assert f("s7 1e,1o1Yta(,N(230,66)") is None
+    assert f("s7 1e,1o1Yta(,N(230,66)", last=Location("Kanturu", 228, 70)) == Location("Kanturu", 230, 66)
+    # はっきり別のマップ名なら前の位置より読みを優先 (マップ移動)
+    assert f("Devias (96, 156)", last=Location("Atlans", 100, 150)) == Location("Devias", 96, 156)
+    # 座標が無い・でたらめなら None
+    assert f("Atlans") is None and f("Dstl1a4s9,2L8k,169r)47rT11 ,7,,") is None
