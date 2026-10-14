@@ -179,9 +179,23 @@ def cmd_eval(args) -> None:
         pass
     stats = {}
     bad = []
+    from akm.edge.charset import NAME_CHARS
+
+    lower = {w.lower() for w in words}
     for img, text in lines:
-        got, conf = reader.read(img)
-        kind = "現在地" if parse_location(text) else "名前など"
+        # 記録のときと同じく、欄に合わせて読む文字を絞る (現在地 / モンスター名)。--raw で絞らない
+        if parse_location(text):
+            kind = "現在地"
+        elif text.lower() in lower:
+            kind = "モンスター名"
+        else:
+            kind = "その他"
+        allowed = None if args.raw or kind == "その他" else NAME_CHARS if kind == "モンスター名" else None
+        got, conf = reader.read(img, allowed=allowed) if allowed else reader.read(img)
+        if kind == "現在地" and not args.raw:
+            from akm.edge.charset import LOC_CHARS
+
+            got, conf = reader.read(img, allowed=LOC_CHARS)
         want = text.replace(" ", "")
         e = edit_distance(got.replace(" ", ""), want)
         if kind == "現在地":  # 記録のときと同じく、読めなければ白い文字だけにして読み直す
@@ -200,9 +214,10 @@ def cmd_eval(args) -> None:
             st[4] += " ".join(fixed.split()) == " ".join(text.split())
         if e:
             bad.append((e / max(1, len(want)), text, got))
-    print(f"[eval] 調べた行: {len(lines)} 行 ({'全部' if args.all else '学習に使っていない test の行'})")
+    print(f"[eval] 調べた行: {len(lines)} 行 ({'全部' if args.all else '学習に使っていない test の行'}"
+          f"{'、読む文字を絞らない' if args.raw else '、欄に合わせて読む文字を絞る'})")
     print(f"  {'':8s} {'行数':>5s}  {'文字の正解率':>10s}  {'行がそのまま正解':>12s}  {'辞書で直して正解':>12s}")
-    for k in ("全体", "現在地", "名前など"):
+    for k in ("全体", "現在地", "モンスター名", "その他"):
         if k in stats:
             n, err, tot, exact, fixed = stats[k]
             print(f"  {k:8s} {n:5d}  {1 - err / max(1, tot):10.1%}  {exact / n:14.1%}  {fixed / n:14.1%}")
@@ -280,6 +295,7 @@ def main() -> None:
     ev = sub.add_parser("eval")
     ev.add_argument("--all", action="store_true", help="学習に使った行も含めて全部で調べる")
     ev.add_argument("--show", type=int, default=10, help="読み違いの多い行を何行表示するか")
+    ev.add_argument("--raw", action="store_true", help="欄に合わせて読む文字を絞らない (前のやり方で比べる)")
     r = sub.add_parser("read")
     r.add_argument("image")
     lb = sub.add_parser("label")

@@ -65,6 +65,16 @@ def _bar_extent(img: np.ndarray, bar) -> tuple[int, int]:
     return x, right - gap
 
 
+def _read(ocr, crop, field: str):
+    """欄に合わせて読む文字を絞る (古い OcrReader や試験用の読み取り器は allowed を受け付けないので、そのときは絞らない)。"""
+    from .charset import DIGITS, NAME_CHARS
+
+    try:
+        return ocr.read(crop, allowed={"name": NAME_CHARS, "digits": DIGITS}[field])
+    except TypeError:
+        return ocr.read(crop)
+
+
 def name_span(img: np.ndarray, y0: int, y1: int, cx: int, s: float) -> tuple[int, int]:
     """名前の行 (y0..y1) で、cx を含む文字のまとまりの左右。
 
@@ -129,7 +139,7 @@ def read_target(img: np.ndarray, ocr) -> Target | None:
         if (bx0, bx1) in seen or bx1 - bx0 < 4 or ny1 - ny0 < 4:
             continue
         seen.add((bx0, bx1))
-        t, c = ocr.read(img[ny0:ny1, bx0:bx1])
+        t, c = _read(ocr, img[ny0:ny1, bx0:bx1], "name")
         alts.append((t.strip(), c, (bx0, ny0, bx1 - bx0, ny1 - ny0), k))  # k: 切り出し方の番号
     if alts:
         name, conf, nbox, _ = max(alts, key=lambda a: a[1])
@@ -138,7 +148,7 @@ def read_target(img: np.ndarray, ocr) -> Target | None:
     # レベル: バーの左の箱
     lx0, lx1 = max(0, int(x - 48 * s)), max(1, int(x - 2 * s))
     ly0, ly1 = max(0, int(y - 8 * s)), int(y + h + 8 * s)
-    level, _ = ocr.read(img[ly0:ly1, lx0:lx1]) if lx1 - lx0 >= 4 else ("", 0.0)
+    level, _ = _read(ocr, img[ly0:ly1, lx0:lx1], "digits") if lx1 - lx0 >= 4 else ("", 0.0)
     level = "".join(c for c in level if c.isdigit())
     if not (level.isdigit() and 1 <= int(level) <= 400):  # HP の数字などを読んだもの
         level = ""

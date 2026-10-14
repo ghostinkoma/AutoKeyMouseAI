@@ -1893,3 +1893,21 @@ def test_discover_windows_finds_titled_panels_and_registers_them(tmp_path):
     assert done == ["inventory"]
     objs = load_objects(tmp_path)
     assert objs[0].name == "inventory" and objs[0].kind == "window" and objs[0].key == "v"
+
+
+def test_ocr_allowed_chars_drop_stray_symbols():
+    from akm.edge.charset import LOC_CHARS, NAME_CHARS
+    from akm.edge.ocr import OcrReader
+
+    r = OcrReader.load()
+    rng = np.random.default_rng(1)
+    crop = np.zeros((26, 260, 3), np.uint8)
+    crop[:] = (40, 90, 60)
+    for _ in range(150):
+        y, x = rng.integers(0, 26), rng.integers(0, 260)
+        crop[y, x] = (200, 210, 220)
+    cv2.putText(crop, "Atlans (32, 68)", (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    got = r.read(crop, allowed=LOC_CHARS)[0]
+    assert all(c in LOC_CHARS + " " for c in got)  # 現在地に出てこない記号 (: [ + など) は出さない
+    assert ":" in r.read(crop)[0] and ":" not in got
+    assert all(c in NAME_CHARS + " " for c in r.read(crop, allowed=NAME_CHARS)[0])

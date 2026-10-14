@@ -97,11 +97,19 @@ def white_text_only(crop: np.ndarray, threshold: int = 130) -> np.ndarray:
 def read_location_own(ocr, crop: np.ndarray, maps: list[str] | None = None):
     """自分の文字認識 (akm.edge.ocr.OcrReader) で現在地を読む。読めなければ白い文字だけにして読み直す。
     戻り値: (Location または None, 読み, 確信度)"""
+    from .edge.charset import LOC_CHARS
+
+    def read(img):
+        try:
+            return ocr.read(img, allowed=LOC_CHARS)  # 現在地に出てくる文字だけ
+        except TypeError:
+            return ocr.read(img)
+
     known = set(maps or KNOWN_MAPS)
-    raw, conf = ocr.read(crop)
+    raw, conf = read(crop)
     loc = parse_location(raw, maps)
     if loc is None or loc.map not in known:  # 読めない / 知らないマップ名: 白い文字だけにして読み直す
-        raw2, conf2 = ocr.read(white_text_only(crop))
+        raw2, conf2 = read(white_text_only(crop))
         loc2 = parse_location(raw2, maps)
         if loc2 is not None and (loc is None or loc2.map in known):
             return loc2, raw2, conf2

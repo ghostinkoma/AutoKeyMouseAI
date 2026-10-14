@@ -37,14 +37,28 @@ class OcrReader:
         e = np.exp(lg - lg.max(1, keepdims=True))
         return e / e.sum(1, keepdims=True)
 
-    def read(self, bgr: np.ndarray, junk_penalty: float = 0.5) -> tuple[str, float]:
-        """1 行を読む。戻り値: (文字列, 一番自信のない文字の確率)。"""
+    def read(self, bgr: np.ndarray, junk_penalty: float = 0.5, allowed: str | None = None) -> tuple[str, float]:
+        """1 行を読む。戻り値: (文字列, 一番自信のない文字の確率)。
+
+        allowed: その欄に出てくる文字 (akm.edge.charset の NAME_CHARS / LOC_CHARS / DIGITS)。
+        渡すと、それ以外の文字 (記号など) とはっきり読んだ切り出しは背景の点として捨て、
+        迷っているものは出てくる文字の中から選ぶ。
+        """
         glyphs, line_h = line_glyphs(bgr)
         if not glyphs:
             return "", 0.0
         glyphs = self._split_touching(bgr, glyphs, line_h)
         p = self._probs(glyphs)
         p[:, self.junk] *= junk_penalty  # 行の中の切り出しはたいてい文字
+        if allowed is not None:
+            ok = np.array([lab in allowed for lab in self.m.labels[:self.junk]] + [True])
+            top = p.argmax(1)
+            stray = ~ok[top] & (p[np.arange(len(p)), top] >= 0.5)  # 出てこない文字とはっきり読んだ: 点
+            p = p * ok
+            p[stray] = 0
+            p[stray, self.junk] = 1.0
+            s = p.sum(1, keepdims=True)
+            p = np.where(s > 0, p / np.maximum(s, 1e-9), p)
         idx = p.argmax(1)
         keep = [i for i, k in enumerate(idx) if k != self.junk]
         if not keep:
