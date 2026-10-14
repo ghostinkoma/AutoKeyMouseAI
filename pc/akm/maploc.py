@@ -179,12 +179,16 @@ def read_location_own(ocr, crop: np.ndarray, maps: list[str] | None = None, last
 def preprocess(crop: np.ndarray, scale: int = 3, method: str = "bright", threshold: int = 130) -> np.ndarray:
     """小さいゲーム文字を拡大し、白地に黒文字にする (OCR が読みやすい形)。
 
-    bright: 明るく色の薄い画素 (白い文字) だけを残す / otsu: 大津の二値化 (背景が単色でない場合向け)
+    bright: 明るく色の薄い画素 (白い文字) だけを残す / value: 明るい画素を色に関係なく残す (色付きの文字)
+    otsu: 大津の二値化 (背景が単色でない場合向け)
     """
     big = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     if method == "bright":
         hsv = cv2.cvtColor(big, cv2.COLOR_BGR2HSV)
         text = (hsv[:, :, 2] > threshold) & (hsv[:, :, 1] < 100)
+    elif method == "value":  # 色の付いた文字 (オレンジ・赤・黄の名前など) も残す: 明るさだけで分ける
+        hsv = cv2.cvtColor(big, cv2.COLOR_BGR2HSV)
+        text = hsv[:, :, 2] > max(threshold, int(np.percentile(hsv[:, :, 2], 80)))
     else:
         gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
         _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)

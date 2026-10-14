@@ -108,13 +108,16 @@ def main() -> None:
                 if k == 2:
                     continue
                 x, y, w, h = box
-                try:
-                    tr = " ".join(teacher(preprocess(img[y:y + h, x:x + w], 3, "bright", 130)).split())
-                except Exception:
-                    tr = ""
-                m = reg.match(tr, mp, lvl) if tr else None
-                if m is not None:
-                    best = (m, tr, k, True)
+                for method in ("bright", "value", "otsu"):  # 色付きの名前も読めるように
+                    try:
+                        tr = " ".join(teacher(preprocess(img[y:y + h, x:x + w], 3, method, 130)).split())
+                    except Exception:
+                        tr = ""
+                    m = reg.match(tr, mp, lvl) if tr else None
+                    if m is not None:
+                        best = (m, tr, k, True)
+                        break
+                if best is not None:
                     break
         how = None if best is None else "teacher" if best[3] else "own"
         n[how or "none"] += 1

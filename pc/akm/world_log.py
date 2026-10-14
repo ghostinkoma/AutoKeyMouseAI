@@ -227,22 +227,28 @@ class WorldLogger:
         return loc
 
     # ------------------------------------------------------------ 相手
-    def _teacher_name(self, img, target, box=None) -> str | None:
-        """先生役の OCR (Windows) で相手の名前の枠を読む (自分の文字認識でガイドと一致しなかったとき)。"""
+    def _teacher_names(self, img, target, box=None) -> list[str]:
+        """先生役の OCR (Windows) で相手の名前の枠を読む。白い文字用・色付きの文字用・大津の 3 通りの前処理で読む
+        (自分よりレベルの高い相手の名前は色付きで出るため、白い文字だけ残す前処理では消えてしまう)。"""
         if self.teacher is None or img is None:
-            return None
+            return []
         x, y, w, h = box or target.name_box
         crop = img[max(0, y):y + h, max(0, x):x + w]
         if crop.size == 0:
-            return None
-        for method in ("bright", "otsu"):
+            return []
+        out = []
+        for method in ("bright", "value", "otsu"):
             try:
                 t = " ".join(self.teacher(preprocess(crop, 3, method, 130)).split())
             except Exception:
-                return None
-            if len(t) >= 3:
-                return t
-        return None
+                break
+            if len(t) >= 3 and t not in out:
+                out.append(t)
+        return out
+
+    def _teacher_name(self, img, target, box=None) -> str | None:
+        names = self._teacher_names(img, target, box)
+        return names[0] if names else None
 
     def best_name_match(self, target, img, map_name):
         """切り出し方を変えた読みのうち、マップガイドと一番よく一致するもの。だめなら先生役の OCR で。
@@ -257,11 +263,11 @@ class WorldLogger:
         if best is not None:
             return best[0], best[1], False
         boxes = [a[2] for a in getattr(target, "alts", []) if a[3] != 2] or [target.name_box]
-        for box in boxes[:3]:  # 先生は時間がかかるので 3 通りまで (固定の枠 2 は使わない)
-            t = self._teacher_name(img, target, box)
-            m = self.spawn.match(t, map_name, lvl) if t else None
-            if m is not None:
-                return m, t, True
+        for box in boxes[:2]:  # 先生は時間がかかるので 2 つの枠 x 3 通りの前処理まで
+            for t in self._teacher_names(img, target, box):
+                m = self.spawn.match(t, map_name, lvl)
+                if m is not None:
+                    return m, t, True
         return None, target.raw_name or target.name, False
 
     def sighting(self, target, img=None) -> tuple[str, float] | None:

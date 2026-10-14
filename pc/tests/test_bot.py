@@ -1927,3 +1927,14 @@ def test_location_fuzzy_uses_master_map_names_and_previous_map():
     assert f("Devias (96, 156)", last=Location("Atlans", 100, 150)) == Location("Devias", 96, 156)
     # 座標が無い・でたらめなら None
     assert f("Atlans") is None and f("Dstl1a4s9,2L8k,169r)47rT11 ,7,,") is None
+
+
+def test_preprocess_value_keeps_colored_monster_names():
+    from akm.maploc import preprocess
+
+    crop = np.full((24, 160, 3), (30, 25, 20), np.uint8)
+    cv2.putText(crop, "Gigantis", (4, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40, 140, 255), 1)  # オレンジの名前
+    white_only = preprocess(crop, 3, "bright", 130)
+    colored = preprocess(crop, 3, "value", 130)
+    assert (white_only == 0).sum() == 0          # 白い文字だけ残す前処理では消える
+    assert (colored == 0).sum() > 200            # 色に関係なく明るさで分けると残る
