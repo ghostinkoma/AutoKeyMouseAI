@@ -52,9 +52,17 @@ def ensure_schema(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE guide_maps ADD COLUMN {col} INTEGER")
 
 
+_LOOKALIKE = str.maketrans({"t": "l", "i": "l", "1": "l", "|": "l", "j": "l"})
+
+
 def similarity(a: str, b: str) -> float:
+    """似ている度合い (0..1)。T / I / l / i / 1 は読み違えやすいので、同じ字とみなした比べ方の高い方。"""
     a, b = " ".join(a.split()).lower(), " ".join(b.split()).lower()
-    return difflib.SequenceMatcher(None, a, b).ratio() if a and b else 0.0
+    if not a or not b:
+        return 0.0
+    plain = difflib.SequenceMatcher(None, a, b).ratio()
+    loose = difflib.SequenceMatcher(None, a.translate(_LOOKALIKE), b.translate(_LOOKALIKE)).ratio()
+    return max(plain, loose * 0.95)  # 同じ字とみなした方は少しだけ割り引く
 
 
 # ------------------------------------------------------------ ガイドの読み込み --
@@ -386,6 +394,22 @@ def section_html(html: str, key: str) -> str | None:
     return html[m.start(): end + 10 if end >= 0 else m.start() + 6000]
 
 
+def add_guide_monster(db: sqlite3.Connection, map_name: str, monster: str, level: int | None = None) -> None:
+    """ガイドに載っていないモンスターを手で足す (source = manual。ガイドを取り込み直しても消えない)。"""
+    ensure_schema(db)
+    from .monsters import ensure_schema as ensure_monsters
+
+    ensure_monsters(db)
+    now = time.time()
+    db.execute("INSERT INTO guide_monsters(map, monster, level, source, updated) VALUES (?,?,?, 'manual', ?) "
+               "ON CONFLICT(map, monster) DO UPDATE SET level=COALESCE(excluded.level, guide_monsters.level), "
+               "source='manual', updated=excluded.updated", (map_name, monster, level, now))
+    db.execute("INSERT INTO monsters(name, level, map, map_en, source, updated) VALUES (?,?,?,?, 'manual', ?) "
+               "ON CONFLICT(name, map) DO UPDATE SET level=COALESCE(excluded.level, monsters.level), updated=excluded.updated",
+               (monster, level, map_name, map_name, now))
+    db.commit()
+
+
 def save_guide(db: sqlite3.Connection, rows: list[dict], source: str = GUIDE_URL) -> tuple[int, int]:
     """ガイドの内容を保存する。モンスター一覧 (monsters) とマップ名の辞書 (map_names) にも入れる。"""
     from .monsters import ensure_schema as ensure_monsters
@@ -400,7 +424,7 @@ def save_guide(db: sqlite3.Connection, rows: list[dict], source: str = GUIDE_URL
     min_lv, zen, resets = per_map("min_level"), per_map("zen_cost"), per_map("resets")
     # 前回の取り込みで入った、今回のガイドに無いもの (読み方を直す前の名前など) は消す
     q = ",".join("?" * len(maps))
-    db.execute(f"DELETE FROM guide_monsters WHERE map NOT IN ({q})", maps)
+    db.execute(f"DELETE FROM guide_monsters WHERE map NOT IN ({q}) AND COALESCE(source, '') != 'manual'", maps)
     db.execute(f"DELETE FROM guide_maps WHERE name NOT IN ({q})", maps)
     db.execute(f"DELETE FROM monsters WHERE source='guide:rexmu' AND map NOT IN ({q})", maps)
     db.executemany("INSERT INTO guide_maps(name, source, updated, min_level, zen_cost, resets) VALUES (?,?,?,?,?,?) "
@@ -471,7 +495,17 @@ class SpawnRegistry:
         self.reload()
 
     def reload(self) -> None:
-        self.guide = self.db.execute("SELECT map, monster, level FROM guide_monsters").fetchall()
+        """照らし合わせる候補: マップガイド + 人が登録したモンスター (ビューアの「モンスター登録」/ 承認した目撃。
+        ガイドに載っていないモンスター (Kanturu の Twin Tale など) もこれで照らし合わせられる)。"""
+        rows = self.db.execute("SELECT map, monster, level FROM guide_monsters").fetchall()
+        try:
+            have = {(m.lower(), n) for m, n, _ in rows}
+            rows += [(m, n, lv) for m, n, lv in self.db.execute(
+                "SELECT map_en, name, MIN(level) FROM monsters WHERE source IN ('manual', 'sighting') AND map_en != '' "
+                "GROUP BY map_en, name") if n and n.isascii() and (m.lower(), n) not in have]
+        except sqlite3.Error:
+            pass
+        self.guide = rows
 
     @property
     def names(self) -> list[str]:

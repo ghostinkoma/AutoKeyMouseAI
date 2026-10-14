@@ -7,6 +7,8 @@
     python tools\\import_map_guide.py --section lorencia  <section id="map-guide-…lorencia…"> の HTML をそのまま表示
                                                        (読み取りがおかしいとき、これを見せてもらえれば読み方を合わせます)
     python tools\\import_map_guide.py --no-icons         アイコン画像を取得しない
+    python tools\\import_map_guide.py --add Kanturu "Twin Tale" --level 160
+                                                       ガイドに載っていないモンスターを手で足す (取り込み直しても消えない)
 
 読み取りの順番: <section id="map-guide-マップ名"> (アイコン・名前・レベル) → 表 (<table>) → 文字の並び。
 アイコンは DB と同じフォルダの monster_icons\\ に保存し、ビューアのモンスター一覧に付く。
@@ -56,8 +58,24 @@ def main() -> None:
     ap.add_argument("--dump", action="store_true", help="取り込まずに内容を表示する")
     ap.add_argument("--section", help="id にこの文字を含む map-guide の section の HTML を表示する (確認用)")
     ap.add_argument("--no-icons", action="store_true", help="アイコン画像を取得しない")
+    ap.add_argument("--add", nargs=2, metavar=("MAP", "MONSTER"), help="ガイドに無いモンスターを手で足す")
+    ap.add_argument("--level", type=int, help="--add のときのレベル")
     ap.add_argument("--icons-dir", help="アイコン画像のあるフォルダ (ブラウザで保存したページの画像など)")
     args = ap.parse_args()
+
+    if args.add:
+        from akm.spawn import add_guide_monster
+
+        cfg = load_config("config.yaml") if (PC_DIR / "config.yaml").exists() else {}
+        db_path = PC_DIR / ((cfg.get("maplog") or {}).get("db", "data/mu_map.db"))
+        con = sqlite3.connect(str(db_path))
+        try:
+            add_guide_monster(con, args.add[0], args.add[1], args.level)
+        finally:
+            con.close()
+        print(f"[guide] {args.add[0]} に {args.add[1]}" + (f" (Lv{args.level})" if args.level else "")
+              + " を足しました。mirror_only / learn_loop は 30 秒以内に読み直します")
+        return
 
     if args.text:
         rows = parse_guide_text(read_text_file(args.text))

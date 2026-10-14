@@ -1938,3 +1938,17 @@ def test_preprocess_value_keeps_colored_monster_names():
     colored = preprocess(crop, 3, "value", 130)
     assert (white_only == 0).sum() == 0          # 白い文字だけ残す前処理では消える
     assert (colored == 0).sum() > 200            # 色に関係なく明るさで分けると残る
+
+
+def test_monster_missing_from_guide_can_be_added_and_matches_real_reads():
+    from akm.spawn import add_guide_monster
+
+    reg, _ = _rexmu_registry()
+    reads = ["l wln l ale", "IWIn lale", "l wIn l ale", "lWln lale"]  # Kanturu (40, 94) の実際の読み
+    assert all(reg.match(r, "Kanturu") is None for r in reads)    # ガイドに Twin Tale が無いので一致しない
+    add_guide_monster(reg.db, "Kanturu", "Twin Tale")
+    reg.reload()
+    for r in reads:
+        m = reg.match(r, "Kanturu")
+        assert m is not None and m.monster == "Twin Tale", r
+    assert reg.match("Gigantis", "Kanturu").monster == "Gigantis"  # ほかは今までどおり
