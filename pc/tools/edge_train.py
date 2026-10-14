@@ -213,7 +213,7 @@ def cmd_eval(args) -> None:
             st[3] += got.replace(" ", "") == want
             st[4] += " ".join(fixed.split()) == " ".join(text.split())
         if e:
-            bad.append((e / max(1, len(want)), text, got))
+            bad.append((e / max(1, len(want)), text, got, img))
     print(f"[eval] 調べた行: {len(lines)} 行 ({'全部' if args.all else '学習に使っていない test の行'}"
           f"{'、読む文字を絞らない' if args.raw else '、欄に合わせて読む文字を絞る'})")
     print(f"  {'':8s} {'行数':>5s}  {'文字の正解率':>10s}  {'行がそのまま正解':>12s}  {'辞書で直して正解':>12s}")
@@ -223,8 +223,19 @@ def cmd_eval(args) -> None:
             print(f"  {k:8s} {n:5d}  {1 - err / max(1, tot):10.1%}  {exact / n:14.1%}  {fixed / n:14.1%}")
     if bad:
         print("  読み違いの多い行:")
-        for r, text, got in sorted(bad, reverse=True)[:args.show]:
+        worst = sorted(bad, key=lambda b: -b[0])
+        for r, text, got, _ in worst[:args.show]:
             print(f"    {text!r:32s} → {got!r}  (文字の誤り {r:.0%})")
+        if args.save_bad:
+            out = PC_DIR / "dataset" / "eval_bad"
+            out.mkdir(parents=True, exist_ok=True)
+            for f in out.glob("*.png"):
+                f.unlink()
+            for i, (r, text, got, img) in enumerate(worst[:args.save_bad]):
+                safe = "".join(c if c.isalnum() else "_" for c in text)[:30]
+                cv2.imwrite(str(out / f"{i:02d}_{safe}.png"), cv2.resize(img, None, fx=3, fy=3,
+                                                                          interpolation=cv2.INTER_NEAREST))
+            print(f"  読み違いの多い行の画像 (3 倍に拡大): {out}")
     log = PC_DIR / "models" / "learn_log.txt"
     if log.exists():
         hist = [l for l in log.read_text(encoding="utf-8").splitlines() if "文字認識" in l][-5:]
@@ -295,6 +306,7 @@ def main() -> None:
     ev = sub.add_parser("eval")
     ev.add_argument("--all", action="store_true", help="学習に使った行も含めて全部で調べる")
     ev.add_argument("--show", type=int, default=10, help="読み違いの多い行を何行表示するか")
+    ev.add_argument("--save-bad", type=int, default=0, help="読み違いの多い行の画像をこの数だけ dataset/eval_bad に保存")
     ev.add_argument("--raw", action="store_true", help="欄に合わせて読む文字を絞らない (前のやり方で比べる)")
     r = sub.add_parser("read")
     r.add_argument("image")
