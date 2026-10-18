@@ -180,3 +180,56 @@ def register(types: list[WindowType], min_count: int = 3, existing: set[str] | N
         done.append(t.name)
         log(f"[windows] 窓「{t.name}」を登録しました (見た画面 {t.count} 枚, タイトル {t.titles[:1]})")
     return done
+
+
+# ---- これまでに見つけた窓の記録 (models/windows_seen.json) ----
+# discover は毎回「新しい画面」だけを調べ、結果をここに足していく (同じ画面を 2 回数えない)。
+# tools/window_status.py がこれを読んで「これまでに何種類の窓を確認できたか」を表示する。
+
+def load_history(path) -> dict:
+    import json
+    from pathlib import Path
+
+    p = Path(path)
+    if p.exists():
+        try:
+            h = json.loads(p.read_text(encoding="utf-8"))
+            h.setdefault("frames", [])
+            h.setdefault("types", {})
+            return h
+        except (ValueError, OSError):
+            pass
+    return {"frames": [], "types": {}}
+
+
+def save_history(path, hist: dict, max_frames: int = 20000) -> None:
+    import json
+    from pathlib import Path
+
+    hist["frames"] = hist["frames"][-max_frames:]
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(hist, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(p)
+
+
+def merge_history(hist: dict, types: list[WindowType], frame_ids, when: str | None = None) -> dict:
+    """今回見つけた窓を記録に足す。frame_ids は今回調べた画面 (次からは数えない)。"""
+    import time
+
+    when = when or time.strftime("%Y-%m-%d %H:%M:%S")
+    for t in types:
+        e = hist["types"].setdefault(t.key, {"name": t.name, "count": 0, "first": when, "last": when,
+                                             "titles": [], "size": None})
+        e["count"] += t.count
+        e["last"] = when
+        for title in t.titles:
+            if title not in e["titles"] and len(e["titles"]) < 5:
+                e["titles"].append(title)
+        if t.sample is not None:
+            p = t.sample[2]
+            e["size"] = [p.w, p.h, p.x, p.y]
+    seen = set(hist["frames"])
+    hist["frames"] += [f for f in frame_ids if f not in seen]
+    return hist

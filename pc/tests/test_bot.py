@@ -1952,3 +1952,21 @@ def test_monster_missing_from_guide_can_be_added_and_matches_real_reads():
         m = reg.match(r, "Kanturu")
         assert m is not None and m.monster == "Twin Tale", r
     assert reg.match("Gigantis", "Kanturu").monster == "Gigantis"  # ほかは今までどおり
+
+
+def test_window_history_counts_each_frame_once(tmp_path):
+    from akm.edge.windows import Panel, WindowType, load_history, merge_history, save_history
+
+    path = tmp_path / "windows_seen.json"
+    h = load_history(path)
+    t = WindowType("inventory", "inventory", 3, ["Inventory"], ("a", None, Panel(1300, 120, 300, 420, (0, 0, 1, 1))))
+    merge_history(h, [t], ["frames/a.png", "frames/b.png", "frames/c.png"], when="t1")
+    save_history(path, h)
+    h = load_history(path)
+    u = WindowType("unknown_6x8@left", None, 1, ["lv"], None)
+    merge_history(h, [WindowType("inventory", "inventory", 2, ["lnventory"], None), u], ["frames/d.png", "frames/a.png"],
+                  when="t2")
+    assert h["types"]["inventory"]["count"] == 5 and h["types"]["inventory"]["size"] == [300, 420, 1300, 120]
+    assert h["types"]["inventory"]["titles"] == ["Inventory", "lnventory"] and h["types"]["inventory"]["first"] == "t1"
+    assert h["frames"] == ["frames/a.png", "frames/b.png", "frames/c.png", "frames/d.png"]
+    assert h["types"]["unknown_6x8@left"]["name"] is None
