@@ -30,6 +30,14 @@ HEADER = PC_DIR.parent / "firmware" / "AutoKeyMouse" / "edge_obj_model.h"
 FRAME_DIRS = ["frames", "helper_state", "screens", "ui"]
 
 
+def imread(path) -> np.ndarray | None:
+    """日本語や空白の入ったパス (スクリーンショット (300).png など) でも読む (cv2.imread は Windows で読めない)。"""
+    try:
+        return cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+    except (OSError, ValueError):
+        return None
+
+
 def frames(limit: int = 300) -> list[np.ndarray]:
     """学習に使う画面: 新しいもの (直近の蓄積) を多めに、古いものからも少し。"""
     files = []
@@ -123,7 +131,7 @@ def cmd_train(args) -> None:
 
 
 def cmd_find(args) -> None:
-    img = cv2.imread(args.image)
+    img = imread(args.image)
     if img is None:
         raise SystemExit(f"画像が読めません: {args.image}")
     d = ObjectDetector.load()
@@ -135,7 +143,7 @@ def cmd_find(args) -> None:
             cv2.rectangle(out, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.putText(out, r.name, (x, max(12, y - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     p = Path(args.image)
-    cv2.imwrite(str(p.with_name(p.stem + "_found.png")), out)
+    cv2.imencode(".png", out)[1].tofile(str(p.with_name(p.stem + "_found.png")))
 
 
 def select_and_save(img: np.ndarray, args) -> None:
@@ -149,9 +157,9 @@ def select_and_save(img: np.ndarray, args) -> None:
 
 
 def cmd_add(args) -> None:
-    img = cv2.imread(args.image)
+    img = imread(args.image)
     if img is None:
-        raise SystemExit(f"画像が読めません: {args.image}")
+        raise SystemExit(f"画像が読めません: {args.image} (パスに空白や括弧があるときは \"\" で囲む)")
     select_and_save(img, args)
 
 
