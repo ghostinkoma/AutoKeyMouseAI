@@ -181,7 +181,16 @@ def main() -> None:
                 dev = open_device(cfg, abs_map_from(cfg))
                 press = dev.key
                 click = lambda x, y: dev.click(*screen.to_screen(x, y))  # noqa: E731
-                responder = Responder(dev.run, grab_full, lambda: rec.detector, move=dev.s_move,
+                from akm.maploc import make_ocr, preprocess
+
+                read_text = None
+                try:
+                    lcfg0 = cfg.get("maplog") or {}
+                    t_ocr = make_ocr(lcfg0.get("ocr", "auto"), lcfg0.get("tesseract_cmd"))
+                    read_text = lambda crop: t_ocr(preprocess(crop, 2, "bright", 130))  # noqa: E731
+                except Exception as e:
+                    print(f"[rare] 窓の文字を読む OCR が使えません。文字の確認 (require_text) がある手順は行いません ({e})")
+                responder = Responder(dev.run, grab_full, lambda: rec.detector, move=dev.s_move, read_text=read_text,
                                       to_screen=screen.to_screen, is_active=getattr(screen, "is_active", None),
                                       keep=rcfg.get("keep", ["hunting_log", "helper_panel"]),
                                       chat_cooldown_s=float(rcfg.get("chat_cooldown_s", 120)))

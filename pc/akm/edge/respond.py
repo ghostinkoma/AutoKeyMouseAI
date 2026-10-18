@@ -6,6 +6,8 @@
                                  (ボタンが見つからないときは fallback_key を押す。既定 esc)
   - close_windows: esc           開いている窓の数だけ esc を押す (keep に書いた窓は数えない)
                                  窓が無いのに esc を押すとゲームのメニューが開くので、見えている数しか押さない
+  - require_text: [party, join]  窓の中の文字を読み、どれかの語が無ければ以降を行わない
+                                 (タイトルが同じ別の窓を取り違えて、断ったりチャットしたりしないように)
   - chat: "Sorry, I no need PT." Enter → 文字 → Enter でチャットに送る (ASCII だけ。chat_cooldown_s 秒に 1 回まで)
 
 安全のため:
@@ -20,6 +22,8 @@ import time
 
 DEFAULT_RESPONSES = {
     "party_invite": [
+        # タイトルは "Information" で、ほかの知らせ (トレードの申し込みなど) と同じ。本文の文字で確かめる
+        {"require_text": ["party", "join"]},
         {"click": "party_invite_cancel", "fallback_key": "esc"},
         {"close_windows": "esc"},
         {"chat": "Sorry, I no need PT."},
@@ -44,7 +48,7 @@ def chat_text_ok(text: str) -> str | None:
 class Responder:
     def __init__(self, run, grab, detector, move=None, to_screen=None, is_active=None, keep=KEEP_WINDOWS,
                  chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
-                 log=print, sleep=time.sleep, clock=time.monotonic):
+                 log=print, sleep=time.sleep, clock=time.monotonic, read_text=None):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -60,6 +64,7 @@ class Responder:
         self.clock = clock
         self._last_chat = -1e9
         self.history: list[str] = []
+        self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
 
     def _det(self):
         return self.detector() if callable(self.detector) else self.detector
@@ -86,7 +91,25 @@ class Responder:
             self._do(f"{name}: ゲームの窓が手前に無いので何もしません")
             return done
         for step in steps:
-            if "click" in step:
+            if "require_text" in step:
+                words = [w.lower() for w in step["require_text"]]
+                text = ""
+                if self.read_text is not None:
+                    img = self.grab()
+                    x, y, w, h = det.box
+                    try:
+                        text = " ".join(str(self.read_text(img[max(0, y):y + h, max(0, x):x + w])).split())
+                    except Exception as e:
+                        text = ""
+                        self._do(f"{name}: 文字が読めません ({e})")
+                low = text.lower()
+                if not any(wd in low for wd in words):
+                    self._do(f"{name}: 窓の文字に {'/'.join(words)} が無いので何もしません (読み: {text[:60]!r})")
+                    self.run("ra")
+                    return done
+                self._do(f"{name}: 窓の文字を確認 ({text[:60]!r})")
+                done.append("text")
+            elif "click" in step:
                 target = step["click"]
                 pos = None
                 if isinstance(target, str):

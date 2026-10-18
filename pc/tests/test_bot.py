@@ -2037,11 +2037,13 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
             det.open.discard("inventory")
 
     t = [0.0]
-    r = Responder(run, lambda: None, det, move=lambda x, y: f"a:{x:.0f},{y:.0f}", to_screen=lambda x, y: (x + 10, y + 20),
-                  sleep=lambda s: None, clock=lambda: t[0], log=lambda m: None)
+    text = ["Information  Bob  Someone requests you to join their a party"]
+    r = Responder(run, lambda: np.zeros((907, 1866, 3), np.uint8), det, move=lambda x, y: f"a:{x:.0f},{y:.0f}",
+                  to_screen=lambda x, y: (x + 10, y + 20), sleep=lambda s: None, clock=lambda: t[0], log=lambda m: None,
+                  read_text=lambda img: text[0])
     inv = Detection("party_invite", "window", True, 0.95, 0.99, (300, 150, 424, 288))
     done = r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)
-    assert done == ["click", "close:1", "chat", "chat"]
+    assert done == ["text", "click", "close:1", "chat", "chat"]
     assert sent[0] == "a:420,290;w:40;c:L"                     # Cancel の真ん中 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
     assert sent[2] == "k:enter;w:300" and sent[3].startswith("t:Sorry, I no need PT.;")
@@ -2050,8 +2052,12 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     det.open.add("party_invite")
     sent.clear()
     t[0] = 60
-    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["click", "close:0"]
+    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["text", "click", "close:0"]
     assert not any(s.startswith("t:") for s in sent)
+    # 同じ "Information" の窓でも、本文に party / join が無ければ何もしない
+    text[0] = "Information  Bob  Someone requests a trade"
+    sent.clear()
+    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == [] and sent == ["ra"]
     # ゲームが手前に無ければ何もしない
     r.is_active = lambda: False
     assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == []
