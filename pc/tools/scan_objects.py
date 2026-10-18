@@ -9,6 +9,7 @@
 ○ = 認識が「ある」と判定、× = 「無い」。上位に本物が × で混じっていれば見落とし、偽物が ○ なら誤検出。
 """
 import argparse
+import heapq
 import sys
 import time
 from collections import Counter
@@ -50,10 +51,11 @@ def main() -> None:
     present = Counter()
     sizes = Counter()
     first_last: dict[str, list] = {}
-    ranked = []  # (一致度, ネット, ある, ファイル, box)
+    ranked = []  # 似ている上位だけ (点数, 通し番号, 一致度, ネット, ある, ファイル, box, 切り抜き)
+    # 切り抜きは見つけたときに取っておく (学習中は古い画面が消されるので、後で読み直すと無いことがある)
     t0 = time.time()
     for i, f in enumerate(files, 1):
-        img = cv2.imread(str(f))
+        img = cv2.imread(str(f)) if f.exists() else None
         if img is None or img.shape[0] < 300:
             continue
         sizes[f"{img.shape[1]}x{img.shape[0]}"] += 1
@@ -63,7 +65,16 @@ def main() -> None:
                 fl = first_last.setdefault(r.name, [f, f])
                 fl[1] = f  # files は新しい順なので、最後に来たものが一番古い
             if r.name == args.name:
-                ranked.append((r.ncc, r.nn, r.present, f, r.box))
+                x, y, w, h = r.box
+                m = 30
+                crop = img[max(0, y - m):y + h + m, max(0, x - m):x + w + m].copy()
+                cv2.rectangle(crop, (min(m, x), min(m, y)), (min(m, x) + w, min(m, y) + h),
+                              (0, 255, 0) if r.present else (0, 0, 255), 2)
+                item = (r.ncc + max(0.0, r.nn), i, r.ncc, r.nn, r.present, f, r.box, crop)
+                if len(ranked) < args.top:
+                    heapq.heappush(ranked, item)
+                else:
+                    heapq.heappushpop(ranked, item)
         if i % 100 == 0:
             print(f"[scan] {i}/{len(files)} 枚 ({time.time() - t0:.0f} 秒)", flush=True)
 
@@ -83,18 +94,14 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("*.png"):
         old.unlink()
-    ranked.sort(key=lambda r: -(r[0] + max(0.0, r[1])))
-    print(f"\n[scan] {args.name}: 似ている順の上位 {min(args.top, len(ranked))} 枚 (○ = ある、× = 無い)")
-    for k, (ncc, nn, ok, f, (x, y, w, h)) in enumerate(ranked[:args.top], 1):
+    ranked.sort(key=lambda r: -r[0])
+    print(f"\n[scan] {args.name}: 似ている順の上位 {len(ranked)} 枚 (○ = ある、× = 無い)")
+    for k, (_, _, ncc, nn, ok, f, (x, y, w, h), crop) in enumerate(ranked, 1):
         print(f"    {k:2d}. {'○' if ok else '×'} 一致度 {ncc:.2f}  ネット {nn:.2f}  {f.parent.name}/{f.name}  ({x},{y},{w},{h})")
-        img = cv2.imread(str(f))
-        m = 30
-        crop = img[max(0, y - m):y + h + m, max(0, x - m):x + w + m].copy()
-        cv2.rectangle(crop, (min(m, x), min(m, y)), (min(m, x) + w, min(m, y) + h), (0, 255, 0) if ok else (0, 0, 255), 2)
         cv2.imwrite(str(out / f"{k:02d}_{'o' if ok else 'x'}_{ncc:.2f}_{max(0.0, nn):.2f}_{f.stem}.png"), crop)
     hits = present[args.name]
     print(f"\n[scan] {args.name} を「ある」と判定した画面: {hits} 枚 / {n} 枚")
-    best = ranked[0][0] if ranked else 0.0
+    best = max((r[2] for r in ranked), default=0.0)
     if hits == 0:
         print(f"[scan] 一番似ていた画面でも一致度 {best:.2f}。"
               + ("貯めた画面には写っていないと思われます (誤検出なし)。" if best < 0.6 else
