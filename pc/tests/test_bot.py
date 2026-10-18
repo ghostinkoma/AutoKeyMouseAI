@@ -2005,3 +2005,54 @@ def test_rare_watch_saves_and_declines_only_when_game_is_in_front(tmp_path):
         t[0] = 20 + k
         w.feed(img, [Detection("trade", "window", True, 0.95, 0.99, (100, 50, 400, 200))])
     assert clicks == [(300.0, 250.0)] and w.declined["trade"] == 1
+
+
+def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
+    from akm.edge.objects import Detection
+    from akm.edge.respond import DEFAULT_RESPONSES, Responder, chat_text_ok
+
+    class Obj:
+        def __init__(self, name):
+            self.name = name
+
+    class Det:
+        def __init__(self):
+            self.objects = [Obj(n) for n in ("party_invite", "party_invite_cancel", "inventory", "hunting_log")]
+            self.open = {"inventory", "hunting_log", "party_invite"}
+
+        def detect(self, img):
+            out = [Detection(n, "window", n in self.open, 0.9, 0.9, (100, 100, 400, 200)) for n in
+                   ("party_invite", "inventory", "hunting_log")]
+            out.append(Detection("party_invite_cancel", "icon", "party_invite" in self.open, 0.9, 0.9, (380, 260, 60, 20)))
+            return out
+
+    det = Det()
+    sent = []
+
+    def run(script):
+        sent.append(script)
+        if "c:L" in script:
+            det.open.discard("party_invite")      # Cancel を押したら勧誘の窓が消える
+        if "k:esc" in script:
+            det.open.discard("inventory")
+
+    t = [0.0]
+    r = Responder(run, lambda: None, det, move=lambda x, y: f"a:{x:.0f},{y:.0f}", to_screen=lambda x, y: (x + 10, y + 20),
+                  sleep=lambda s: None, clock=lambda: t[0], log=lambda m: None)
+    inv = Detection("party_invite", "window", True, 0.95, 0.99, (300, 150, 424, 288))
+    done = r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)
+    assert done == ["click", "close:1", "chat", "chat"]
+    assert sent[0] == "a:420,290;w:40;c:L"                     # Cancel の真ん中 (+ ウィンドウの位置)
+    assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
+    assert sent[2] == "k:enter;w:300" and sent[3].startswith("t:Sorry, I no need PT.;")
+    assert sent[5].startswith("t:Perdon,") and sent[-1] == "ra"
+    # 2 分以内にまた勧誘されたら、断るだけでチャットはしない
+    det.open.add("party_invite")
+    sent.clear()
+    t[0] = 60
+    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["click", "close:0"]
+    assert not any(s.startswith("t:") for s in sent)
+    # ゲームが手前に無ければ何もしない
+    r.is_active = lambda: False
+    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == []
+    assert chat_text_ok("Perdón") and chat_text_ok("x" * 80) and chat_text_ok("ok") is None

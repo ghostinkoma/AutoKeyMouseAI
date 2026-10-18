@@ -168,24 +168,39 @@ def main() -> None:
                      if n.strip()]
             dcfg = rcfg.get("decline") or {}
             names = [n.strip() for n in (args.decline or "").split(",") if n.strip()]
-            decline = {n: (dcfg.get(n) or {"key": "esc"}) for n in names}
-            press = click = None
+            from akm.edge.respond import DEFAULT_RESPONSES
+
+            steps_cfg = {**DEFAULT_RESPONSES, **(rcfg.get("respond") or {})}  # 応じ方の手順 (config で上書き)
+            decline = {n: (dcfg.get(n) or steps_cfg.get(n) or {"key": "esc"}) for n in names}
+            press = click = responder = None
             if decline:
                 from akm.config import abs_map_from
                 from akm.device import open_device
+                from akm.edge.respond import Responder
 
                 dev = open_device(cfg, abs_map_from(cfg))
                 press = dev.key
                 click = lambda x, y: dev.click(*screen.to_screen(x, y))  # noqa: E731
+                responder = Responder(dev.run, grab_full, lambda: rec.detector, move=dev.s_move,
+                                      to_screen=screen.to_screen, is_active=getattr(screen, "is_active", None),
+                                      keep=rcfg.get("keep", ["hunting_log", "helper_panel"]),
+                                      chat_cooldown_s=float(rcfg.get("chat_cooldown_s", 120)))
             known = {o.name for o in det.objects}
             missing = [n for n in set(watch) | set(decline) if n not in known]
             if missing:
                 print(f"[rare] 未登録の窓: {', '.join(missing)} (python tools\\edge_objects.py add-screen 名前 で登録)")
             rare = RareWatch(watch, PC_DIR / "dataset" / "screens" / "rare", decline, press=press, click=click,
-                             is_active=getattr(screen, "is_active", None), confirm=int(rcfg.get("confirm", 2)))
-            print(f"[rare] 見張る窓: {', '.join(sorted(rare.names))} (見えたら dataset/screens/rare に画面を保存)"
-                  + (f" / 断る: " + ", ".join(f"{n} ({'クリック' if a.get('click') else 'キー ' + a.get('key', 'esc')})"
-                                          for n, a in decline.items()) if decline else ""))
+                             is_active=getattr(screen, "is_active", None), confirm=int(rcfg.get("confirm", 2)),
+                             responder=responder)
+            def how(a):
+                if isinstance(a, list):
+                    return " → ".join(str(next(iter(st.values()))) if "chat" not in st else f"チャット「{st['chat']}」"
+                                      for st in a)
+                return "クリック" if a.get("click") else "キー " + a.get("key", "esc")
+
+            print(f"[rare] 見張る窓: {', '.join(sorted(rare.names))} (見えたら dataset/screens/rare に画面を保存)")
+            for n, a in decline.items():
+                print(f"[rare] {n} が出たら: {how(a)}")
         rec = LiveRecognizer(grab_full, det, ocr if args.recognize else None, period=args.recognize_every,
                              on_result=(lambda r: m.set_lines(overlay_lines(r))) if args.recognize else None,
                              learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None,

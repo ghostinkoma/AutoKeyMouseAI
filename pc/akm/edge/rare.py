@@ -20,10 +20,11 @@ class RareWatch:
     def __init__(self, names, out_dir: Path, decline: dict | None = None, press=None, click=None,
                  is_active=None, confirm: int = 2, cooldown_s: float = 4.0, save_every_s: float = 3.0,
                  maybe: float = 0.55, maybe_every_s: float = 60.0, max_per_name: int = 60, log=print,
-                 clock=time.monotonic):
+                 clock=time.monotonic, responder=None):
         self.names = set(names) | set(decline or {})
         self.out = Path(out_dir)
-        self.decline = decline or {}   # 名前 → {"key": "esc"} または {"click": [横の割合, 縦の割合]} (窓の枠の中の位置)
+        self.decline = decline or {}   # 名前 → {"key": "esc"} / {"click": [横の割合, 縦の割合]} (窓の枠の中の位置)
+                                       #        / 手順の list (akm/edge/respond.py)
         self.press = press             # (key) → None
         self.click = click             # (x, y) 画面のピクセル → None
         self.is_active = is_active or (lambda: True)
@@ -35,6 +36,7 @@ class RareWatch:
         self.max_per_name = max_per_name
         self.log = log
         self.clock = clock
+        self.responder = responder     # akm.edge.respond.Responder (decline が手順の list のとき)
         self.hits: dict[str, int] = {}
         self.seen: dict[str, int] = {}       # 見つけた回数 (続けて見えている間は 1 回)
         self.declined: dict[str, int] = {}
@@ -86,6 +88,14 @@ class RareWatch:
                     self.log(f"[rare] {d.name} を断りたいが、ゲームの窓が手前に無いので押しません")
                 continue
             self._last_act[d.name] = now
+            if isinstance(act, list):  # 手順 (Cancel をクリック → 窓を閉じる → チャット …)
+                if self.responder is None:
+                    continue
+                self.responder.respond(d.name, act, d)
+                self.declined[d.name] = self.declined.get(d.name, 0) + 1
+                done.append(f"decline:{d.name}")
+                self.hits[d.name] = 0
+                continue
             if act.get("click") and self.click is not None:
                 fx, fy = act["click"]
                 x, y, w, h = d.box

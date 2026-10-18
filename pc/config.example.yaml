@@ -110,15 +110,24 @@ obs:
 # を切り出して保存し、下のコメントを外す
 # めったに出ない窓 (mirror_only --recognize / learn_loop)。登録は tools/edge_objects.py add-screen 名前 --kind window
 #   watch  : 見えた瞬間の画面を dataset/screens/rare/<名前>/ に保存する (学習の見本。似ているだけの画面は _maybe/ に)
-#   decline: 断り方。--decline party_invite (learn_loop.ps1 -Decline party_invite) を付けたときだけ使う
-#            key: 押すキー / click: [横, 縦] = 窓の枠の中の位置 (0〜1。例 Cancel ボタンが右下なら [0.75, 0.9])
-#   confirm: 続けて何回見えたら断るか (1 秒に 1 回認識)
+#   respond: 応じ方の手順。--decline party_invite (learn_loop.ps1 -Decline party_invite) を付けたときだけ動く
+#            (書かなければ akm/edge/respond.py の DEFAULT_RESPONSES。下は既定と同じもの)
+#     click: 物体の名前 (Cancel ボタンを --kind icon で登録) か [横, 縦] = 窓の枠の中の位置 (0〜1)
+#     close_windows: 開いている窓の数だけ押すキー (keep の窓は数えない)
+#     chat: Enter → 文字 → Enter でチャットに送る (ASCII のみ。á ñ ¿ は打てない。chat_cooldown_s 秒に 1 回まで)
+#   confirm: 続けて何回見えたら応じるか (1 秒に 1 回認識)
 rare_windows:
   watch: [party_invite, trade]
   confirm: 2
-  decline:
+  keep: [hunting_log, helper_panel]
+  chat_cooldown_s: 120
+  respond:
     party_invite:
-      key: esc
+      - click: party_invite_cancel
+        fallback_key: esc
+      - close_windows: esc
+      - chat: "Sorry, I no need PT."
+      - chat: "Perdon, estoy cazando solo en este spot. No hago party, gracias!"
 
 popups:
   # - name: party request
