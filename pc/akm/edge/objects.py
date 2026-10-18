@@ -34,6 +34,7 @@ class ObjectDef:
     ref_h: int                # 切り抜いたときの画面の高さ
     key: str | None = None    # 窓を開閉するキー (あれば)
     group: str | None = None  # 同時には出ないもの同士 (動作中の ■ と停止中の ▶ など)。一番確からしい 1 つだけ残す
+    points: dict = field(default_factory=dict)  # 窓の中の押す場所 {"cancel": [横の割合, 縦の割合]}
     gray: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -68,8 +69,38 @@ def load_objects(base: Path = DATA) -> list[ObjectDef]:
         img = cv2.imread(str(base / e["image"]))
         if img is not None:
             out.append(ObjectDef(e["name"], e.get("kind", "window"), img, int(e.get("ref_h", 1050)), e.get("key"),
-                                 e.get("group")))
+                                 e.get("group"), dict(e.get("points") or {})))
     return out
+
+
+def _items(base: Path) -> list[dict]:
+    f = base / "objects.yaml"
+    return (yaml.safe_load(f.read_text(encoding="utf-8")) or []) if f.exists() else []
+
+
+def _write(base: Path, items: list[dict]) -> None:
+    (base / "objects.yaml").write_text(yaml.safe_dump(items, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def remove_object(name: str, base: Path = DATA) -> bool:
+    items = _items(base)
+    keep = [e for e in items if e["name"] != name]
+    if len(keep) == len(items):
+        return False
+    _write(base, keep)
+    (base / f"{name}.png").unlink(missing_ok=True)
+    return True
+
+
+def save_point(name: str, point: str, fx: float, fy: float, base: Path = DATA) -> None:
+    """登録した窓の中の押す場所 (割合) を覚える。"""
+    items = _items(base)
+    for e in items:
+        if e["name"] == name:
+            e.setdefault("points", {})[point] = [round(float(fx), 4), round(float(fy), 4)]
+            _write(base, items)
+            return
+    raise KeyError(name)
 
 
 def save_object(name: str, kind: str, crop: np.ndarray, screen_h: int, key: str | None = None,

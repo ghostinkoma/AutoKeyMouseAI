@@ -2014,6 +2014,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     class Obj:
         def __init__(self, name):
             self.name = name
+            self.points = {"cancel": [0.75, 0.9]} if name == "party_invite" else {}
 
     class Det:
         def __init__(self):
@@ -2044,7 +2045,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     inv = Detection("party_invite", "window", True, 0.95, 0.99, (300, 150, 424, 288))
     done = r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)
     assert done == ["text", "click", "close:1", "chat", "chat"]
-    assert sent[0] == "a:420,290;w:40;c:L"                     # Cancel の真ん中 (+ ウィンドウの位置)
+    assert sent[0] == "a:628,429;w:40;c:L"                     # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
     assert sent[2] == "k:enter;w:300" and sent[3].startswith("t:Sorry, I no need PT.;")
     assert sent[5].startswith("t:Perdon,") and sent[-1] == "ra"
@@ -2062,3 +2063,17 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     r.is_active = lambda: False
     assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == []
     assert chat_text_ok("Perdón") and chat_text_ok("x" * 80) and chat_text_ok("ok") is None
+
+
+def test_object_points_and_remove(tmp_path):
+    from akm.edge.objects import load_objects, remove_object, save_object, save_point
+
+    img = np.full((300, 440, 3), 40, np.uint8)
+    save_object("party_invite", "window", img, 907, base=tmp_path)
+    save_object("party_invite_cancel", "icon", img, 907, base=tmp_path)
+    save_point("party_invite", "cancel", 0.7512345, 0.88, base=tmp_path)
+    objs = {o.name: o for o in load_objects(tmp_path)}
+    assert objs["party_invite"].points == {"cancel": [0.7512, 0.88]} and objs["party_invite_cancel"].points == {}
+    assert remove_object("party_invite_cancel", tmp_path) and not remove_object("nope", tmp_path)
+    assert [o.name for o in load_objects(tmp_path)] == ["party_invite"]
+    assert not (tmp_path / "party_invite_cancel.png").exists()

@@ -113,7 +113,7 @@ obs:
 #   respond: 応じ方の手順。--decline party_invite (learn_loop.ps1 -Decline party_invite) を付けたときだけ動く
 #            (書かなければ akm/edge/respond.py の DEFAULT_RESPONSES。下は既定と同じもの)
 #     require_text: 窓の中の文字にどれかの語が無ければ何もしない (タイトル "Information" は別の知らせと同じなので)
-#     click: 物体の名前 (Cancel ボタンを --kind icon で登録) か [横, 縦] = 窓の枠の中の位置 (0〜1)
+#     click: "@場所" (edge_objects.py point で覚えた窓の中の場所) / 物体の名前 / [横, 縦] = 窓の枠の中の位置 (0〜1)
 #     close_windows: 開いている窓の数だけ押すキー (keep の窓は数えない)
 #     chat: Enter → 文字 → Enter でチャットに送る (ASCII のみ。á ñ ¿ は打てない。chat_cooldown_s 秒に 1 回まで)
 #   confirm: 続けて何回見えたら応じるか (1 秒に 1 回認識)
@@ -125,7 +125,7 @@ rare_windows:
   respond:
     party_invite:
       - require_text: [party, join]     # 本文 "Someone requests you to join their party" で確かめる
-      - click: party_invite_cancel
+      - click: "@cancel"                # python tools\edge_objects.py point party_invite cancel で覚えた場所
         fallback_key: esc
       - close_windows: esc
       - chat: "Sorry, I no need PT."

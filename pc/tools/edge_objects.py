@@ -9,6 +9,8 @@
     python tools\\edge_objects.py train                      学習して models/edge_obj.npz と
                                                            firmware/AutoKeyMouse/edge_obj_model.h (ESP32 用) を書き出す
     python tools\\edge_objects.py find 画面.png               画面で探して結果を表示 (画面_found.png に枠を描く)
+    python tools\\edge_objects.py point party_invite cancel   登録した窓の画像で、押す場所 (Cancel ボタン) を 1 回クリックして覚える
+    python tools\\edge_objects.py remove 名前                 登録を消す
 
 学習に使う画面: dataset/frames (mirror_only --learn で集まる)、dataset/helper_state、dataset/screens、dataset/ui の png。
 登録した切り抜きを拡大縮小・明るさ・圧縮で変えた「ある」見本と、画面のいろいろな場所の「無い」見本で学ぶ。
@@ -24,7 +26,8 @@ import numpy as np
 
 from akm.config import PC_DIR
 from akm.edge.mlp import train
-from akm.edge.objects import DATA, MODEL, ObjectDetector, load_objects, patch_features, save_object
+from akm.edge.objects import (DATA, MODEL, ObjectDetector, load_objects, patch_features, remove_object, save_object,
+                              save_point)
 
 HEADER = PC_DIR.parent / "firmware" / "AutoKeyMouse" / "edge_obj_model.h"
 FRAME_DIRS = ["frames", "helper_state", "screens", "ui"]
@@ -193,10 +196,51 @@ def cmd_import_ui(args) -> None:
     print(f"[import] {n} 個取り込みました" + ("" if n else " (templates/ui_*.png がまだありません)"))
 
 
+def cmd_remove(args) -> None:
+    if not remove_object(args.name):
+        raise SystemExit(f"{args.name} は登録されていません")
+    print(f"[remove] {args.name} を消しました。train で学習し直してください")
+
+
+def cmd_point(args) -> None:
+    obj = next((o for o in load_objects() if o.name == args.name), None)
+    if obj is None:
+        raise SystemExit(f"{args.name} は登録されていません")
+    img = obj.image
+    zoom = max(1.0, min(3.0, 600 / max(img.shape[:2])))
+    big = cv2.resize(img, None, fx=zoom, fy=zoom, interpolation=cv2.INTER_NEAREST)
+    pos = {}
+    title = f"point: {args.name} {args.point} (click, Enter = OK, Esc = cancel)"
+
+    def on_mouse(ev, x, y, flags, param):
+        if ev == cv2.EVENT_LBUTTONDOWN:
+            pos["p"] = (x, y)
+            vis = big.copy()
+            cv2.drawMarker(vis, (x, y), (0, 0, 255), cv2.MARKER_CROSS, 24, 2)
+            cv2.imshow(title, vis)
+
+    print(f"[point] {args.name} の画像で「{args.point}」の場所 (ボタンの真ん中) を 1 回クリックして Enter (Esc でやめる)")
+    cv2.imshow(title, big)
+    cv2.setMouseCallback(title, on_mouse)
+    while True:
+        k = cv2.waitKey(50) & 0xFF
+        if k in (13, 32) and "p" in pos:
+            break
+        if k == 27:
+            cv2.destroyAllWindows()
+            raise SystemExit("やめました")
+    cv2.destroyAllWindows()
+    fx, fy = pos["p"][0] / big.shape[1], pos["p"][1] / big.shape[0]
+    save_point(args.name, args.point, fx, fy)
+    print(f"[point] {args.name} の {args.point} = 横 {fx:.2f} / 縦 {fy:.2f} (窓の中の割合) を覚えました"
+          " (学習し直しは不要。learn_loop は次の学習の回で読み直します)")
+
+
 def cmd_list(args) -> None:
     for o in load_objects():
         print(f"  {o.name:16s} {o.kind:6s} {o.image.shape[1]}x{o.image.shape[0]} (画面の高さ {o.ref_h})"
-              + (f"  開閉キー {o.key}" if o.key else ""))
+              + (f"  開閉キー {o.key}" if o.key else "")
+              + "".join(f"  {k} ({v[0]:.2f}, {v[1]:.2f})" for k, v in o.points.items()))
     print(f"  学習済みモデル: {'あり' if MODEL.exists() else 'なし (train で作る)'}")
 
 
@@ -223,9 +267,14 @@ def main() -> None:
     t.add_argument("-v", "--verbose", action="store_true")
     f = sub.add_parser("find")
     f.add_argument("image")
+    rm = sub.add_parser("remove")
+    rm.add_argument("name")
+    pt = sub.add_parser("point")
+    pt.add_argument("name")
+    pt.add_argument("point", nargs="?", default="cancel")
     args = ap.parse_args()
     {"list": cmd_list, "add": cmd_add, "add-screen": cmd_add_screen, "import-ui": cmd_import_ui,
-     "train": cmd_train, "find": cmd_find}[args.cmd](args)
+     "train": cmd_train, "find": cmd_find, "remove": cmd_remove, "point": cmd_point}[args.cmd](args)
 
 
 if __name__ == "__main__":

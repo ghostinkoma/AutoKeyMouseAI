@@ -1,7 +1,9 @@
 """めったに出ない窓への「応じ方」を手順として実行する (判定 → 行動の最初の一歩)。
 
 手順 (config.yaml の rare_windows.respond.<窓の名前> に書く。無ければ DEFAULT_RESPONSES):
-  - click: party_invite_cancel   登録した物体 (Cancel ボタンなど) の真ん中をクリック
+  - click: "@cancel"             見つけた窓の中の「cancel」の場所をクリック
+                                 (場所は python tools\\edge_objects.py point party_invite cancel で 1 回クリックして覚える)
+    click: party_invite_cancel   登録した物体 (Cancel ボタンなど) の真ん中をクリック
     click: [0.75, 0.9]           見つけた窓の枠の中の位置 (横, 縦 の割合) をクリック
                                  (ボタンが見つからないときは fallback_key を押す。既定 esc)
   - close_windows: esc           開いている窓の数だけ esc を押す (keep に書いた窓は数えない)
@@ -24,7 +26,7 @@ DEFAULT_RESPONSES = {
     "party_invite": [
         # タイトルは "Information" で、ほかの知らせ (トレードの申し込みなど) と同じ。本文の文字で確かめる
         {"require_text": ["party", "join"]},
-        {"click": "party_invite_cancel", "fallback_key": "esc"},
+        {"click": "@cancel", "fallback_key": "esc"},
         {"close_windows": "esc"},
         {"chat": "Sorry, I no need PT."},
         {"chat": "Perdon, estoy cazando solo en este spot. No hago party, gracias!"},
@@ -112,7 +114,16 @@ class Responder:
             elif "click" in step:
                 target = step["click"]
                 pos = None
-                if isinstance(target, str):
+                if isinstance(target, str) and target.startswith("@"):
+                    obj = next((o for o in self._det().objects if o.name == det.name), None)
+                    pt = (getattr(obj, "points", None) or {}).get(target[1:]) if obj is not None else None
+                    if pt:
+                        x, y, w, h = det.box
+                        pos = (x + w * float(pt[0]), y + h * float(pt[1]))
+                    else:
+                        self._do(f"{det.name} の {target[1:]} の場所が未登録なので {step.get('fallback_key', 'esc')} で閉じます"
+                                 f" (python tools\\edge_objects.py point {det.name} {target[1:]})")
+                elif isinstance(target, str):
                     if self._has(target):
                         for d in self._detect():
                             if d.name == target and d.present:
