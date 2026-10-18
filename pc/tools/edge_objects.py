@@ -11,6 +11,9 @@
     python tools\\edge_objects.py find 画面.png               画面で探して結果を表示 (画面_found.png に枠を描く)
     python tools\\edge_objects.py point party_invite cancel   登録した窓の画像で、押す場所 (Cancel ボタン) を 1 回クリックして覚える
     python tools\\edge_objects.py remove 名前                 登録を消す
+    python tools\\edge_objects.py restore helper_running      最初から入っている登録 (helper_*, hunting_log) を元に戻す
+囲み方: 1 回目は縮小した画面で大まかに → 2 回目は拡大した画面でぴったり → 切り抜きを見て y で登録。
+        --box x,y,幅,高さ で範囲を直接指定もできる
 
 学習に使う画面: dataset/frames (mirror_only --learn で集まる)、dataset/helper_state、dataset/screens、dataset/ui の png。
 登録した切り抜きを拡大縮小・明るさ・圧縮で変えた「ある」見本と、画面のいろいろな場所の「無い」見本で学ぶ。
@@ -149,13 +152,52 @@ def cmd_find(args) -> None:
     cv2.imencode(".png", out)[1].tofile(str(p.with_name(p.stem + "_found.png")))
 
 
-def select_and_save(img: np.ndarray, args) -> None:
-    print(f"[add] {args.name} の変わらない部分 (タイトル・枠・アイコン。中身の数値や品物は含めない) を囲んで Enter")
-    x, y, w, h = cv2.selectROI(f"add: {args.name}", img, showCrosshair=False)
+def _select(img: np.ndarray, title: str, max_w: int = 1200, max_h: int = 650) -> tuple[int, int, int, int]:
+    """画面に収まるように縮小して表示し、囲んだ範囲を元の画像の座標で返す (囲まなければ 0,0,0,0)。"""
+    s = min(1.0, max_w / img.shape[1], max_h / img.shape[0])
+    if s < 1.0:
+        shown = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    else:  # 小さい範囲は拡大して見やすく
+        s = min(6.0, max_w / img.shape[1], max_h / img.shape[0])
+        shown = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_NEAREST)
+    x, y, w, h = cv2.selectROI(title, shown, showCrosshair=False)
     cv2.destroyAllWindows()
     if w == 0 or h == 0:
-        raise SystemExit("やめました")
-    save_object(args.name, args.kind, img[y:y + h, x:x + w], img.shape[0], args.key, group=args.group)
+        return 0, 0, 0, 0
+    return int(x / s), int(y / s), max(1, int(round(w / s))), max(1, int(round(h / s)))
+
+
+def select_and_save(img: np.ndarray, args) -> None:
+    if getattr(args, "box", None):
+        x, y, w, h = (int(v) for v in args.box.split(","))
+    else:
+        print(f"[add] 1 回目: {args.name} のあたりを大まかに囲んで Enter (画面に収まるよう縮小して表示しています)")
+        x, y, w, h = _select(img, f"1/2 add: {args.name} (rough)")
+        if w == 0:
+            raise SystemExit("やめました")
+        m = 20
+        x0, y0 = max(0, x - m), max(0, y - m)
+        area = img[y0:min(img.shape[0], y + h + m), x0:min(img.shape[1], x + w + m)]
+        print(f"[add] 2 回目: 拡大した画面で {args.name} の変わらない部分だけをぴったり囲んで Enter"
+              " (囲まずに Enter なら 1 回目の範囲のまま)")
+        rx, ry, rw, rh = _select(area, f"2/2 add: {args.name} (exact)")
+        if rw:
+            x, y, w, h = x0 + rx, y0 + ry, rw, rh
+    crop = img[y:y + h, x:x + w]
+    if crop.size == 0:
+        raise SystemExit("範囲が画面の外です")
+    print(f"[add] 切り抜き: {w}x{h} (画面の {x},{y})")
+    if args.kind == "icon" and max(w, h) > 150:
+        print(f"[add] 注意: アイコンにしては大きすぎます ({w}x{h})。Helper のボタンなら 30x30 くらいです")
+    if not getattr(args, "box", None):
+        zoom = min(6.0, 500 / max(w, h))
+        cv2.imshow(f"check: {args.name} {w}x{h} (any key)", cv2.resize(crop, None, fx=zoom, fy=zoom,
+                                                                       interpolation=cv2.INTER_NEAREST))
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        if input(f"[add] この切り抜き ({w}x{h}) で {args.name} を登録しますか? [y/N] ").strip().lower() not in ("y", "yes"):
+            raise SystemExit("登録しませんでした (前の登録はそのまま)")
+    save_object(args.name, args.kind, crop, img.shape[0], args.key, group=args.group)
     print(f"[add] {args.name} を登録しました ({w}x{h}, 画面の高さ {img.shape[0]})。train で学習し直してください")
 
 
@@ -194,6 +236,36 @@ def cmd_import_ui(args) -> None:
         print(f"[import] {e['name']} ({p.name}, 開閉キー {e['key']})")
         n += 1
     print(f"[import] {n} 個取り込みました" + ("" if n else " (templates/ui_*.png がまだありません)"))
+
+
+def cmd_restore(args) -> None:
+    """最初から入っている窓・アイコン (helper_running など) を、配布時の画像と設定に戻す。"""
+    import subprocess
+
+    import yaml
+
+    rel = "pc/akm/data/objects"
+
+    def git_show(path: str) -> bytes:
+        return subprocess.run(["git", "show", f"HEAD:{rel}/{path}"], cwd=str(PC_DIR), capture_output=True,
+                              check=True).stdout
+
+    try:
+        orig = yaml.safe_load(git_show("objects.yaml").decode("utf-8")) or []
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(f"git から読めません: {e}")
+    entry = next((e for e in orig if e["name"] == args.name), None)
+    if entry is None:
+        raise SystemExit(f"{args.name} は最初から入っているものではありません ({', '.join(e['name'] for e in orig)})")
+    (DATA / entry["image"]).write_bytes(git_show(entry["image"]))
+    f = DATA / "objects.yaml"
+    items = (yaml.safe_load(f.read_text(encoding="utf-8")) or []) if f.exists() else []
+    items = [entry if e["name"] == args.name else e for e in items]
+    if not any(e["name"] == args.name for e in items):
+        items.append(entry)
+    f.write_text(yaml.safe_dump(items, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    print(f"[restore] {args.name} を最初の登録に戻しました ({entry['image']}, 画面の高さ {entry.get('ref_h')})。"
+          "ほかの登録はそのままです。train で学習し直してください")
 
 
 def cmd_remove(args) -> None:
@@ -256,6 +328,7 @@ def main() -> None:
         a.add_argument("--kind", choices=["window", "icon"], default="window")
         a.add_argument("--key", help="窓を開閉するキー (例 v)")
         a.add_argument("--group", help="同時には出ないもの同士の名前 (例 helper_button)。一番確からしい 1 つだけ残す")
+        a.add_argument("--box", help="囲む範囲を x,y,幅,高さ で直接指定する (マウスで囲まない)")
         if name == "add":
             a.add_argument("image")
     im = sub.add_parser("import-ui")
@@ -269,12 +342,15 @@ def main() -> None:
     f.add_argument("image")
     rm = sub.add_parser("remove")
     rm.add_argument("name")
+    rs = sub.add_parser("restore")
+    rs.add_argument("name")
     pt = sub.add_parser("point")
     pt.add_argument("name")
     pt.add_argument("point", nargs="?", default="cancel")
     args = ap.parse_args()
     {"list": cmd_list, "add": cmd_add, "add-screen": cmd_add_screen, "import-ui": cmd_import_ui,
-     "train": cmd_train, "find": cmd_find, "remove": cmd_remove, "point": cmd_point}[args.cmd](args)
+     "train": cmd_train, "find": cmd_find, "remove": cmd_remove, "point": cmd_point,
+     "restore": cmd_restore}[args.cmd](args)
 
 
 if __name__ == "__main__":
