@@ -56,7 +56,7 @@ def overlay_lines(r: Recognition) -> list[tuple[str, tuple[int, int, int]]]:
 class LiveRecognizer:
     def __init__(self, grab_full, detector, ocr=None, period: float = 1.0, on_result=None,
                  learn_dir: Path | None = None, learn_every: float = 30.0, learn_max: int = 500, log=print,
-                 harvester=None, world=None):
+                 harvester=None, world=None, rare=None):
         self.grab_full = grab_full      # () → 等倍の画面 (BGR)
         self.detector = detector        # akm.edge.objects.ObjectDetector
         self.ocr = ocr                  # akm.edge.ocr.OcrReader (無ければ名前は読まない)
@@ -68,6 +68,8 @@ class LiveRecognizer:
         self.log = log
         self.harvester = harvester      # akm.edge.harvest.OcrHarvester (正解付きの文字の行を自動で集める)
         self.world = world              # akm.world_log.WorldLogger (現在地と相手を DB に記録する)
+        self.rare = rare                # akm.edge.rare.RareWatch (めったに出ない窓の画面を残す・断る)
+        self._dets = []
         self.last = Recognition()
         self.keep_target_s = 8.0        # 相手が見えなくなっても液晶に残す秒数
         self._shown = None
@@ -81,7 +83,8 @@ class LiveRecognizer:
     def recognize(self, img) -> Recognition:
         t0 = time.perf_counter()
         r = Recognition()
-        for d in self.detector.detect(img):
+        self._dets = self.detector.detect(img)
+        for d in self._dets:
             if not d.present:
                 continue
             if d.name == "helper_running":
@@ -122,6 +125,11 @@ class LiveRecognizer:
         img = self.grab_full()
         r = self.recognize(img)
         self._save(img)
+        if self.rare is not None:
+            try:
+                self.rare.feed(img, self._dets)
+            except Exception as e:
+                self.log(f"[rare] 失敗: {e}")
         if self.world is not None:
             try:
                 self.world.feed(img, r, self.ocr)

@@ -1970,3 +1970,38 @@ def test_window_history_counts_each_frame_once(tmp_path):
     assert h["types"]["inventory"]["titles"] == ["Inventory", "lnventory"] and h["types"]["inventory"]["first"] == "t1"
     assert h["frames"] == ["frames/a.png", "frames/b.png", "frames/c.png", "frames/d.png"]
     assert h["types"]["unknown_6x8@left"]["name"] is None
+
+
+def test_rare_watch_saves_and_declines_only_when_game_is_in_front(tmp_path):
+    from akm.edge.objects import Detection
+    from akm.edge.rare import RareWatch
+
+    t = [0.0]
+    keys, clicks, logs = [], [], []
+    active = [False]
+    w = RareWatch(["party_invite"], tmp_path, {"party_invite": {"key": "esc"}, "trade": {"click": [0.5, 1.0]}},
+                  press=keys.append, click=lambda x, y: clicks.append((x, y)), is_active=lambda: active[0],
+                  confirm=2, cooldown_s=4, save_every_s=3, clock=lambda: t[0], log=logs.append)
+    img = np.zeros((907, 1866, 3), np.uint8)
+    inv = Detection("party_invite", "window", True, 0.95, 0.99, (100, 50, 400, 200))
+    other = Detection("hunting_log", "window", True, 0.9, 1.0, (0, 0, 10, 10))
+    assert w.feed(img, [inv, other]) == ["save:party_invite"] and keys == []      # 1 回目: 保存だけ
+    t[0] = 1
+    assert w.feed(img, [inv]) == [] and keys == []                                 # 2 回目: 手前に無いので押さない
+    assert sum("手前に無い" in l for l in logs) == 1
+    t[0] = 2
+    active[0] = True
+    assert w.feed(img, [inv]) == ["decline:party_invite"] and keys == ["esc"]
+    t[0] = 3
+    assert w.feed(img, [inv]) == ["save:party_invite"] and keys == ["esc"]          # 断った直後は待つ
+    assert w.seen == {"party_invite": 1} and w.declined == {"party_invite": 1}
+    assert len(list((tmp_path / "party_invite").glob("*.png"))) >= 1
+    # 消えて、似ているだけの画面は _maybe に (見落としの確認用)
+    t[0] = 10
+    w.feed(img, [Detection("party_invite", "window", False, 0.6, 0.1, (0, 0, 400, 200))])
+    assert w.hits["party_invite"] == 0 and list((tmp_path / "_maybe" / "party_invite").glob("*.png"))
+    # クリックで断る設定: 窓の枠の中の位置を押す
+    for k in range(2):
+        t[0] = 20 + k
+        w.feed(img, [Detection("trade", "window", True, 0.95, 0.99, (100, 50, 400, 200))])
+    assert clicks == [(300.0, 250.0)] and w.declined["trade"] == 1

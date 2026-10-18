@@ -44,6 +44,12 @@ def main() -> None:
                     help="保存済みの OBS のパスワードでつながれば聞かない (learn_loop.ps1 の自動再起動用)")
     ap.add_argument("--no-db", action="store_true",
                     help="--recognize で読んだ現在地・相手の名前を DB (ビューアと共通の mu_map.db) に記録しない")
+    ap.add_argument("--rare", default=None,
+                    help="めったに出ない窓の名前 (カンマ区切り)。見えた瞬間の画面を dataset/screens/rare に残す"
+                         " (省略時は config の rare_windows.watch。無ければ party_invite,trade)")
+    ap.add_argument("--decline", default=None,
+                    help="見えたら断る窓の名前 (カンマ区切り。例 party_invite)。ゲームの窓が手前のときだけキーを送る"
+                         " (押すキー・クリック位置は config の rare_windows.decline)")
     ap.add_argument("--tolerance", type=int, default=16, help="ブロック差分方式の許容誤差 (大きいほど小さく粗い)")
     ap.add_argument("--max-ratio", type=float, default=1.5,
                     help="ブロック差分が JPEG の何倍までならそのまま送るか (大きくすると JPEG を使わない。99 で常にブロック差分)")
@@ -153,10 +159,37 @@ def main() -> None:
                   f"先生役の OCR: {'あり' if wteacher else 'なし'})。ビューア: java -jar viewer\\mapviewer.jar")
             if not FILTER_MODEL.exists():
                 print("[world] 判定 AI のモデルがありません。規則で代わりに判定します")
+        rare = None
+        if args.recognize:
+            from akm.edge.rare import RareWatch
+
+            rcfg = cfg.get("rare_windows") or {}
+            watch = [n.strip() for n in (args.rare or ",".join(rcfg.get("watch") or ["party_invite", "trade"])).split(",")
+                     if n.strip()]
+            dcfg = rcfg.get("decline") or {}
+            names = [n.strip() for n in (args.decline or "").split(",") if n.strip()]
+            decline = {n: (dcfg.get(n) or {"key": "esc"}) for n in names}
+            press = click = None
+            if decline:
+                from akm.config import abs_map_from
+                from akm.device import open_device
+
+                dev = open_device(cfg, abs_map_from(cfg))
+                press = dev.key
+                click = lambda x, y: dev.click(*screen.to_screen(x, y))  # noqa: E731
+            known = {o.name for o in det.objects}
+            missing = [n for n in set(watch) | set(decline) if n not in known]
+            if missing:
+                print(f"[rare] 未登録の窓: {', '.join(missing)} (python tools\\edge_objects.py add-screen 名前 で登録)")
+            rare = RareWatch(watch, PC_DIR / "dataset" / "screens" / "rare", decline, press=press, click=click,
+                             is_active=getattr(screen, "is_active", None), confirm=int(rcfg.get("confirm", 2)))
+            print(f"[rare] 見張る窓: {', '.join(sorted(rare.names))} (見えたら dataset/screens/rare に画面を保存)"
+                  + (f" / 断る: " + ", ".join(f"{n} ({'クリック' if a.get('click') else 'キー ' + a.get('key', 'esc')})"
+                                          for n, a in decline.items()) if decline else ""))
         rec = LiveRecognizer(grab_full, det, ocr if args.recognize else None, period=args.recognize_every,
                              on_result=(lambda r: m.set_lines(overlay_lines(r))) if args.recognize else None,
                              learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None,
-                             learn_every=args.learn_every, harvester=harvester, world=world)
+                             learn_every=args.learn_every, harvester=harvester, world=world, rare=rare)
         rec.start()
     cycle = None
     if args.auto_train:
@@ -206,6 +239,9 @@ def main() -> None:
                 kinds += (f"  DB 目撃 登録{st['ok']}/保留{st['pending']}/除外{st['ng']} 位置{st['loc_ok']}"
                           f"  名前 {st['names']} 回 (ガイド一致: 自分 {st['names_own']} / 先生 {st['names_teacher']},"
                           f" 不一致 {st['names_nomatch']}" + (f" 最後 {rec.world.last_unmatched!r}" if rec.world.last_unmatched else "") + ")")
+            if rec is not None and rec.rare is not None and (rec.rare.seen or rec.rare.declined):
+                kinds += "  珍しい窓 " + ", ".join(f"{n} {c} 回" + (f" (断った {rec.rare.declined[n]})" if n in rec.rare.declined
+                                                                   else "") for n, c in rec.rare.seen.items())
             if cycle is not None:
                 kinds += ("  学習中…" if cycle.busy else
                           f"  次の学習まで {max(0, cycle.every_frames - cycle.new_frames())} 枚 (済 {cycle.rounds} 回)")

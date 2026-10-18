@@ -108,6 +108,18 @@ obs:
 #   detect: ダイアログだと分かる部分 (例: "パーティに招待" の文字や枠の見出し)
 #   click : 断るボタン (Cancel / いいえ)。無ければ key を押す
 # を切り出して保存し、下のコメントを外す
+# めったに出ない窓 (mirror_only --recognize / learn_loop)。登録は tools/edge_objects.py add-screen 名前 --kind window
+#   watch  : 見えた瞬間の画面を dataset/screens/rare/<名前>/ に保存する (学習の見本。似ているだけの画面は _maybe/ に)
+#   decline: 断り方。--decline party_invite (learn_loop.ps1 -Decline party_invite) を付けたときだけ使う
+#            key: 押すキー / click: [横, 縦] = 窓の枠の中の位置 (0〜1。例 Cancel ボタンが右下なら [0.75, 0.9])
+#   confirm: 続けて何回見えたら断るか (1 秒に 1 回認識)
+rare_windows:
+  watch: [party_invite, trade]
+  confirm: 2
+  decline:
+    party_invite:
+      key: esc
+
 popups:
   # - name: party request
   #   detect: templates/party_request.png
