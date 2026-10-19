@@ -96,6 +96,29 @@ def has_word(text: str, words, cutoff: float = 0.8) -> str | None:
     return None
 
 
+def caret_in_frames(frames, min_jump: int = 40) -> bool:
+    """続けて撮ったチャット欄 (グレー) の中に、点滅する細い縦線 (カーソル) があるか。"""
+    import numpy as np
+
+    st = np.stack(frames)                       # (枚数, 高さ, 幅)
+    lo, hi = st.min(axis=0), st.max(axis=0)
+    changing = (hi - lo) >= min_jump
+    if not changing.any():
+        return False
+    mid = (hi + lo) / 2
+    on = st > mid                               # 点いている / 消えている
+    flips = (np.diff(on.astype(np.int8), axis=0) != 0).sum(axis=0)
+    blink = changing & (flips >= 2)             # 2 回以上 点いたり消えたり
+    h, w = blink.shape
+    if blink.sum() > 0.15 * h * w:              # 広く変わっている = 後ろの景色が動いただけ
+        return False
+    if not blink.any():
+        return False
+    cols = blink.sum(axis=0)
+    caret_cols = np.where(cols >= max(4, int(0.3 * h)))[0]
+    return bool(1 <= len(caret_cols) <= 6 and caret_cols.max() - caret_cols.min() <= 8)
+
+
 def chat_text_ok(text: str) -> str | None:
     """チャットに打てない文字があれば理由を返す。"""
     if not text:
@@ -113,7 +136,8 @@ class Responder:
                  log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
                  save_dir=None, cursor=None, activate=None, foreground=None, restore=None,
                  chat_open_wait: float = 0.3, blind_first: bool = True, grab_chat=None, input_state=None,
-                 ime_off=None, chat_verify: bool = False, enter_hold_ms: int = 80, send_enters: int = 1):
+                 ime_off=None, chat_verify: bool = False, enter_hold_ms: int = 80, send_enters: int = 1,
+                 check_caret: bool = True):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -131,6 +155,8 @@ class Responder:
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
         self.cursor = cursor            # () → 実際のマウスの位置 (確認のログ用)
+        self.check_caret = check_caret  # 入力欄のカーソル | の点滅でもフォーカスを確かめる
+        self._last_blink = None
         self.enter_hold_ms = enter_hold_ms  # 送信の Enter を押したままにする時間
         self.send_enters = send_enters  # 送信に要る Enter の回数
         self.chat_verify = chat_verify  # チャット欄が開いたかを画面で確かめる (MU の欄は OBS にも画面にも写らないので既定 off)
@@ -172,6 +198,19 @@ class Responder:
         if "focus_class" not in st:
             return None
         return str(st.get("focus_class") or "").lower() == "edit"
+
+    def _chat_ready(self) -> bool:
+        """入力欄にフォーカスがあるか: Windows の入力先が Edit で、見えるならカーソル | が点滅していること。"""
+        self._last_blink = None
+        if not self._wait_chat_focus():
+            return False
+        if not self.check_caret:
+            return True
+        blink = self.caret_blinking()
+        self._last_blink = blink
+        if blink is None:  # チャット欄の場所が未登録・撮れない: Edit だけで判断
+            return True
+        return blink
 
     def _wait_chat_focus(self, timeout: float = 1.2) -> bool:
         waited = 0.0
@@ -243,6 +282,25 @@ class Responder:
         m = 6
         area = cv2.cvtColor(img[max(0, y - m):y + h + m, max(0, x - m):x + w + m], cv2.COLOR_BGR2GRAY)
         return area, tpl
+
+    def caret_blinking(self, seconds: float = 1.1, step: float = 0.08) -> bool | None:
+        """チャット欄の中で「|」(文字入力のカーソル) が点滅しているか = 入力欄にフォーカスがある。
+        点滅は 300〜500ms 毎なので、1 秒ほど続けて撮り、細い縦線のように点いたり消えたりする所を探す。
+        チャット欄の場所 (chat_input の pos) が無い・撮れないときは None。"""
+        import numpy as np
+
+        frames = []
+        t = 0.0
+        while t <= seconds:
+            area, _ = self._chat_region(self._grab_for_chat())
+            if area is None:
+                return None
+            if frames and area.shape != frames[0].shape:
+                return None
+            frames.append(area.astype(np.int16))
+            self.sleep(step)
+            t += step
+        return caret_in_frames(frames)
 
     def _chat_score(self, img, closed=None) -> tuple[float, float]:
         """(登録した場所での見本との一致度, 閉じていたときとの違い 0〜255)。"""
@@ -466,14 +524,16 @@ class Responder:
                     # ただしほかのウィンドウに移った後は、Windows が Edit と言っていてもゲームの中では外れているので、
                     # いつも Enter を 1 回押してフォーカスを戻す (入力欄にフォーカスがあるときに押しても閉じない)
                     self.run("k:enter")
-                    if not self._wait_chat_focus():
+                    if not self._chat_ready():
                         # 入力欄にフォーカスがあったのを Enter で閉じた場合などは、もう一度押して開き直す
                         self.run("k:enter")
-                        if not self._wait_chat_focus():
-                            self._do("Enter を押してもチャットの入力欄にフォーカスが移らないので、文字は打ちません")
+                        if not self._chat_ready():
+                            self._do("Enter を押してもチャットの入力欄にフォーカスが移らない (カーソル | が点滅しない)"
+                                     " ので、文字は打ちません")
                             self.run("ra")
                             break
-                    self._do("チャットの入力欄にフォーカスがあるのを確かめました")
+                    self._do("チャットの入力欄にフォーカスがあるのを確かめました"
+                             + (" (カーソル | の点滅を確認)" if self._last_blink else ""))
                 elif self.chat_verify and self._has(self.chat_check):
                     # 開いていても閉じていても Enter を押す: 閉じていれば開いて入力先になり、
                     # 開いていれば入力先になる (チャット欄が出ていてもフォーカスが無いと文字はショートカットキーになる)

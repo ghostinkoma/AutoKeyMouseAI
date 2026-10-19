@@ -62,6 +62,7 @@ def main() -> None:
               + ("  (chat_input の場所が未登録: add-screen chat_input --kind icon --desktop で登録)" if ncc < 0 else ""))
     text = args.text.replace(";", "\\;")
     wait = args.enter_wait if args.enter_wait is not None else 0.3 + 0.03 * len(args.text)
+
     def edit_focus():
         return (screen.input_state().get("focus_class") or "").lower() == "edit"
 
@@ -78,6 +79,15 @@ def main() -> None:
           + ("チャットの入力欄にフォーカスあり" if edit_focus() else "入力欄にフォーカスなし"))
     if not edit_focus():
         raise SystemExit("[chat] チャットの入力欄にフォーカスが移らないので打ちません (本番もこの場合は止まります)")
+    from akm.edge.objects import ObjectDetector
+    from akm.edge.respond import Responder
+
+    blink = Responder(lambda s: None, screen.grab, ObjectDetector.load(), grab_chat=screen.grab_desktop,
+                      log=print, sleep=time.sleep).caret_blinking()
+    print("[chat] カーソル | の点滅: " + {True: "あり (フォーカスあり)", False: "なし (フォーカスなし)",
+                                     None: "確かめられない (chat_input を --desktop で登録すると確かめます)"}[blink])
+    if blink is False:
+        raise SystemExit("[chat] カーソルが点滅していないので打ちません (本番もこの場合は止まります)")
     if checker is not None:
         ncc, diff = checker._chat_score(screen.grab_desktop(), before)
         opened = ncc >= 0.75 or (diff >= 8 and ncc >= 0.45)

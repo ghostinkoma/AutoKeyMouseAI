@@ -2384,3 +2384,43 @@ def test_chat_uses_edit_focus():
     sent.clear()
     r._last_chat = -1e9
     assert r._respond("party_invite", steps[:1], det) == [] and not any(x.startswith("t:") for x in sent)
+
+
+def test_caret_blink_detection():
+    from akm.edge.respond import caret_in_frames
+
+    rng = np.random.default_rng(7)
+    base = np.full((34, 312), 30, np.int16)
+    base[10:24, 20:60] = 200                            # 打った文字 (変わらない)
+    frames = []
+    for k in range(14):                                 # 80ms 毎、カーソルは約 400ms 毎に点滅
+        f = base + rng.integers(-3, 4, base.shape)
+        if (k // 5) % 2 == 0:
+            f[8:26, 64:66] = 230                        # |
+        frames.append(f)
+    assert caret_in_frames(frames) is True
+    assert caret_in_frames([base + rng.integers(-3, 4, base.shape) for _ in range(14)]) is False   # 点滅なし
+    moving = [base + (k * 20 % 120) for k in range(14)]  # 後ろの景色が全体に変わる
+    assert caret_in_frames(moving) is False
+
+
+def test_chat_waits_for_caret_blink():
+    from akm.edge.objects import Detection
+    from akm.edge.respond import Responder
+
+    class Det:
+        objects = []
+
+        def detect(self, img):
+            return []
+
+    sent = []
+    r = Responder(sent.append, lambda: None, Det(), sleep=lambda s: None, log=lambda m: None, is_active=lambda: True,
+                  input_state=lambda: {"focus": 5, "focus_class": "Edit"})   # Windows は Edit と言うが…
+    r.caret_blinking = lambda: False                                         # カーソルが点滅していない
+    det = Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))
+    assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == []
+    assert sent.count("k:enter") == 2 and not any(x.startswith("t:") for x in sent)
+    r.caret_blinking = lambda: True
+    sent.clear()
+    assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"] and "t:I NO need PT" in sent
