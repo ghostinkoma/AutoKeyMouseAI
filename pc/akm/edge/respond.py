@@ -165,17 +165,62 @@ class Responder:
         except Exception:
             pass
 
-    def _chat_open(self, tries: int = 1) -> bool:
-        """チャット欄が開いているか (開くまで少しかかるので tries 回まで見直す)。"""
-        d = None
+    def _chat_region(self, img):
+        """登録した場所 (pos) のチャット欄の切り抜き (画面の大きさに合わせる)。pos が無ければ None。"""
+        import cv2
+
+        obj = next((o for o in self._det().objects if o.name == self.chat_check), None)
+        if obj is None or not getattr(obj, "pos", None) or img is None:
+            return None, None
+        s = img.shape[0] / obj.ref_h
+        x, y = int(obj.pos[0] * s), int(obj.pos[1] * s)
+        h, w = obj.gray.shape[:2]
+        w, h = max(4, int(w * s)), max(4, int(h * s))
+        tpl = cv2.resize(obj.gray, (w, h), interpolation=cv2.INTER_AREA)
+        m = 6
+        area = cv2.cvtColor(img[max(0, y - m):y + h + m, max(0, x - m):x + w + m], cv2.COLOR_BGR2GRAY)
+        return area, tpl
+
+    def _chat_score(self, img, closed=None) -> tuple[float, float]:
+        """(登録した場所での見本との一致度, 閉じていたときとの違い 0〜255)。"""
+        import cv2
+        import numpy as np
+
+        area, tpl = self._chat_region(img)
+        if area is None or area.shape[0] < tpl.shape[0] or area.shape[1] < tpl.shape[1]:
+            return -1.0, 0.0
+        ncc = float(cv2.minMaxLoc(cv2.matchTemplate(area, tpl, cv2.TM_CCOEFF_NORMED))[1])
+        diff = 0.0
+        if closed is not None:
+            c_area, _ = self._chat_region(closed)
+            if c_area is not None and c_area.shape == area.shape:
+                diff = float(np.abs(area.astype(np.int16) - c_area.astype(np.int16)).mean())
+        return ncc, diff
+
+    def _chat_open(self, tries: int = 1, closed=None) -> bool:
+        """チャット欄が開いているか (開くまで少しかかるので tries 回まで見直す)。
+
+        登録した場所 (pos) があれば、その場所だけを見る: 見本と強く一致する (0.75 以上)、または
+        Enter を押す前 (closed) から見た目が変わり (違い 8 以上) 見本ともある程度一致する (0.45 以上) なら開いている。
+        チャット欄は半透明で模様が少なく、画面全体から探すと取り違えやすいので。"""
+        last = None
         for k in range(tries):
             if k:
-                self.sleep(0.3)
-            d = next((x for x in self._detect() if x.name == self.chat_check), None)
+                self.sleep(0.2)
+            img = self.grab()
+            ncc, diff = self._chat_score(img, closed)
+            if ncc >= 0:
+                last = f"登録した場所で 一致度 {ncc:.2f} / Enter 前との違い {diff:.1f}"
+                if ncc >= 0.75 or (closed is not None and diff >= 8 and ncc >= 0.45):
+                    return True
+                continue
+            d = next((x for x in self._det().detect(img) if x.name == self.chat_check), None)
             if d is not None and d.present:
                 return True
-        if d is not None and tries > 1:
-            self._do(f"チャット欄の見本 {self.chat_check}: 一致度 {d.ncc:.2f} ネット {d.nn:.2f} (開いていないと判定)")
+            if d is not None:
+                last = f"一致度 {d.ncc:.2f} ネット {d.nn:.2f} (場所が未登録: 登録し直すと場所で確かめます)"
+        if last and tries > 1:
+            self._do(f"チャット欄の見本 {self.chat_check}: {last} (開いていないと判定)")
         return False
 
     def _still(self, name: str) -> bool:
@@ -209,6 +254,7 @@ class Responder:
 
     def _respond(self, name: str, steps: list[dict], det) -> list[str]:
         done: list[str] = []
+        self._closed = None
         for step in steps:
             if "require_helper" in step:
                 want_on = str(step["require_helper"]).lower() in ("on", "true", "1")
@@ -337,10 +383,13 @@ class Responder:
                 sent_before = done.count("chat")
                 if self._has(self.chat_check):
                     # チャット欄が開いているかを画面で確かめる。開いていれば Enter は押さない (押すと閉じてしまう)
-                    if not self._chat_open():
+                    if self._closed is None or not self._chat_open(closed=self._closed):
+                        before = self.grab()
+                        if self._closed is None:
+                            self._closed = before  # 1 つ目の前の画面 = 閉じているときの見た目
                         self.run("k:enter")
                         self.sleep(self.chat_open_wait)  # チャット欄が開くまで待ってから確かめる
-                        if not self._chat_open(tries=4):
+                        if not self._chat_open(tries=4, closed=before):
                             self._save_screen("chat_check")
                             if sent_before == 0 and self.blind_first:
                                 # 1 つ目は、Enter で開いたものとして打つ (見本が合っていないだけのことが多い)

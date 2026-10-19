@@ -35,6 +35,7 @@ class ObjectDef:
     key: str | None = None    # 窓を開閉するキー (あれば)
     group: str | None = None  # 同時には出ないもの同士 (動作中の ■ と停止中の ▶ など)。一番確からしい 1 つだけ残す
     points: dict = field(default_factory=dict)  # 窓の中の押す場所 {"cancel": [横の割合, 縦の割合]}
+    pos: tuple | None = None  # 登録したときの画面での位置 (x, y)。いつも同じ場所に出るもの (チャット欄) の確認に使う
     gray: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -69,7 +70,8 @@ def load_objects(base: Path = DATA) -> list[ObjectDef]:
         img = cv2.imread(str(base / e["image"]))
         if img is not None:
             out.append(ObjectDef(e["name"], e.get("kind", "window"), img, int(e.get("ref_h", 1050)), e.get("key"),
-                                 e.get("group"), dict(e.get("points") or {})))
+                                 e.get("group"), dict(e.get("points") or {}),
+                                 tuple(e["pos"]) if e.get("pos") else None))
     return out
 
 
@@ -104,7 +106,7 @@ def save_point(name: str, point: str, fx: float, fy: float, base: Path = DATA) -
 
 
 def save_object(name: str, kind: str, crop: np.ndarray, screen_h: int, key: str | None = None,
-                base: Path = DATA, group: str | None = None) -> None:
+                base: Path = DATA, group: str | None = None, pos: tuple | None = None) -> None:
     base.mkdir(parents=True, exist_ok=True)
     f = base / "objects.yaml"
     items = (yaml.safe_load(f.read_text(encoding="utf-8")) or []) if f.exists() else []
@@ -117,6 +119,8 @@ def save_object(name: str, kind: str, crop: np.ndarray, screen_h: int, key: str 
         e["key"] = key
     if group:
         e["group"] = group
+    if pos is not None:
+        e["pos"] = [int(pos[0]), int(pos[1])]
     if prev and prev.get("points"):  # 押す場所 (窓の中の割合) は登録し直しても引き継ぐ
         e["points"] = prev["points"]
     items.append(e)

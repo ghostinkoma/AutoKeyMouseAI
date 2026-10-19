@@ -2261,3 +2261,49 @@ def test_chat_blind_first_when_sample_does_not_match():
     sent.clear()
     assert r.respond("party_invite", steps, Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == []
     assert not any(x.startswith("t:") for x in sent)
+
+
+def test_chat_open_checked_at_registered_place():
+    from akm.edge.objects import Detection, ObjectDef
+    from akm.edge.respond import Responder
+
+    rng = np.random.default_rng(5)
+    scene = rng.integers(40, 200, (768, 1366, 3), np.uint8)
+    bar = np.full((22, 300, 3), 25, np.uint8)
+    cv2.rectangle(bar, (0, 0), (299, 21), (120, 120, 120), 1)
+    cv2.putText(bar, ">", (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    chat = ObjectDef("chat_input", "icon", bar, 768, pos=(10, 700))
+    state = {"open": False}
+
+    def grab():
+        img = scene.copy()
+        if state["open"]:
+            img[700:722, 10:310] = (img[700:722, 10:310] * 0.3 + bar * 0.7).astype(np.uint8)  # 半透明
+        return img
+
+    class Det:
+        objects = [chat]
+
+        def detect(self, img):  # 画面全体から探すと合わない (0.5) ことにする
+            return [Detection("chat_input", "icon", False, 0.5, 0.0, (500, 100, 300, 22))]
+
+    sent = []
+
+    def run(s):
+        sent.append(s)
+        if s == "k:enter":
+            state["open"] = not state["open"]
+        elif "k:enter" in s:
+            state["open"] = False   # 送ると閉じる
+
+    r = Responder(run, grab, Det(), sleep=lambda s: None, log=lambda m: None, blind_first=False)
+    steps = [{"chat": "I NO need PT"}, {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"}]
+    assert r.respond("party_invite", steps, Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == ["chat", "chat"]
+    assert sent.count("k:enter") == 2
+    # Enter を押しても開かない (違いが出ない) なら打たない
+    state["open"] = False
+    r._last_chat = -1e9
+    sent.clear()
+    r.run = lambda s: sent.append(s)
+    assert r.respond("party_invite", steps, Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == []
+    assert not any(x.startswith("t:") for x in sent)

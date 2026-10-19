@@ -219,7 +219,7 @@ def select_and_save(img: np.ndarray, args) -> None:
         cv2.destroyAllWindows()
         if input(f"[add] この切り抜き ({w}x{h}) で {args.name} を登録しますか? [y/N] ").strip().lower() not in ("y", "yes"):
             raise SystemExit("登録しませんでした (前の登録はそのまま)")
-    save_object(args.name, args.kind, crop, img.shape[0], args.key, group=args.group)
+    save_object(args.name, args.kind, crop, img.shape[0], args.key, group=args.group, pos=(x, y))
     print(f"[add] {args.name} を登録しました ({w}x{h}, 画面の高さ {img.shape[0]})。train で学習し直してください")
 
 
