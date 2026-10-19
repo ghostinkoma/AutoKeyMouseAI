@@ -34,11 +34,11 @@ DEFAULT_RESPONSES = {
         {"click": "@cancel"},  # 勧誘の窓は Esc では消えないので、押せなければ以降 (Esc・チャット) は行わない
         {"close_windows": "esc"},
         {"chat": "I NO need PT"},
-        {"chat": "Perdon, estoy cazando solo en este spot. No hago party, gracias!"},
+        {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"},  # 47 文字
     ],
 }
 KEEP_WINDOWS = ("hunting_log", "helper_panel")  # MU Helper の表示。閉じると Helper の判定ができなくなる
-CHAT_MAX = 70
+CHAT_MAX = 50  # MU のチャット欄はおよそ 51 文字で入らなくなる (実測)
 
 
 def text_lines(crop, min_h: int = 6, max_h: int = 40):
@@ -292,7 +292,10 @@ class Responder:
                         self._do("Enter を押してもチャット欄が開かないので、文字は打ちません")
                         self.run("ra")
                         break
-                self.run(f"t:{text.replace(';', chr(92) + ';')};w:150;k:enter;w:300")
+                # 打ち終わるのを待ってから、Enter を別に送る (打っている途中の Enter は効かないことがある)
+                self.run(f"t:{text.replace(';', chr(92) + ';')}")
+                self.sleep(0.3 + 0.03 * len(text))
+                self.run("w:100;k:enter;w:400")
                 self._last_chat = now
                 self._do(f"チャット: {text}")
                 done.append("chat")

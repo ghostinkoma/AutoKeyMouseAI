@@ -132,7 +132,7 @@ rare_windows:
                                         # (勧誘の窓は Esc では消えない。押しても消えなければ以降は行わない)
       - close_windows: esc
       - chat: "I NO need PT"
-      - chat: "Perdon, estoy cazando solo en este spot. No hago party, gracias!"
+      - chat: "Perdon, cazo solo aqui. No hago party, gracias!"   # 50 文字まで
 
 popups:
   # - name: party request

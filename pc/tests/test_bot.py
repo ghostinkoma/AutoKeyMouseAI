@@ -2049,8 +2049,10 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     assert done == ["helper", "text", "click", "close:1", "chat", "chat"]
     assert sent[0] == "a:628,429;w:120;bd:L;w:90;bu:L"         # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
-    assert sent[2] == "k:enter;w:300" and sent[3].startswith("t:I NO need PT;")
-    assert sent[5].startswith("t:Perdon,") and sent[-1] == "ra"
+    assert sent[2] == "k:enter;w:300" and sent[3] == "t:I NO need PT" and sent[4] == "w:100;k:enter;w:400"
+    assert sent[5] == "k:enter;w:300" and sent[6].startswith("t:Perdon,") and sent[7] == "w:100;k:enter;w:400"
+    assert sent[-1] == "ra"
+    assert all(chat_text_ok(st["chat"]) is None for st in DEFAULT_RESPONSES["party_invite"] if "chat" in st)
     # 2 分以内にまた勧誘されたら、断るだけでチャットはしない
     det.open.add("party_invite")
     sent.clear()
