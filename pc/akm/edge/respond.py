@@ -160,6 +160,32 @@ class Responder:
         self.run((f"{mv};" if mv else "") + f"w:120;bd:{button};w:90;bu:{button}")
         return sx, sy
 
+    def _has_focus(self) -> bool:
+        """ゲームの窓が手前にあり、キーの入力先がゲーム本体になっているか。"""
+        if not self.is_active():
+            return False
+        if self.input_state is not None:
+            try:
+                st = self.input_state()
+                if st.get("focus") == 0:  # 手前だが入力先が無い (切り替わった直後など)
+                    return False
+            except Exception:
+                pass
+        return True
+
+    def _ensure_focus(self, what: str) -> bool:
+        """キーを送る前に、ゲームに入力が届く状態か確かめる。外れていれば手前に出し直す。"""
+        if self._has_focus():
+            return True
+        if self.activate is not None:
+            self.activate()
+            self.sleep(0.3)
+            if self._has_focus():
+                self._do(f"{what}の前にゲームの窓が手前から外れていたので、手前に出し直しました")
+                return True
+        self._do(f"ゲームの窓にフォーカスが無いので{what}をやめます (文字がほかのアプリに入らないように)")
+        return False
+
     def _save_screen(self, name: str) -> None:
         if self.save_dir is None:
             return
@@ -403,6 +429,8 @@ class Responder:
                     self._do(f"チャットは {self.chat_cooldown_s:.0f} 秒に 1 回までなので送りません")
                     break  # 残りのチャットも送らない
                 sent_before = done.count("chat")
+                if not self._ensure_focus("チャット"):
+                    break
                 if sent_before == 0 and self.ime_off is not None:
                     # 日本語入力が ON だと英字が変換待ちになり、Enter 1 回目は確定だけで送信されない
                     try:
@@ -437,10 +465,17 @@ class Responder:
                 else:
                     self.run("k:enter")
                     self.sleep(self.chat_open_wait)
+                # 打つ直前にもう一度確かめる (開いている間にほかのアプリへ移っていたら打たない)
+                if not self._has_focus():
+                    self._do("チャット欄を開いた後にゲームのフォーカスが外れたので、文字は打ちません")
+                    break
                 # 打ち終わるのを待ってから、Enter を別に送る (打っている途中の Enter は効かないことがある)
                 self.run(f"t:{text.replace(';', chr(92) + ';')}")
                 self.sleep(0.3 + 0.03 * len(text))
                 # 送信の Enter: 押したままを少し保つ (短い押下だとゲームが取りこぼす)。要るなら 2 回目も
+                if not self._has_focus():
+                    self._do("文字を打った後にゲームのフォーカスが外れたので、送信の Enter は押しません")
+                    break
                 for k in range(self.send_enters):
                     if k:
                         self.sleep(0.4)

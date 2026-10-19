@@ -2310,3 +2310,36 @@ def test_chat_open_checked_at_registered_place():
     r.run = lambda s: sent.append(s)
     assert r.respond("party_invite", steps, Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == []
     assert not any(x.startswith("t:") for x in sent)
+
+
+def test_chat_stops_when_game_loses_focus():
+    from akm.edge.objects import Detection
+    from akm.edge.respond import Responder
+
+    class Det:
+        objects = []
+
+        def detect(self, img):
+            return []
+
+    state = {"front": True, "focus": 123}
+    sent, logs = [], []
+
+    def run(s):
+        sent.append(s)
+        if s == "k:enter":
+            state["front"] = False   # 開いた直後にほかのアプリへ移った
+
+    r = Responder(run, lambda: None, Det(), sleep=lambda s: None, log=logs.append,
+                  is_active=lambda: state["front"], input_state=lambda: {"focus": state["focus"]})
+    det = Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))
+    assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == []
+    assert not any(x.startswith("t:") for x in sent) and any("フォーカスが外れた" in l for l in logs)
+    # 手前でも入力先が無ければ、手前に出し直してから送る
+    state.update(front=True, focus=0)
+    sent.clear()
+    r.activate = lambda: state.update(focus=123) or True
+    run2 = lambda s: sent.append(s)   # noqa: E731
+    r.run = run2
+    assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"]
+    assert "t:I NO need PT" in sent

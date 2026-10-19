@@ -42,7 +42,11 @@ def main() -> None:
     else:
         print("[chat] 5 秒後に送ります。今のうちにゲームをクリックして手前にしてください")
         time.sleep(5)
-    print(f"[chat] ゲームが手前: {screen.is_active()}  入力の状態: {screen.input_state()}")
+    st = screen.input_state()
+    focus = screen.is_active() and st.get("focus") not in (0, None)
+    print(f"[chat] ゲームが手前: {screen.is_active()}  入力先: {st.get('focus_class') or 'なし'}  → フォーカス {'あり' if focus else 'なし'}")
+    if not focus:
+        raise SystemExit("[chat] ゲームにフォーカスが無いので送りません (本番もこの場合は送らずに止まります)")
     text = args.text.replace(";", "\;")
     wait = args.enter_wait if args.enter_wait is not None else 0.3 + 0.03 * len(args.text)
     print("[chat] Enter (開く)")
