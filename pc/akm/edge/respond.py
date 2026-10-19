@@ -199,6 +199,18 @@ class Responder:
             return None
         return str(st.get("focus_class") or "").lower() == "edit"
 
+    def chat_state(self) -> str | None:
+        """チャット欄の状態: "focused" (入力欄にフォーカス) / "open" (出ているがフォーカスなし) / "closed" / None (分からない)。
+        focused と言えるのは、入力先が Edit で、カーソル | の点滅も見えたときだけ。"""
+        blink = self.caret_blinking() if self.check_caret else None
+        if blink is True and self._chat_focused():
+            return "focused"
+        img = self._grab_for_chat()
+        ncc, _ = self._chat_score(img)
+        if ncc < 0:
+            return None
+        return "open" if ncc >= 0.75 else "closed"
+
     def _chat_ready(self) -> bool:
         """入力欄にフォーカスがあるか: Windows の入力先が Edit で、見えるならカーソル | が点滅していること。"""
         self._last_blink = None
@@ -529,20 +541,28 @@ class Responder:
                         pass
                 edit = self._chat_focused()
                 if edit is not None:
-                    # チャットの入力欄は Windows の Edit 部品: 入力先が Edit なら欄にフォーカスがある。
-                    # ただしほかのウィンドウに移った後は、Windows が Edit と言っていてもゲームの中では外れているので、
-                    # いつも Enter を 1 回押してフォーカスを戻す (入力欄にフォーカスがあるときに押しても閉じない)
-                    self.run("k:enter")
-                    if not self._chat_ready():
-                        # 入力欄にフォーカスがあったのを Enter で閉じた場合などは、もう一度押して開き直す
+                    # 3 つの状態で分ける:
+                    #   入力欄にフォーカスがある (入力先 Edit + カーソル | が点滅) → そのまま打つ
+                    #   欄は出ているがフォーカスが無い / 欄が閉じている           → Enter を押してから打つ
+                    # (Windows の Edit だけではほかのウィンドウから戻った後に外れているのが分からないので、点滅も見る)
+                    state = self.chat_state()
+                    if state == "focused":
+                        self._do("チャット: 入力欄にフォーカスがある (カーソル | が点滅) ので、そのまま打ちます")
+                    else:
+                        self._do("チャット: " + {"open": "欄は出ているがフォーカスが無いので、Enter でフォーカスを当てます",
+                                                "closed": "欄が閉じているので、Enter で開きます"}.get(
+                                     state, "フォーカスが分からないので、Enter でフォーカスを当てます"))
                         self.run("k:enter")
                         if not self._chat_ready():
-                            self._do("Enter を押してもチャットの入力欄にフォーカスが移らない (カーソル | が点滅しない)"
-                                     " ので、文字は打ちません")
-                            self.run("ra")
-                            break
-                    self._do("チャットの入力欄にフォーカスがあるのを確かめました"
-                             + (" (カーソル | の点滅を確認)" if self._last_blink else ""))
+                            # 入力欄にフォーカスがあったのを Enter で閉じた場合などは、もう一度押して開き直す
+                            self.run("k:enter")
+                            if not self._chat_ready():
+                                self._do("Enter を押してもチャットの入力欄にフォーカスが移らない (カーソル | が点滅しない)"
+                                         " ので、文字は打ちません")
+                                self.run("ra")
+                                break
+                        self._do("チャットの入力欄にフォーカスがあるのを確かめました"
+                                 + (" (カーソル | の点滅を確認)" if self._last_blink else ""))
                 elif self.chat_verify and self._has(self.chat_check):
                     # 開いていても閉じていても Enter を押す: 閉じていれば開いて入力先になり、
                     # 開いていれば入力先になる (チャット欄が出ていてもフォーカスが無いと文字はショートカットキーになる)

@@ -2424,3 +2424,25 @@ def test_chat_waits_for_caret_blink():
     r.caret_blinking = lambda: True
     sent.clear()
     assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"] and "t:I NO need PT" in sent
+
+
+def test_chat_three_states():
+    from akm.edge.objects import Detection
+    from akm.edge.respond import Responder
+
+    class Det:
+        objects = []
+
+        def detect(self, img):
+            return []
+
+    det = Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))
+    for state, enters in [("focused", 0), ("open", 1), ("closed", 1), (None, 1)]:
+        sent = []
+        r = Responder(sent.append, lambda: None, Det(), sleep=lambda s: None, log=lambda m: None, is_active=lambda: True,
+                      input_state=lambda: {"focus": 5, "focus_class": "Edit"})
+        r.chat_state = lambda st=state: st
+        r.caret_blinking = lambda: True
+        assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"], state
+        assert sent.count("k:enter") == enters, (state, sent)
+        assert "t:I NO need PT" in sent
