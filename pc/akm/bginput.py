@@ -54,6 +54,15 @@ def find_edit(hwnd: int) -> int | None:
     return edits[0][0]
 
 
+def fake_active(hwnd: int) -> None:
+    """ゲームに「手前になった」という知らせだけを送る (本当には手前に出さない)。
+    手前でないと入力を無視するゲームが、この知らせで入力を受け付けるようになることがある。"""
+    user32.SendMessageW(hwnd, 0x001C, 1, 0)        # WM_ACTIVATEAPP (有効)
+    user32.SendMessageW(hwnd, 0x0086, 1, 0)        # WM_NCACTIVATE
+    user32.SendMessageW(hwnd, WM_ACTIVATE, 1, 0)   # WA_ACTIVE
+    user32.SendMessageW(hwnd, WM_SETFOCUS, 0, 0)
+
+
 def _key_lparam(vk: int, up: bool) -> int:
     lp = 1 | (_SCAN.get(vk, 0) << 16)
     if up:

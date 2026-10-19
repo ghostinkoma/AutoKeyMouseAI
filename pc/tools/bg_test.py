@@ -22,6 +22,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("what", choices=["info", "chat", "enter", "cancel"])
     ap.add_argument("text", nargs="?", default="test bg")
+    ap.add_argument("--fake-active", action="store_true",
+                    help="送る前に「手前になった」という知らせだけをゲームに送る (本当には手前に出さない)")
     args = ap.parse_args()
     cfg = load_config("config.yaml")
     screen = GameScreen.from_config(cfg)
@@ -34,6 +36,10 @@ def main() -> None:
     print("[bg] 3 秒後に送ります。別のウィンドウを手前にしておいてください")
     time.sleep(3)
     print(f"[bg] 手前のウィンドウがゲームか: {foreground_window() == hwnd} (False なら本当の裏での操作)")
+    if args.fake_active:
+        print("[bg] ゲームに「手前になった」という知らせを送ります")
+        bg.fake_active(hwnd)
+        time.sleep(0.3)
     if args.what == "chat":
         edit = bg.find_edit(hwnd)
         if edit is None:
