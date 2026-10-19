@@ -114,22 +114,28 @@ def list_windows() -> list[tuple[int, str, str, "Rect"]]:
     return out
 
 
+BROWSERS = {"brave.exe", "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "opera_gx.exe", "vivaldi.exe",
+            "iexplore.exe", "explorer.exe", "obs64.exe", "obs32.exe", "code.exe", "windowsterminal.exe",
+            "powershell.exe", "cmd.exe", "javaw.exe", "java.exe"}
+
+
 def find_window(title_contains: str, process: str | None = None) -> int | None:
     """ゲームウィンドウを探す。
 
     process (例: "main.exe") を指定するとそのプロセスのウィンドウだけを対象にする。
-    ブラウザのタブ名などに同じ文字列が入っていても取り違えない。
+    指定しないときは、ブラウザ (wiki のタブ "MU …" など)・OBS・エディタなどのウィンドウを後回しにする
+    (タイトルに同じ文字が入っていても、ゲーム本体を選ぶ)。
     候補が複数ならクライアント領域が一番大きいものを選ぶ。
     """
-    best, best_area = None, -1
+    best, best_key = None, None
     for hwnd, title, proc, rect in list_windows():
         if title_contains and title_contains.lower() not in title.lower():
             continue
         if process and proc.lower() != process.lower():
             continue
-        area = rect.width * rect.height
-        if area > best_area:
-            best, best_area = hwnd, area
+        key = (proc.lower() not in BROWSERS, rect.width * rect.height)
+        if best_key is None or key > best_key:
+            best, best_key = hwnd, key
     return best
 
 
@@ -413,8 +419,13 @@ class GameScreen:
             )
         self.rect = client_rect(self.hwnd)
         self.pid = window_pid(self.hwnd)
+        proc = process_name(self.hwnd)
         print(f"[screen] ゲームウィンドウを固定: hwnd=0x{self.hwnd:X} pid={self.pid} "
-              f"process={process_name(self.hwnd)} 画面 {self.rect.width}x{self.rect.height}")
+              f"process={proc} 画面 {self.rect.width}x{self.rect.height}")
+        if (proc or "").lower() in BROWSERS:
+            print(f"[screen] 注意: {proc} はゲームではありません (タイトルに '{self.window_title}' を含む別のウィンドウ)。"
+                  " クリックの位置・ゲームが手前かの判定・画面の大きさがずれます。"
+                  " python tools\\list_windows.py で MU の process を調べ、config.yaml の game.process に書いてください")
         return self.rect
 
     def _grab_screen(self, r: Rect) -> np.ndarray:

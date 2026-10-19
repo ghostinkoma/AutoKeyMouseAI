@@ -2108,3 +2108,17 @@ def test_live_helper_state_remembers_last_on():
     rec.step()
     on, since = rec.helper_state()
     assert on is False and since < 1   # 今は OFF でも、直前まで ON だったことを覚えている
+
+
+def test_find_window_prefers_game_over_browser_tab(monkeypatch):
+    from akm import screen
+
+    R = screen.Rect
+    wins = [(1, "MU Map Guide - Rex MU - Brave", "brave.exe", R(0, 0, 1866, 907)),
+            (2, "MU", "main.exe", R(0, 0, 1366, 768)),
+            (3, "Notes", "notepad.exe", R(0, 0, 2000, 1000))]
+    monkeypatch.setattr(screen, "list_windows", lambda: wins)
+    assert screen.find_window("MU") == 2
+    assert screen.find_window("MU", "brave.exe") == 1
+    monkeypatch.setattr(screen, "list_windows", lambda: wins[:1])
+    assert screen.find_window("MU") == 1   # ブラウザしか無ければそれを使う (注意を出す)

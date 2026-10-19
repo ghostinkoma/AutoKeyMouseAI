@@ -289,6 +289,21 @@ def cmd_restore(args) -> None:
           "ほかの登録はそのままです。train で学習し直してください")
 
 
+def cmd_fix_ref(args) -> None:
+    """登録したときの画面の高さ (ref_h) を書き換える (撮り方が変わって画面の倍率がずれたとき)。"""
+    import yaml
+
+    f = DATA / "objects.yaml"
+    items = (yaml.safe_load(f.read_text(encoding="utf-8")) or []) if f.exists() else []
+    done = []
+    for e in items:
+        if int(e.get("ref_h", 1050)) == args.old:
+            e["ref_h"] = args.new
+            done.append(e["name"])
+    f.write_text(yaml.safe_dump(items, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    print(f"[fix-ref] 画面の高さ {args.old} → {args.new}: {', '.join(done) or 'なし'}。train で学習し直してください")
+
+
 def cmd_remove(args) -> None:
     if not remove_object(args.name):
         raise SystemExit(f"{args.name} は登録されていません")
@@ -365,13 +380,16 @@ def main() -> None:
     rm.add_argument("name")
     rs = sub.add_parser("restore")
     rs.add_argument("name")
+    fr = sub.add_parser("fix-ref")
+    fr.add_argument("--old", type=int, required=True)
+    fr.add_argument("--new", type=int, required=True)
     pt = sub.add_parser("point")
     pt.add_argument("name")
     pt.add_argument("point", nargs="?", default="cancel")
     args = ap.parse_args()
     {"list": cmd_list, "add": cmd_add, "add-screen": cmd_add_screen, "import-ui": cmd_import_ui,
      "train": cmd_train, "find": cmd_find, "remove": cmd_remove, "point": cmd_point,
-     "restore": cmd_restore}[args.cmd](args)
+     "restore": cmd_restore, "fix-ref": cmd_fix_ref}[args.cmd](args)
 
 
 if __name__ == "__main__":
