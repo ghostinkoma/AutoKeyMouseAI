@@ -2050,8 +2050,8 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     assert done == ["helper", "text", "click", "close:1", "chat"]
     assert sent[0] == "a:628,429;w:120;bd:L;w:90;bu:L"         # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
-    assert sent[2] == "k:enter" and sent[3] == "t:I NO need PT" and sent[4] == "w:100;k:enter;w:400"
-    assert sent[5] == "ra" and not any(x.startswith("t:Perdon") for x in sent)
+    assert sent[2] == "k:enter" and sent[3] == "t:I NO need PT. Perdon, no hago party. Gracias!"
+    assert sent[4] == "w:100;k:enter;w:400" and sent[5] == "ra"
     assert all(chat_text_ok(st["chat"]) is None for st in DEFAULT_RESPONSES["party_invite"] if "chat" in st)
     # 2 分以内にまた勧誘されたら、断るだけでチャットはしない
     det.open.add("party_invite")
@@ -2102,21 +2102,24 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
 
     det.detect = detect2
     r.run = run2
+    r.chat_verify = True
+    two = DEFAULT_RESPONSES["party_invite"][:-1] + [{"chat": "I NO need PT"},
+                                                    {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"}]
     det.open.add("party_invite")
     sent.clear()
     t[0] = 5000
-    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper", "text", "click", "close:0",
-                                                                                 "chat", "chat"]
+    assert r.respond("party_invite", two, inv) == ["helper", "text", "click", "close:0", "chat", "chat"]
     assert [x for x in sent if x.startswith("k:enter")] == ["k:enter"]   # 2 つ目は開いたままなので押さない
     # 送ると閉じるゲームなら、2 つ目の前にもう一度 Enter で開く。開かなければ打たない
     chat.update(open=False, stay_open=False)
     det.open.add("party_invite")
     sent.clear()
     t[0] = 9000
-    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)[-2:] == ["chat", "chat"]
+    assert r.respond("party_invite", two, inv)[-2:] == ["chat", "chat"]
     assert [x for x in sent if x.startswith("k:enter")] == ["k:enter", "k:enter"]
     det.detect = old_detect
     r.run = run
+    r.chat_verify = False
     # ゲームが手前に無ければ何もしない
     r.is_active = lambda: False
     assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == []
@@ -2252,7 +2255,7 @@ def test_chat_blind_first_when_sample_does_not_match():
 
     sent = []
     r = Responder(sent.append, lambda: np.zeros((768, 1366, 3), np.uint8), Det(), sleep=lambda s: None,
-                  log=lambda m: None)
+                  log=lambda m: None, chat_verify=True)
     steps = [{"chat": "I NO need PT"}, {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"}]
     assert r.respond("party_invite", steps, Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == ["chat"]
     assert "t:I NO need PT" in sent and not any(x.startswith("t:Perdon") for x in sent)
@@ -2296,7 +2299,7 @@ def test_chat_open_checked_at_registered_place():
         elif "k:enter" in s:
             state["open"] = False   # 送ると閉じる
 
-    r = Responder(run, grab, Det(), sleep=lambda s: None, log=lambda m: None, blind_first=False)
+    r = Responder(run, grab, Det(), sleep=lambda s: None, log=lambda m: None, blind_first=False, chat_verify=True)
     steps = [{"chat": "I NO need PT"}, {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"}]
     assert r.respond("party_invite", steps, Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == ["chat", "chat"]
     assert sent.count("k:enter") == 2

@@ -33,8 +33,8 @@ DEFAULT_RESPONSES = {
         {"require_text": ["party", "join"]},  # "requests" はトレードの申し込みにもあるので使わない
         {"click": "@cancel"},  # 勧誘の窓は Esc では消えないので、押せなければ以降 (Esc・チャット) は行わない
         {"close_windows": "esc"},
-        {"chat": "I NO need PT"},
-        {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"},  # 47 文字
+        # MU のチャット欄は画面から開閉を確かめられないので、2 回に分けず 1 回で送る (英語 + スペイン語、45 文字)
+        {"chat": "I NO need PT. Perdon, no hago party. Gracias!"},
     ],
 }
 KEEP_WINDOWS = ("hunting_log", "helper_panel")  # MU Helper の表示。閉じると Helper の判定ができなくなる
@@ -111,8 +111,8 @@ class Responder:
                  chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
                  log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
                  save_dir=None, cursor=None, activate=None, foreground=None, restore=None,
-                 chat_open_wait: float = 0.2, blind_first: bool = True, grab_chat=None, input_state=None,
-                 ime_off=None):
+                 chat_open_wait: float = 0.3, blind_first: bool = True, grab_chat=None, input_state=None,
+                 ime_off=None, chat_verify: bool = False):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -130,6 +130,7 @@ class Responder:
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
         self.cursor = cursor            # () → 実際のマウスの位置 (確認のログ用)
+        self.chat_verify = chat_verify  # チャット欄が開いたかを画面で確かめる (MU の欄は OBS にも画面にも写らないので既定 off)
         self.input_state = input_state  # () → {"caret": 文字入力のカーソルがあるか, "ime": IME が ON か, ...}
         self.ime_off = ime_off          # () → IME を OFF にする (前が ON だったか)
         self.grab_chat = grab_chat      # () → チャット欄を確かめる画面 (画面に映っているとおり。OBS には欄が写らない)
@@ -407,7 +408,7 @@ class Responder:
                             self._do("ゲームの日本語入力 (IME) が ON だったので OFF にしました")
                     except Exception:
                         pass
-                if self._has(self.chat_check):
+                if self.chat_verify and self._has(self.chat_check):
                     # チャット欄が開いているかを画面で確かめる。開いていれば Enter は押さない (押すと閉じてしまう)
                     if self._closed is None or not self._chat_open(closed=self._closed):
                         before = self._grab_for_chat()
@@ -438,7 +439,7 @@ class Responder:
                 self.run(f"t:{text.replace(';', chr(92) + ';')}")
                 self.sleep(0.3 + 0.03 * len(text))
                 self.run("w:100;k:enter;w:400")
-                self.sleep(0.8)  # 送った後、チャット欄が落ち着くまで待つ
+                self.sleep(1.5)  # 送った後、次の Enter が効くまで待つ
                 self._last_chat = now
                 self._do(f"チャット: {text}")
                 done.append("chat")
