@@ -9,6 +9,7 @@
     python tools\\edge_objects.py train                      学習して models/edge_obj.npz と
                                                            firmware/AutoKeyMouse/edge_obj_model.h (ESP32 用) を書き出す
     python tools\\edge_objects.py find 画面.png               画面で探して結果を表示 (画面_found.png に枠を描く)
+    python tools\\edge_objects.py find screen                 今のゲーム画面を撮って探す (dataset/screens/find_screen.png)
     python tools\\edge_objects.py point party_invite cancel   登録した窓の画像で、押す場所 (Cancel ボタン) を 1 回クリックして覚える
     python tools\\edge_objects.py remove 名前                 登録を消す
     python tools\\edge_objects.py restore helper_running      最初から入っている登録 (helper_*, hunting_log) を元に戻す
@@ -136,8 +137,28 @@ def cmd_train(args) -> None:
             print("   ", ", ".join(f"{r.name}{'○' if r.present else '×'}" for r in d.detect(img)))
 
 
+def grab_screen(name: str) -> np.ndarray:
+    from akm.config import ask_obs_password, load_config
+    from akm.screen import GameScreen
+
+    cfg = load_config("config.yaml")
+    ask_obs_password(cfg, "config.yaml")
+    screen = GameScreen.from_config(cfg)
+    screen.locate()
+    img = screen.grab()
+    shot = PC_DIR / "dataset" / "screens" / f"{name}.png"
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(shot), img)
+    print(f"[find] 今の画面を {shot} に保存しました")
+    return img
+
+
 def cmd_find(args) -> None:
-    img = imread(args.image)
+    if args.image == "screen":  # 今のゲーム画面を撮って探す
+        img = grab_screen("find_screen")
+        args.image = str(PC_DIR / "dataset" / "screens" / "find_screen.png")
+    else:
+        img = imread(args.image)
     if img is None:
         raise SystemExit(f"画像が読めません: {args.image}")
     d = ObjectDetector.load()
