@@ -348,6 +348,14 @@ class Mirror:
                 if data is None:
                     time.sleep(0.05)
                     continue
+            fb = getattr(self, "_fallback_from", None)
+            if fb is not None and time.monotonic() - fb[2] >= 30:
+                # ESP32 が一時的に応答しなかっただけなら専用ポートに戻れる (遅い HTTP のままにしない)
+                self.transport, self.fmt = fb[0], fb[1]
+                self._fallback_from = None
+                self._tcp_fail = 0
+                print("[mirror] 専用ポートをもう一度試します")
+                continue
             if self.transport in ("tcp", "auto") and self.fmt in ("jpeg", "bc", "bad16"):
                 try:
                     tp = time.perf_counter()
@@ -362,8 +370,9 @@ class Mirror:
                     self.errors += 1
                     self._tcp_fail += 1
                     if self.transport == "auto" and self._tcp_fail >= 3:
-                        print(f"[mirror] 専用ポートに接続できないので HTTP で送ります ({e})。"
-                              "ファームウェアを frame-stream-3 以降にすると速くなります")
+                        print(f"[mirror] 専用ポートに接続できないので、しばらく HTTP で送ります ({e})。"
+                              "30 秒ごとに専用ポートをもう一度試します")
+                        self._fallback_from = (self.transport, self.fmt, time.monotonic())
                         self.transport = "http"
                         if self.fmt in ("bc", "bad16"):
                             self.fmt = "jpeg"  # ブロック形式は専用ポートでしか送れない
