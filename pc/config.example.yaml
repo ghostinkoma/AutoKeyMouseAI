@@ -112,6 +112,7 @@ obs:
 #   watch  : 見えた瞬間の画面を dataset/screens/rare/<名前>/ に保存する (学習の見本。似ているだけの画面は _maybe/ に)
 #   respond: 応じ方の手順。--decline party_invite (learn_loop.ps1 -Decline party_invite) を付けたときだけ動く
 #            (書かなければ akm/edge/respond.py の DEFAULT_RESPONSES。下は既定と同じもの)
+#     require_helper: "on" = MU Helper が動作中 (■) のときだけ行う (within_s 秒以内に ON だったなら可)
 #     require_text: 窓の中の文字にどれかの語が無ければ何もしない (タイトル "Information" は別の知らせと同じなので)
 #     click: "@場所" (edge_objects.py point で覚えた窓の中の場所) / 物体の名前 / [横, 縦] = 窓の枠の中の位置 (0〜1)
 #     close_windows: 開いている窓の数だけ押すキー (keep の窓は数えない)
@@ -124,6 +125,8 @@ rare_windows:
   chat_cooldown_s: 120
   respond:
     party_invite:
+      - require_helper: "on"            # MU Helper が動作中 (■) のときだけ (窓が出る前 120 秒以内に ON でも可)
+        within_s: 120
       - require_text: [party, join]     # 本文 "Someone requests you to join their party" で確かめる
       - click: "@cancel"                # python tools\edge_objects.py point party_invite cancel で覚えた場所
         fallback_key: esc

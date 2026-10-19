@@ -191,6 +191,7 @@ def main() -> None:
                 except Exception as e:
                     print(f"[rare] 窓の文字を読む OCR が使えません。文字の確認 (require_text) がある手順は行いません ({e})")
                 responder = Responder(dev.run, grab_full, lambda: rec.detector, move=dev.s_move, read_text=read_text,
+                                      helper_state=lambda: rec.helper_state(),
                                       to_screen=screen.to_screen, is_active=getattr(screen, "is_active", None),
                                       keep=rcfg.get("keep", ["hunting_log", "helper_panel"]),
                                       chat_cooldown_s=float(rcfg.get("chat_cooldown_s", 120)))

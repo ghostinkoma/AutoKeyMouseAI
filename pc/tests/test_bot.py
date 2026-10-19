@@ -2039,12 +2039,13 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
 
     t = [0.0]
     text = ["Information  Bob  Someone requests you to join their a party"]
+    helper = [(False, 30.0)]  # 今は OFF (勧誘で止まった) だが 30 秒前までは ON
     r = Responder(run, lambda: np.zeros((907, 1866, 3), np.uint8), det, move=lambda x, y: f"a:{x:.0f},{y:.0f}",
                   to_screen=lambda x, y: (x + 10, y + 20), sleep=lambda s: None, clock=lambda: t[0], log=lambda m: None,
-                  read_text=lambda img: text[0])
+                  read_text=lambda img: text[0], helper_state=lambda: helper[0])
     inv = Detection("party_invite", "window", True, 0.95, 0.99, (300, 150, 424, 288))
     done = r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)
-    assert done == ["text", "click", "close:1", "chat", "chat"]
+    assert done == ["helper", "text", "click", "close:1", "chat", "chat"]
     assert sent[0] == "a:628,429;w:40;c:L"                     # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
     assert sent[2] == "k:enter;w:300" and sent[3].startswith("t:Sorry, I no need PT.;")
@@ -2053,12 +2054,20 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     det.open.add("party_invite")
     sent.clear()
     t[0] = 60
-    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["text", "click", "close:0"]
+    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper", "text", "click", "close:0"]
     assert not any(s.startswith("t:") for s in sent)
     # 同じ "Information" の窓でも、本文に party / join が無ければ何もしない
     text[0] = "Information  Bob  Someone requests a trade"
     sent.clear()
-    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == [] and sent == ["ra"]
+    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper"] and sent == ["ra"]
+    # Helper を使っていない (最後に ON だったのが 10 分前 / 分からない) ときは断らない
+    text[0] = "Information  Bob  Someone requests you to join their a party"
+    det.open.add("party_invite")
+    for st in [(False, 600.0), None]:
+        helper[0] = st
+        sent.clear()
+        assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == [] and sent == ["ra"]
+    helper[0] = (True, 0.0)
     # ゲームが手前に無ければ何もしない
     r.is_active = lambda: False
     assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == []
@@ -2077,3 +2086,25 @@ def test_object_points_and_remove(tmp_path):
     assert remove_object("party_invite_cancel", tmp_path) and not remove_object("nope", tmp_path)
     assert [o.name for o in load_objects(tmp_path)] == ["party_invite"]
     assert not (tmp_path / "party_invite_cancel.png").exists()
+
+
+def test_live_helper_state_remembers_last_on():
+    from akm.edge.live import LiveRecognizer
+
+    class D:
+        objects = []
+        on = True
+
+        def detect(self, img):
+            from akm.edge.objects import Detection
+            return [Detection("helper_running" if self.on else "helper_stopped", "icon", True, 1.0, 1.0, (0, 0, 1, 1))]
+
+    d = D()
+    rec = LiveRecognizer(lambda: np.zeros((907, 1866, 3), np.uint8), d, log=lambda *a: None)
+    assert rec.helper_state()[0] is None and rec.helper_state()[1] > 1e8
+    rec.step()
+    assert rec.helper_state()[0] is True and rec.helper_state()[1] < 1
+    d.on = False
+    rec.step()
+    on, since = rec.helper_state()
+    assert on is False and since < 1   # 今は OFF でも、直前まで ON だったことを覚えている

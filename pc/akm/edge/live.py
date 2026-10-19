@@ -70,6 +70,7 @@ class LiveRecognizer:
         self.world = world              # akm.world_log.WorldLogger (現在地と相手を DB に記録する)
         self.rare = rare                # akm.edge.rare.RareWatch (めったに出ない窓の画面を残す・断る)
         self._dets = []
+        self._helper_on_ts = -1e9      # 最後に MU Helper が ON (■) だった時刻
         self.last = Recognition()
         self.keep_target_s = 8.0        # 相手が見えなくなっても液晶に残す秒数
         self._shown = None
@@ -124,6 +125,8 @@ class LiveRecognizer:
     def step(self) -> Recognition:
         img = self.grab_full()
         r = self.recognize(img)
+        if r.helper:
+            self._helper_on_ts = time.monotonic()
         self._save(img)
         if self.rare is not None:
             try:
@@ -169,6 +172,10 @@ class LiveRecognizer:
         if self.on_result:
             self.on_result(r)
         return r
+
+    def helper_state(self):
+        """(今 ON か: True / False / None, 最後に ON を見てからの秒数)。勧誘を断る条件に使う。"""
+        return self.last.helper, time.monotonic() - self._helper_on_ts
 
     def start(self) -> None:
         def loop():

@@ -8,6 +8,8 @@
                                  (ボタンが見つからないときは fallback_key を押す。既定 esc)
   - close_windows: esc           開いている窓の数だけ esc を押す (keep に書いた窓は数えない)
                                  窓が無いのに esc を押すとゲームのメニューが開くので、見えている数しか押さない
+  - require_helper: on           MU Helper が動作中 (■) のときだけ行う。今 ON か、within_s 秒 (既定 120) 以内に
+                                 ON だったなら OK (勧誘の窓が出ると Helper が止まることがあるので)。分からなければ行わない
   - require_text: [party, join]  窓の中の文字を読み、どれかの語が無ければ以降を行わない
                                  (タイトルが同じ別の窓を取り違えて、断ったりチャットしたりしないように)
   - chat: "Sorry, I no need PT." Enter → 文字 → Enter でチャットに送る (ASCII だけ。chat_cooldown_s 秒に 1 回まで)
@@ -24,6 +26,9 @@ import time
 
 DEFAULT_RESPONSES = {
     "party_invite": [
+        # MU Helper で狩りをしているとき (■) だけ断る。勧誘の窓が出ると Helper が止まることがあるので
+        # 「今 ON」か「窓が出る前 within_s 秒以内に ON だった」なら行う
+        {"require_helper": "on", "within_s": 120},
         # タイトルは "Information" で、ほかの知らせ (トレードの申し込みなど) と同じ。本文の文字で確かめる
         {"require_text": ["party", "join"]},
         {"click": "@cancel", "fallback_key": "esc"},
@@ -50,7 +55,7 @@ def chat_text_ok(text: str) -> str | None:
 class Responder:
     def __init__(self, run, grab, detector, move=None, to_screen=None, is_active=None, keep=KEEP_WINDOWS,
                  chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
-                 log=print, sleep=time.sleep, clock=time.monotonic, read_text=None):
+                 log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -67,6 +72,7 @@ class Responder:
         self._last_chat = -1e9
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
+        self.helper_state = helper_state  # () → (今 ON か: True/False/None, 最後に ON を見てからの秒数)
 
     def _det(self):
         return self.detector() if callable(self.detector) else self.detector
@@ -93,7 +99,25 @@ class Responder:
             self._do(f"{name}: ゲームの窓が手前に無いので何もしません")
             return done
         for step in steps:
-            if "require_text" in step:
+            if "require_helper" in step:
+                want_on = str(step["require_helper"]).lower() in ("on", "true", "1")
+                within = float(step.get("within_s", 120))
+                st = self.helper_state() if self.helper_state is not None else None
+                if st is None:
+                    self._do(f"{name}: MU Helper の状態が分からないので何もしません")
+                    self.run("ra")
+                    return done
+                now_on, since = st
+                ok = (now_on is True or since <= within) if want_on else (now_on is False and since > within)
+                if not ok:
+                    state = "ON" if now_on else "OFF" if now_on is False else "?"
+                    last = f"最後に ON だったのは {since:.0f} 秒前" if since < 1e8 else "ON を見ていない"
+                    self._do(f"{name}: MU Helper が {state} ({last}) なので何もしません"
+                             f" (Helper {'ON' if want_on else 'OFF'} のときだけ断る設定)")
+                    self.run("ra")
+                    return done
+                done.append("helper")
+            elif "require_text" in step:
                 words = [w.lower() for w in step["require_text"]]
                 text = ""
                 if self.read_text is not None:
