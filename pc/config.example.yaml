@@ -139,7 +139,8 @@ rare_windows:
       - click: "@cancel"                # python tools\edge_objects.py point party_invite cancel で覚えた場所
                                         # (勧誘の窓は Esc では消えない。押しても消えなければ以降は行わない)
       - close_windows: esc
-      - chat: "I NO need PT. Perdon, no hago party. Gracias!"   # 1 回で送る (50 文字まで)
+      - chat: "I NO need PT"           # 入力欄にフォーカスがある (入力先が Edit) のを確かめてから送る
+      - chat: "Perdon, cazo solo aqui. No hago party, gracias!"   # 50 文字まで
 
 popups:
   # - name: party request

@@ -33,8 +33,9 @@ DEFAULT_RESPONSES = {
         {"require_text": ["party", "join"]},  # "requests" はトレードの申し込みにもあるので使わない
         {"click": "@cancel"},  # 勧誘の窓は Esc では消えないので、押せなければ以降 (Esc・チャット) は行わない
         {"close_windows": "esc"},
-        # MU のチャット欄は画面から開閉を確かめられないので、2 回に分けず 1 回で送る (英語 + スペイン語、45 文字)
-        {"chat": "I NO need PT. Perdon, no hago party. Gracias!"},
+        # チャットの入力欄にフォーカスがあるか (入力先が Edit) を確かめてから 1 つずつ送る。50 文字まで
+        {"chat": "I NO need PT"},
+        {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"},
     ],
 }
 KEEP_WINDOWS = ("hunting_log", "helper_panel")  # MU Helper の表示。閉じると Helper の判定ができなくなる
@@ -159,6 +160,27 @@ class Responder:
         # ゲームはクリックが速すぎると取りこぼすので、動かしてから少し待ち、押す・離すを分けて送る
         self.run((f"{mv};" if mv else "") + f"w:120;bd:{button};w:90;bu:{button}")
         return sx, sy
+
+    def _chat_focused(self) -> bool | None:
+        """チャットの入力欄 (Windows の Edit 部品) にフォーカスがあるか。分からなければ None。"""
+        if self.input_state is None:
+            return None
+        try:
+            st = self.input_state()
+        except Exception:
+            return None
+        if "focus_class" not in st:
+            return None
+        return str(st.get("focus_class") or "").lower() == "edit"
+
+    def _wait_chat_focus(self, timeout: float = 1.2) -> bool:
+        waited = 0.0
+        while waited <= timeout:
+            if self._chat_focused():
+                return True
+            self.sleep(0.1)
+            waited += 0.1
+        return False
 
     def _has_focus(self) -> bool:
         """ゲームの窓が手前にあり、キーの入力先がゲーム本体になっているか。"""
@@ -438,7 +460,20 @@ class Responder:
                             self._do("ゲームの日本語入力 (IME) が ON だったので OFF にしました")
                     except Exception:
                         pass
-                if self.chat_verify and self._has(self.chat_check):
+                edit = self._chat_focused()
+                if edit is not None:
+                    # チャットの入力欄は Windows の Edit 部品: 入力先が Edit なら欄にフォーカスがある (確実に分かる)
+                    if not edit:
+                        self.run("k:enter")
+                        if not self._wait_chat_focus():
+                            # 入力欄にフォーカスがあったのを Enter で閉じた場合などは、もう一度押して開き直す
+                            self.run("k:enter")
+                            if not self._wait_chat_focus():
+                                self._do("Enter を押してもチャットの入力欄にフォーカスが移らないので、文字は打ちません")
+                                self.run("ra")
+                                break
+                    self._do("チャットの入力欄にフォーカスがあるのを確かめました")
+                elif self.chat_verify and self._has(self.chat_check):
                     # 開いていても閉じていても Enter を押す: 閉じていれば開いて入力先になり、
                     # 開いていれば入力先になる (チャット欄が出ていてもフォーカスが無いと文字はショートカットキーになる)
                     before = self._grab_for_chat()
@@ -472,15 +507,17 @@ class Responder:
                     self.run("k:enter")
                     self.sleep(self.chat_open_wait)
                 # 打つ直前にもう一度確かめる (開いている間にほかのアプリへ移っていたら打たない)
-                if not self._has_focus():
+                if not self._has_focus() or self._chat_focused() is False:
                     self._do("チャット欄を開いた後にゲームのフォーカスが外れたので、文字は打ちません")
+                    self.run("ra")
                     break
                 # 打ち終わるのを待ってから、Enter を別に送る (打っている途中の Enter は効かないことがある)
                 self.run(f"t:{text.replace(';', chr(92) + ';')}")
                 self.sleep(0.3 + 0.03 * len(text))
                 # 送信の Enter: 押したままを少し保つ (短い押下だとゲームが取りこぼす)。要るなら 2 回目も
-                if not self._has_focus():
-                    self._do("文字を打った後にゲームのフォーカスが外れたので、送信の Enter は押しません")
+                if not self._has_focus() or self._chat_focused() is False:
+                    self._do("文字を打った後にチャットの入力欄からフォーカスが外れたので、送信の Enter は押しません")
+                    self.run("ra")
                     break
                 for k in range(self.send_enters):
                     if k:

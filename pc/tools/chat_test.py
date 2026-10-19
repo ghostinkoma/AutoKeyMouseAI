@@ -62,9 +62,23 @@ def main() -> None:
               + ("  (chat_input の場所が未登録: add-screen chat_input --kind icon --desktop で登録)" if ncc < 0 else ""))
     text = args.text.replace(";", "\\;")
     wait = args.enter_wait if args.enter_wait is not None else 0.3 + 0.03 * len(args.text)
-    print("[chat] Enter (開く)")
-    print("   →", dev.run("k:enter"))
-    time.sleep(args.open_wait)
+    def edit_focus():
+        return (screen.input_state().get("focus_class") or "").lower() == "edit"
+
+    if edit_focus():
+        print("[chat] 入力先が Edit = チャットの入力欄にフォーカスがあるので、Enter は押さずに打ちます")
+    else:
+        print("[chat] Enter (開く)")
+        print("   →", dev.run("k:enter"))
+        time.sleep(args.open_wait)
+        for _ in range(10):
+            if edit_focus():
+                break
+            time.sleep(0.1)
+        print(f"[chat] Enter 後の入力先: {screen.input_state().get('focus_class') or 'なし'} → "
+              + ("チャットの入力欄にフォーカスあり" if edit_focus() else "入力欄にフォーカスなし"))
+        if not edit_focus():
+            raise SystemExit("[chat] チャットの入力欄にフォーカスが移らないので打ちません (本番もこの場合は止まります)")
     if checker is not None:
         ncc, diff = checker._chat_score(screen.grab_desktop(), before)
         opened = ncc >= 0.75 or (diff >= 8 and ncc >= 0.45)

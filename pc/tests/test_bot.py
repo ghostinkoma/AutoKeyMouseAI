@@ -2050,8 +2050,8 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     assert done == ["helper", "text", "click", "close:1", "chat"]
     assert sent[0] == "a:628,429;w:120;bd:L;w:90;bu:L"         # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
-    assert sent[2] == "k:enter" and sent[3] == "t:I NO need PT. Perdon, no hago party. Gracias!"
-    assert sent[4] == "w:100;kd:enter;w:80;ku:enter" and sent[5] == "ra"
+    assert sent[2] == "k:enter" and sent[3] == "t:I NO need PT"
+    assert sent[4] == "w:100;kd:enter;w:80;ku:enter" and sent[5] == "ra"   # 2 つ目は確かめられないので送らない
     assert all(chat_text_ok(st["chat"]) is None for st in DEFAULT_RESPONSES["party_invite"] if "chat" in st)
     # 2 分以内にまた勧誘されたら、断るだけでチャットはしない
     det.open.add("party_invite")
@@ -2103,8 +2103,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     det.detect = detect2
     r.run = run2
     r.chat_verify = True
-    two = DEFAULT_RESPONSES["party_invite"][:-1] + [{"chat": "I NO need PT"},
-                                                    {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"}]
+    two = DEFAULT_RESPONSES["party_invite"]
     det.open.add("party_invite")
     sent.clear()
     t[0] = 5000
@@ -2344,3 +2343,42 @@ def test_chat_stops_when_game_loses_focus():
     r.run = run2
     assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"]
     assert "t:I NO need PT" in sent
+
+
+def test_chat_uses_edit_focus():
+    from akm.edge.objects import Detection
+    from akm.edge.respond import Responder
+
+    class Det:
+        objects = []
+
+        def detect(self, img):
+            return []
+
+    state = {"cls": "MURex Client"}
+    sent, logs = [], []
+
+    def run(s):
+        sent.append(s)
+        if s == "k:enter":
+            state["cls"] = "Edit" if state["cls"] != "Edit" else "MURex Client"
+        elif "kd:enter" in s:
+            state["cls"] = "MURex Client"   # 送ると入力欄から外れる
+
+    r = Responder(run, lambda: None, Det(), sleep=lambda s: None, log=logs.append, is_active=lambda: True,
+                  input_state=lambda: {"focus": 5, "focus_class": state["cls"]})
+    det = Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))
+    steps = [{"chat": "I NO need PT"}, {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"}]
+    assert r._respond("party_invite", steps, det) == ["chat", "chat"]   # 2 つ目も確かめてから送れる
+    assert [x for x in sent if x == "k:enter"] == ["k:enter", "k:enter"]
+    # 最初から入力欄にフォーカスがあれば Enter は押さずに打つ
+    state["cls"] = "Edit"
+    sent.clear()
+    r._last_chat = -1e9
+    assert r._respond("party_invite", steps[:1], det) == ["chat"] and sent[0] == "t:I NO need PT"
+    # Enter を押しても入力欄に移らなければ打たない
+    r.run = lambda s: sent.append(s)
+    state["cls"] = "MURex Client"
+    sent.clear()
+    r._last_chat = -1e9
+    assert r._respond("party_invite", steps[:1], det) == [] and not any(x.startswith("t:") for x in sent)
