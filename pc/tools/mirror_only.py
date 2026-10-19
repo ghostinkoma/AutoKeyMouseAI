@@ -203,6 +203,8 @@ def main() -> None:
                                       cursor=dev.cursor,
                                       chat_open_wait=float(rcfg.get("chat_open_wait_s", 0.3)),
                                       chat_verify=bool(rcfg.get("chat_verify", False)),
+                                      enter_hold_ms=int(rcfg.get("chat_enter_hold_ms", 80)),
+                                      send_enters=int(rcfg.get("chat_send_enters", 1)),
                                       input_state=getattr(screen, "input_state", None),
                                       ime_off=(getattr(screen, "ime_off", None) if rcfg.get("ime_off", True) else None),
                                       grab_chat=(getattr(screen, "grab_desktop", None)

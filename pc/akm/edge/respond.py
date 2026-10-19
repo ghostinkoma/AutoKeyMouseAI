@@ -112,7 +112,7 @@ class Responder:
                  log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
                  save_dir=None, cursor=None, activate=None, foreground=None, restore=None,
                  chat_open_wait: float = 0.3, blind_first: bool = True, grab_chat=None, input_state=None,
-                 ime_off=None, chat_verify: bool = False):
+                 ime_off=None, chat_verify: bool = False, enter_hold_ms: int = 80, send_enters: int = 1):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -130,6 +130,8 @@ class Responder:
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
         self.cursor = cursor            # () → 実際のマウスの位置 (確認のログ用)
+        self.enter_hold_ms = enter_hold_ms  # 送信の Enter を押したままにする時間
+        self.send_enters = send_enters  # 送信に要る Enter の回数
         self.chat_verify = chat_verify  # チャット欄が開いたかを画面で確かめる (MU の欄は OBS にも画面にも写らないので既定 off)
         self.input_state = input_state  # () → {"caret": 文字入力のカーソルがあるか, "ime": IME が ON か, ...}
         self.ime_off = ime_off          # () → IME を OFF にする (前が ON だったか)
@@ -438,7 +440,11 @@ class Responder:
                 # 打ち終わるのを待ってから、Enter を別に送る (打っている途中の Enter は効かないことがある)
                 self.run(f"t:{text.replace(';', chr(92) + ';')}")
                 self.sleep(0.3 + 0.03 * len(text))
-                self.run("w:100;k:enter;w:400")
+                # 送信の Enter: 押したままを少し保つ (短い押下だとゲームが取りこぼす)。要るなら 2 回目も
+                for k in range(self.send_enters):
+                    if k:
+                        self.sleep(0.4)
+                    self.run(f"w:100;kd:enter;w:{self.enter_hold_ms};ku:enter")
                 self.sleep(1.5)  # 送った後、次の Enter が効くまで待つ
                 self._last_chat = now
                 self._do(f"チャット: {text}")

@@ -3,6 +3,8 @@
     python tools\\chat_test.py "test"              5 秒後に Enter → 文字 → Enter を送る (その間にゲームを手前に)
     python tools\\chat_test.py "test" --activate   ゲームを自動で手前に出してから送る (learn_loop と同じやり方)
     python tools\\chat_test.py "test" --open-wait 0.6 --enter-wait 1.0   待ち時間を変えて試す
+    python tools\\chat_test.py "test" --hold 150                送信の Enter を長めに押す (ミリ秒。既定 80)
+    python tools\\chat_test.py "test" --enters 2                送信の Enter を 2 回押す
 
 自分で手前にしたときは送れて --activate では送れないなら、手前に出し方が原因。
 どちらでも送れなければ、待ち時間かキーの送り方が原因。
@@ -23,6 +25,8 @@ def main() -> None:
     ap.add_argument("--activate", action="store_true", help="ゲームを自動で手前に出す")
     ap.add_argument("--open-wait", type=float, default=0.3, help="Enter で開いてから打つまでの秒数")
     ap.add_argument("--enter-wait", type=float, default=None, help="打ち終わってから送信の Enter までの秒数")
+    ap.add_argument("--hold", type=int, default=80, help="送信の Enter を押したままにするミリ秒")
+    ap.add_argument("--enters", type=int, default=1, help="送信の Enter の回数")
     args = ap.parse_args()
     cfg = load_config("config.yaml")
     screen = GameScreen.from_config(cfg)
@@ -47,8 +51,11 @@ def main() -> None:
     print(f"[chat] 文字: {args.text}")
     print("   →", dev.run(f"t:{text}"))
     time.sleep(wait)
-    print("[chat] Enter (送信)")
-    print("   →", dev.run("w:100;k:enter"))
+    for k in range(args.enters):
+        if k:
+            time.sleep(0.4)
+        print(f"[chat] Enter (送信 {k + 1} 回目、{args.hold}ms 押す)")
+        print("   →", dev.run(f"w:100;kd:enter;w:{args.hold};ku:enter"))
     if prev:
         time.sleep(0.5)
         bring_to_front(prev)

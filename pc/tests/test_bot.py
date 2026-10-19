@@ -2051,7 +2051,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     assert sent[0] == "a:628,429;w:120;bd:L;w:90;bu:L"         # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
     assert sent[2] == "k:enter" and sent[3] == "t:I NO need PT. Perdon, no hago party. Gracias!"
-    assert sent[4] == "w:100;k:enter;w:400" and sent[5] == "ra"
+    assert sent[4] == "w:100;kd:enter;w:80;ku:enter" and sent[5] == "ra"
     assert all(chat_text_ok(st["chat"]) is None for st in DEFAULT_RESPONSES["party_invite"] if "chat" in st)
     # 2 分以内にまた勧誘されたら、断るだけでチャットはしない
     det.open.add("party_invite")
@@ -2095,7 +2095,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
         run(script)
         if script.startswith("k:enter"):
             chat["open"] = not chat["open"]
-        elif "k:enter" in script:            # 送信
+        elif "kd:enter" in script:           # 送信
             chat["open"] = chat["stay_open"]
         elif script.startswith("t:") and not chat["open"]:
             raise AssertionError("チャット欄が閉じているのに打った")
@@ -2296,7 +2296,7 @@ def test_chat_open_checked_at_registered_place():
         sent.append(s)
         if s == "k:enter":
             state["open"] = not state["open"]
-        elif "k:enter" in s:
+        elif "kd:enter" in s:
             state["open"] = False   # 送ると閉じる
 
     r = Responder(run, grab, Det(), sleep=lambda s: None, log=lambda m: None, blind_first=False, chat_verify=True)
