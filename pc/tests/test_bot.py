@@ -2145,3 +2145,20 @@ def test_big_window_with_high_match_is_present_even_if_net_disagrees():
     det = ObjectDetector([ObjectDef("party_invite", "window", dlg, 768), ObjectDef("icon", "icon", small, 768)], NoNet())
     got = {d.name: d.present for d in det.detect(img)}
     assert got == {"party_invite": True, "icon": False}   # 小さいものはネットの否定に従う
+
+
+def test_read_dialog_lines_and_fuzzy_words():
+    from akm.edge.respond import has_word, read_dialog, text_lines
+
+    crop = np.full((221, 323, 3), 30, np.uint8)
+    for y, t in [(20, "Information"), (80, "Bob"), (110, "Someone requests you to join their a party"), (200, "OK")]:
+        cv2.putText(crop, t, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (230, 230, 230), 1)
+    lines = text_lines(crop)
+    assert len(lines) == 4
+    seen = []
+    got = read_dialog(crop, own=lambda line: (seen.append(line.shape), "x")[1], teacher=None)
+    assert len(seen) == 4 and got == "x | x | x | x"
+    # 読み違い (l と i、t の欠け) を少し許す。トレードの申し込みは通さない
+    assert has_word("Someone requests you to joln their a parly", ["party", "join"]) in ("party", "join")
+    assert has_word("lnformation 0n1 C'Qu OK", ["party", "join"]) is None
+    assert has_word("Bob requests a trade", ["party", "join"]) is None

@@ -30,7 +30,7 @@ DEFAULT_RESPONSES = {
         # 「今 ON」か「窓が出る前 within_s 秒以内に ON だった」なら行う
         {"require_helper": "on", "within_s": 120},
         # タイトルは "Information" で、ほかの知らせ (トレードの申し込みなど) と同じ。本文の文字で確かめる
-        {"require_text": ["party", "join"]},
+        {"require_text": ["party", "join"]},  # "requests" はトレードの申し込みにもあるので使わない
         {"click": "@cancel", "fallback_key": "esc"},
         {"close_windows": "esc"},
         {"chat": "Sorry, I no need PT."},
@@ -39,6 +39,60 @@ DEFAULT_RESPONSES = {
 }
 KEEP_WINDOWS = ("hunting_log", "helper_panel")  # MU Helper の表示。閉じると Helper の判定ができなくなる
 CHAT_MAX = 70
+
+
+def text_lines(crop, min_h: int = 6, max_h: int = 40):
+    """窓の中を文字の行ごとに切り分ける (明るい文字の行)。[(y0, y1), ...]"""
+    import cv2
+    import numpy as np
+
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask = hsv[:, :, 2] > 130
+    rows = mask.sum(axis=1) >= 2
+    out, y = [], 0
+    while y < len(rows):
+        if rows[y]:
+            y0 = y
+            while y < len(rows) and rows[y]:
+                y += 1
+            if min_h <= y - y0 <= max_h:
+                out.append((max(0, y0 - 2), min(len(rows), y + 2)))
+        y += 1
+    return out
+
+
+def read_dialog(crop, own=None, teacher=None) -> str:
+    """窓の中の文字を読む。行ごとに、自分の文字認識 (ゲームの字体で学習済み) と先生役の OCR (前処理 2 通り) で読む。"""
+    from ..maploc import preprocess
+
+    texts = []
+    for y0, y1 in text_lines(crop) or [(0, crop.shape[0])]:
+        line = crop[y0:y1]
+        if own is not None:
+            try:
+                texts.append(own(line))
+            except Exception:
+                pass
+        if teacher is not None:
+            for method in ("bright", "value"):
+                try:
+                    texts.append(teacher(preprocess(line, 3, method, 130)))
+                except Exception:
+                    pass
+    return " | ".join(" ".join(str(t).split()) for t in texts if t and str(t).strip())
+
+
+def has_word(text: str, words, cutoff: float = 0.8) -> str | None:
+    """text にどれかの語 (読み違いを少し許す) があれば、その語を返す。"""
+    from ..spawn import similarity
+
+    low = text.lower()
+    toks = [t for t in "".join(c if c.isalnum() else " " for c in low).split() if len(t) >= 3]
+    for w in words:
+        w = w.lower()
+        if w in low or any(similarity(t, w) >= cutoff for t in toks):
+            return w
+    return None
 
 
 def chat_text_ok(text: str) -> str | None:
@@ -55,7 +109,8 @@ def chat_text_ok(text: str) -> str | None:
 class Responder:
     def __init__(self, run, grab, detector, move=None, to_screen=None, is_active=None, keep=KEEP_WINDOWS,
                  chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
-                 log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None):
+                 log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
+                 save_dir=None):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -72,6 +127,7 @@ class Responder:
         self._last_chat = -1e9
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
+        self.save_dir = save_dir        # 文字の確認で弾いた窓の切り抜きを残す (読み方を直す材料)
         self.helper_state = helper_state  # () → (今 ON か: True/False/None, 最後に ON を見てからの秒数)
 
     def _det(self):
@@ -123,17 +179,26 @@ class Responder:
                 if self.read_text is not None:
                     img = self.grab()
                     x, y, w, h = det.box
+                    crop = img[max(0, y):y + h, max(0, x):x + w]
                     try:
-                        text = " ".join(str(self.read_text(img[max(0, y):y + h, max(0, x):x + w])).split())
+                        text = " ".join(str(self.read_text(crop)).split())
                     except Exception as e:
                         text = ""
                         self._do(f"{name}: 文字が読めません ({e})")
-                low = text.lower()
-                if not any(wd in low for wd in words):
-                    self._do(f"{name}: 窓の文字に {'/'.join(words)} が無いので何もしません (読み: {text[:60]!r})")
+                hit = has_word(text, words)
+                if hit is None:
+                    self._do(f"{name}: 窓の文字に {'/'.join(words)} が無いので何もしません (読み: {text[:120]!r})")
+                    if self.read_text is not None and self.save_dir is not None:
+                        try:
+                            import cv2
+
+                            self.save_dir.mkdir(parents=True, exist_ok=True)
+                            cv2.imwrite(str(self.save_dir / time.strftime(f"{name}_%Y%m%d_%H%M%S.png")), crop)
+                        except Exception:
+                            pass
                     self.run("ra")
                     return done
-                self._do(f"{name}: 窓の文字を確認 ({text[:60]!r})")
+                self._do(f"{name}: 窓の文字を確認 ({hit!r} … {text[:80]!r})")
                 done.append("text")
             elif "click" in step:
                 target = step["click"]

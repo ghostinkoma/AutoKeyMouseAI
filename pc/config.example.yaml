@@ -127,7 +127,7 @@ rare_windows:
     party_invite:
       - require_helper: "on"            # MU Helper が動作中 (■) のときだけ (窓が出る前 120 秒以内に ON でも可)
         within_s: 120
-      - require_text: [party, join]     # 本文 "Someone requests you to join their party" で確かめる
+      - require_text: [party, join]       # 本文 "Someone requests you to join their a party" (読み違いは少し許す)
       - click: "@cancel"                # python tools\edge_objects.py point party_invite cancel で覚えた場所
         fallback_key: esc
       - close_windows: esc

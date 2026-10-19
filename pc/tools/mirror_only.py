@@ -181,17 +181,24 @@ def main() -> None:
                 dev = open_device(cfg, abs_map_from(cfg))
                 press = dev.key
                 click = lambda x, y: dev.click(*screen.to_screen(x, y))  # noqa: E731
-                from akm.maploc import make_ocr, preprocess
+                from akm.edge.respond import read_dialog
+                from akm.maploc import make_ocr
 
-                read_text = None
+                t_ocr = None
                 try:
                     lcfg0 = cfg.get("maplog") or {}
                     t_ocr = make_ocr(lcfg0.get("ocr", "auto"), lcfg0.get("tesseract_cmd"))
-                    read_text = lambda crop: t_ocr(preprocess(crop, 2, "bright", 130))  # noqa: E731
                 except Exception as e:
-                    print(f"[rare] 窓の文字を読む OCR が使えません。文字の確認 (require_text) がある手順は行いません ({e})")
+                    print(f"[rare] 先生役の OCR が使えません ({str(e).splitlines()[0]})")
+
+                def own_read(line):
+                    return rec.ocr.read(line)[0] if rec.ocr is not None else ""
+
+                # 窓の文字を行ごとに、自分の文字認識 (ゲームの字体) と先生役の OCR で読む
+                read_text = lambda crop: read_dialog(crop, own_read, t_ocr)  # noqa: E731
                 responder = Responder(dev.run, grab_full, lambda: rec.detector, move=dev.s_move, read_text=read_text,
                                       helper_state=lambda: rec.helper_state(),
+                                      save_dir=PC_DIR / "dataset" / "screens" / "rare" / "_text",
                                       to_screen=screen.to_screen, is_active=getattr(screen, "is_active", None),
                                       keep=rcfg.get("keep", ["hunting_log", "helper_panel"]),
                                       chat_cooldown_s=float(rcfg.get("chat_cooldown_s", 120)))
