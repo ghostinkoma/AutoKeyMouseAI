@@ -108,6 +108,7 @@ def save_object(name: str, kind: str, crop: np.ndarray, screen_h: int, key: str 
     base.mkdir(parents=True, exist_ok=True)
     f = base / "objects.yaml"
     items = (yaml.safe_load(f.read_text(encoding="utf-8")) or []) if f.exists() else []
+    prev = next((e for e in items if e["name"] == name), None)
     items = [e for e in items if e["name"] != name]
     img_name = f"{name}.png"
     cv2.imwrite(str(base / img_name), crop)
@@ -116,6 +117,8 @@ def save_object(name: str, kind: str, crop: np.ndarray, screen_h: int, key: str 
         e["key"] = key
     if group:
         e["group"] = group
+    if prev and prev.get("points"):  # 押す場所 (窓の中の割合) は登録し直しても引き継ぐ
+        e["points"] = prev["points"]
     items.append(e)
     f.write_text(yaml.safe_dump(items, allow_unicode=True, sort_keys=False), encoding="utf-8")
 

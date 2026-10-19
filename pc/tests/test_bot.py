@@ -2083,6 +2083,8 @@ def test_object_points_and_remove(tmp_path):
     save_point("party_invite", "cancel", 0.7512345, 0.88, base=tmp_path)
     objs = {o.name: o for o in load_objects(tmp_path)}
     assert objs["party_invite"].points == {"cancel": [0.7512, 0.88]} and objs["party_invite_cancel"].points == {}
+    save_object("party_invite", "window", img[:200, :300], 768, base=tmp_path)   # 登録し直しても場所は残る
+    assert {o.name: o for o in load_objects(tmp_path)}["party_invite"].points == {"cancel": [0.7512, 0.88]}
     assert remove_object("party_invite_cancel", tmp_path) and not remove_object("nope", tmp_path)
     assert [o.name for o in load_objects(tmp_path)] == ["party_invite"]
     assert not (tmp_path / "party_invite_cancel.png").exists()
