@@ -110,7 +110,8 @@ class Responder:
     def __init__(self, run, grab, detector, move=None, to_screen=None, is_active=None, keep=KEEP_WINDOWS,
                  chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
                  log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
-                 save_dir=None, cursor=None, activate=None, foreground=None, restore=None):
+                 save_dir=None, cursor=None, activate=None, foreground=None, restore=None,
+                 chat_open_wait: float = 0.2, blind_first: bool = True):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -128,6 +129,8 @@ class Responder:
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
         self.cursor = cursor            # () → 実際のマウスの位置 (確認のログ用)
+        self.chat_open_wait = chat_open_wait  # Enter を押してからチャット欄を確かめるまでの秒数
+        self.blind_first = blind_first  # 見本と合わなくても 1 つ目のチャットは打つ (Enter で開くのは確か)
         self.activate = activate        # () → ゲームを手前に出す (裏で動いているときも断れるように)
         self.foreground = foreground    # () → 今手前にあるウィンドウ (終わったら戻す)
         self.restore = restore          # (ウィンドウ) → そのウィンドウを手前に戻す
@@ -149,6 +152,18 @@ class Responder:
         # ゲームはクリックが速すぎると取りこぼすので、動かしてから少し待ち、押す・離すを分けて送る
         self.run((f"{mv};" if mv else "") + f"w:120;bd:{button};w:90;bu:{button}")
         return sx, sy
+
+    def _save_screen(self, name: str) -> None:
+        if self.save_dir is None:
+            return
+        try:
+            import cv2
+
+            out = self.save_dir.parent.parent / f"{name}.png"  # dataset/screens/<name>.png
+            out.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(out), self.grab())
+        except Exception:
+            pass
 
     def _chat_open(self, tries: int = 1) -> bool:
         """チャット欄が開いているか (開くまで少しかかるので tries 回まで見直す)。"""
@@ -323,12 +338,18 @@ class Responder:
                 if self._has(self.chat_check):
                     # チャット欄が開いているかを画面で確かめる。開いていれば Enter は押さない (押すと閉じてしまう)
                     if not self._chat_open():
-                        self.run("k:enter;w:300")
-                        self.sleep(0.3)
+                        self.run("k:enter")
+                        self.sleep(self.chat_open_wait)  # チャット欄が開くまで待ってから確かめる
                         if not self._chat_open(tries=4):
-                            self._do("Enter を押してもチャット欄が開かないので、文字は打ちません")
-                            self.run("k:esc;w:100" if sent_before else "ra")
-                            break
+                            self._save_screen("chat_check")
+                            if sent_before == 0 and self.blind_first:
+                                # 1 つ目は、Enter で開いたものとして打つ (見本が合っていないだけのことが多い)
+                                self._do("チャット欄の見本と合わないが、Enter で開いたものとして 1 つ目を打ちます"
+                                         " (今の画面を dataset/screens/chat_check.png に保存。ここから chat_input を登録し直せます)")
+                            else:
+                                self._do("Enter を押してもチャット欄が開かないので、文字は打ちません")
+                                self.run("ra")
+                                break
                 elif sent_before:
                     # 送った直後のチャット欄が開いたままか閉じたかは、見本 (chat_input) が無いと分からない。
                     # 分からないまま打つと文字がショートカットキー (A = スキルツリー など) になるので、2 つ目以降は送らない
@@ -336,7 +357,8 @@ class Responder:
                              f" python tools\\edge_objects.py add-screen {self.chat_check} --kind icon)")
                     break
                 else:
-                    self.run("k:enter;w:300")
+                    self.run("k:enter")
+                    self.sleep(self.chat_open_wait)
                 # 打ち終わるのを待ってから、Enter を別に送る (打っている途中の Enter は効かないことがある)
                 self.run(f"t:{text.replace(';', chr(92) + ';')}")
                 self.sleep(0.3 + 0.03 * len(text))

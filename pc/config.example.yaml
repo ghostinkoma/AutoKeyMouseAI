@@ -123,6 +123,8 @@ rare_windows:
   confirm: 2
   keep: [hunting_log, helper_panel]
   chat_cooldown_s: 120
+  chat_open_wait_s: 0.2                 # Enter でチャット欄を開いてから、開いたか確かめるまでの秒数
+  chat_blind_first: true                # 見本 (chat_input) と合わなくても 1 つ目のチャットは打つ (2 つ目以降は確かめられたときだけ)
   background: true                      # ゲームが裏にあっても、一時的に手前に出して断り、終わったら元のウィンドウに戻す
   respond:
     party_invite:

@@ -201,6 +201,8 @@ def main() -> None:
                                       helper_state=lambda: rec.helper_state(),
                                       save_dir=PC_DIR / "dataset" / "screens" / "rare" / "_text",
                                       cursor=dev.cursor,
+                                      chat_open_wait=float(rcfg.get("chat_open_wait_s", 0.2)),
+                                      blind_first=bool(rcfg.get("chat_blind_first", True)),
                                       activate=(getattr(screen, "activate", None)
                                                 if rcfg.get("background", True) else None),
                                       foreground=foreground_window, restore=bring_to_front,

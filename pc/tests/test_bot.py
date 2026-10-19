@@ -2050,7 +2050,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     assert done == ["helper", "text", "click", "close:1", "chat"]
     assert sent[0] == "a:628,429;w:120;bd:L;w:90;bu:L"         # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
-    assert sent[2] == "k:enter;w:300" and sent[3] == "t:I NO need PT" and sent[4] == "w:100;k:enter;w:400"
+    assert sent[2] == "k:enter" and sent[3] == "t:I NO need PT" and sent[4] == "w:100;k:enter;w:400"
     assert sent[5] == "ra" and not any(x.startswith("t:Perdon") for x in sent)
     assert all(chat_text_ok(st["chat"]) is None for st in DEFAULT_RESPONSES["party_invite"] if "chat" in st)
     # 2 分以内にまた勧誘されたら、断るだけでチャットはしない
@@ -2107,14 +2107,14 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     t[0] = 5000
     assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper", "text", "click", "close:0",
                                                                                  "chat", "chat"]
-    assert [x for x in sent if x.startswith("k:enter")] == ["k:enter;w:300"]   # 2 つ目は開いたままなので押さない
+    assert [x for x in sent if x.startswith("k:enter")] == ["k:enter"]   # 2 つ目は開いたままなので押さない
     # 送ると閉じるゲームなら、2 つ目の前にもう一度 Enter で開く。開かなければ打たない
     chat.update(open=False, stay_open=False)
     det.open.add("party_invite")
     sent.clear()
     t[0] = 9000
     assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)[-2:] == ["chat", "chat"]
-    assert [x for x in sent if x.startswith("k:enter")] == ["k:enter;w:300", "k:enter;w:300"]
+    assert [x for x in sent if x.startswith("k:enter")] == ["k:enter", "k:enter"]
     det.detect = old_detect
     r.run = run
     # ゲームが手前に無ければ何もしない
@@ -2234,3 +2234,30 @@ def test_responder_brings_game_to_front_and_back():
     assert seen == ["game"] and state["fg"] == "notepad"
     r.activate = None
     assert r.respond("party_invite", [], Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == []
+
+
+def test_chat_blind_first_when_sample_does_not_match():
+    from akm.edge.objects import Detection
+    from akm.edge.respond import Responder
+
+    class Obj:
+        def __init__(self, n):
+            self.name, self.points = n, {}
+
+    class Det:
+        objects = [Obj("chat_input")]
+
+        def detect(self, img):
+            return [Detection("chat_input", "icon", False, 0.56, 0.0, (0, 700, 300, 20))]  # 見本が合わない
+
+    sent = []
+    r = Responder(sent.append, lambda: np.zeros((768, 1366, 3), np.uint8), Det(), sleep=lambda s: None,
+                  log=lambda m: None)
+    steps = [{"chat": "I NO need PT"}, {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"}]
+    assert r.respond("party_invite", steps, Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == ["chat"]
+    assert "t:I NO need PT" in sent and not any(x.startswith("t:Perdon") for x in sent)
+    r.blind_first = False
+    r._last_chat = -1e9
+    sent.clear()
+    assert r.respond("party_invite", steps, Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == []
+    assert not any(x.startswith("t:") for x in sent)
