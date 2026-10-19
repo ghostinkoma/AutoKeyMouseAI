@@ -376,6 +376,59 @@ def is_foreground(hwnd: int) -> bool:
     return user32.GetForegroundWindow() == hwnd
 
 
+def input_state(hwnd: int) -> dict:
+    """ゲームの入力の状態 (Windows): キャレット (文字入力の点滅カーソル) の有無・入力先のウィンドウ・IME が ON か。
+    チャット欄がゲームの描画と別の部品なら、開くとキャレットが出たり入力先が変わったりする。"""
+    out = {"caret": None, "focus": None, "focus_class": "", "ime": None}
+    if not IS_WINDOWS or not hwnd:
+        return out
+
+    class GUITHREADINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hwndActive", wintypes.HWND),
+                    ("hwndFocus", wintypes.HWND), ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                    ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND), ("rcCaret", wintypes.RECT)]
+
+    tid = user32.GetWindowThreadProcessId(hwnd, None)
+    gi = GUITHREADINFO()
+    gi.cbSize = ctypes.sizeof(GUITHREADINFO)
+    if user32.GetGUIThreadInfo(tid, ctypes.byref(gi)):
+        out["caret"] = bool(gi.hwndCaret) or bool(gi.flags & 1)
+        out["focus"] = gi.hwndFocus or 0
+        if gi.hwndFocus:
+            buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(gi.hwndFocus, buf, 64)
+            out["focus_class"] = buf.value
+    out["ime"] = ime_open(hwnd)
+    return out
+
+
+def ime_open(hwnd: int) -> bool | None:
+    """ゲームの IME (日本語入力) が ON か。分からなければ None。"""
+    if not IS_WINDOWS or not hwnd:
+        return None
+    try:
+        ime = ctypes.windll.imm32.ImmGetDefaultIMEWnd(hwnd)
+        if not ime:
+            return None
+        return bool(user32.SendMessageW(ime, 0x0283, 0x0005, 0))  # WM_IME_CONTROL, IMC_GETOPENSTATUS
+    except Exception:
+        return None
+
+
+def set_ime(hwnd: int, on: bool) -> bool:
+    """ゲームの IME を ON / OFF にする。OFF にすると英字がそのまま入る (Enter 1 回で送信できる)。"""
+    if not IS_WINDOWS or not hwnd:
+        return False
+    try:
+        ime = ctypes.windll.imm32.ImmGetDefaultIMEWnd(hwnd)
+        if not ime:
+            return False
+        user32.SendMessageW(ime, 0x0283, 0x0006, 1 if on else 0)  # IMC_SETOPENSTATUS
+        return ime_open(hwnd) == on
+    except Exception:
+        return False
+
+
 def foreground_window() -> int | None:
     return user32.GetForegroundWindow() if IS_WINDOWS else None
 
@@ -632,6 +685,16 @@ class GameScreen:
         """クライアント座標 → スクリーン座標"""
         assert self.rect is not None
         return self.rect.left + x, self.rect.top + y
+
+    def input_state(self) -> dict:
+        return input_state(self.hwnd)
+
+    def ime_off(self) -> bool | None:
+        """IME が ON なら OFF にする。(前が ON だったか, None = 分からない)"""
+        was = ime_open(self.hwnd)
+        if was:
+            set_ime(self.hwnd, False)
+        return was
 
     def activate(self) -> bool:
         """ゲームを手前に出す。出せたら True。"""

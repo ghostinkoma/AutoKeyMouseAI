@@ -111,7 +111,8 @@ class Responder:
                  chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
                  log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
                  save_dir=None, cursor=None, activate=None, foreground=None, restore=None,
-                 chat_open_wait: float = 0.2, blind_first: bool = True, grab_chat=None):
+                 chat_open_wait: float = 0.2, blind_first: bool = True, grab_chat=None, input_state=None,
+                 ime_off=None):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -129,6 +130,8 @@ class Responder:
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
         self.cursor = cursor            # () → 実際のマウスの位置 (確認のログ用)
+        self.input_state = input_state  # () → {"caret": 文字入力のカーソルがあるか, "ime": IME が ON か, ...}
+        self.ime_off = ime_off          # () → IME を OFF にする (前が ON だったか)
         self.grab_chat = grab_chat      # () → チャット欄を確かめる画面 (画面に映っているとおり。OBS には欄が写らない)
         self.chat_open_wait = chat_open_wait  # Enter を押してからチャット欄を確かめるまでの秒数
         self.blind_first = blind_first  # 見本と合わなくても 1 つ目のチャットは打つ (Enter で開くのは確か)
@@ -216,6 +219,13 @@ class Responder:
         for k in range(tries):
             if k:
                 self.sleep(0.2)
+            if self.input_state is not None:  # チャット欄が Windows の部品なら、開くと文字入力のカーソルが出る
+                try:
+                    st = self.input_state()
+                    if st.get("caret"):
+                        return True
+                except Exception:
+                    pass
             img = self._grab_for_chat()
             ncc, diff = self._chat_score(img, closed)
             if ncc >= 0:
@@ -390,6 +400,13 @@ class Responder:
                     self._do(f"チャットは {self.chat_cooldown_s:.0f} 秒に 1 回までなので送りません")
                     break  # 残りのチャットも送らない
                 sent_before = done.count("chat")
+                if sent_before == 0 and self.ime_off is not None:
+                    # 日本語入力が ON だと英字が変換待ちになり、Enter 1 回目は確定だけで送信されない
+                    try:
+                        if self.ime_off():
+                            self._do("ゲームの日本語入力 (IME) が ON だったので OFF にしました")
+                    except Exception:
+                        pass
                 if self._has(self.chat_check):
                     # チャット欄が開いているかを画面で確かめる。開いていれば Enter は押さない (押すと閉じてしまう)
                     if self._closed is None or not self._chat_open(closed=self._closed):
