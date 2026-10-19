@@ -445,8 +445,10 @@ def bring_to_front(hwnd: int, wait_s: float = 0.4) -> bool:
     other = user32.GetWindowThreadProcessId(fg, None) if fg else 0
     attached = bool(other and other != me and user32.AttachThreadInput(me, other, True))
     try:
-        user32.keybd_event(0x12, 0, 0, 0)  # Alt を一瞬押すと切り替えが許される
-        user32.keybd_event(0x12, 0, 2, 0)
+        # キーを一瞬押すと切り替えが許される。Alt だと Windows がメニュー操作の状態になり、
+        # 次の Enter などがゲームに届かないことがあるので、どのアプリも使わない F24 を使う
+        user32.keybd_event(0x87, 0, 0, 0)
+        user32.keybd_event(0x87, 0, 2, 0)
         user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
     finally:

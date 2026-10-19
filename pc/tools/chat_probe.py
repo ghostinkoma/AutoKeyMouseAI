@@ -61,7 +61,8 @@ def main() -> None:
     end = time.monotonic() + args.seconds
     while time.monotonic() < end:
         st = snapshot(screen)
-        key = (st["caret"], st["focus"], st["ime"], st["前面"])
+        b = st["画面"]
+        key = (st["caret"], st["focus"], st["ime"], st["前面"], round(b / 3) if isinstance(b, float) else b)
         if key != last:
             print(f"  {time.strftime('%H:%M:%S')}  {st}")
             last = key
