@@ -2430,7 +2430,7 @@ def test_chat_waits_for_caret_blink():
     r.caret_blinking = lambda: False                                         # カーソルが点滅していない
     det = Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))
     assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == []
-    assert sent.count("k:enter") == 2 and not any(x.startswith("t:") for x in sent)
+    assert sent.count("k:enter") == 3 and not any(x.startswith("t:") for x in sent)
     r.caret_blinking = lambda: True
     sent.clear()
     assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"] and "t:I NO need PT" in sent
@@ -2523,3 +2523,38 @@ def test_default_party_invite_steps_and_precheck_without_switching():
                   read_text=lambda img: "Information Bob requests a trade")
     det = Detection("party_invite", "window", True, 0.9, 0.9, (0, 0, 10, 10))
     assert r.respond("party_invite", steps, det) == [] and switched == []   # 本文が合わなければ切り替えない
+
+
+def test_chat_clicks_visible_box_when_enter_does_not_focus():
+    from akm.edge.objects import Detection, ObjectDef
+    from akm.edge.respond import Responder
+
+    bar = np.full((22, 300, 3), 25, np.uint8)
+    cv2.rectangle(bar, (0, 0), (299, 21), (150, 150, 150), 1)
+    cv2.putText(bar, ">", (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+    chat = ObjectDef("chat_input", "icon", bar, 768, pos=(10, 700))
+    scene = np.random.default_rng(1).integers(40, 200, (768, 1366, 3), np.uint8)
+    scene[700:722, 10:310] = bar                        # 欄は出ている
+
+    class Det:
+        objects = [chat]
+
+        def detect(self, img):
+            return []
+
+    g = {"cls": "MURex Client"}
+    sent = []
+
+    def run(s):
+        sent.append(s)
+        if "bu:L" in s:                                 # 欄をクリックすると入力欄にフォーカスが移る
+            g["cls"] = "Edit"
+
+    r = Responder(run, lambda: scene, Det(), move=lambda x, y: f"a:{x:.0f},{y:.0f}", sleep=lambda s: None,
+                  log=lambda m: None, is_active=lambda: True, input_state=lambda: {"focus": 5, "focus_class": g["cls"]})
+    r.caret_blinking = lambda: g["cls"] == "Edit"
+    det = Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))
+    assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"]
+    click = next(x for x in sent if "bu:L" in x)
+    assert click.startswith("a:100,711")                # 欄の左寄りの真ん中
+    assert sent.index(click) < sent.index("t:I NO need PT")

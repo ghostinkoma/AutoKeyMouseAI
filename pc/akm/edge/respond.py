@@ -210,6 +210,40 @@ class Responder:
             return None
         return "open" if ncc >= 0.75 else "closed"
 
+    def _focus_chat(self) -> bool:
+        """チャットの入力欄にフォーカスを当てる。Enter を最大 3 回 (間を空けて) 試し、
+        欄が見えているのに Enter で入力欄に移らないときは、欄そのものをクリックする。"""
+        for k in range(3):
+            if k:
+                self.sleep(0.5)
+            if not self._has_focus() and self.activate is not None:
+                self._bring_front()
+            self.run("k:enter")
+            if self._chat_ready():
+                return True
+            st = self.input_state() if self.input_state is not None else {}
+            self._do(f"チャット: Enter {k + 1} 回目で入力欄にフォーカスが移らない (入力先 {st.get('focus_class') or 'なし'})")
+            pos = self._chat_click_pos()
+            if pos is not None and self.move is not None:
+                self._do("チャット: 欄が見えているので、欄をクリックしてフォーカスを当てます")
+                self._click(*pos)
+                if self._chat_ready():
+                    return True
+        return False
+
+    def _chat_click_pos(self):
+        """チャット欄が見えていれば、その真ん中より少し左 (文字を打つ所) の画面の位置。見えていなければ None。"""
+        obj = next((o for o in self._det().objects if o.name == self.chat_check), None)
+        if obj is None or not getattr(obj, "pos", None):
+            return None
+        img = self._grab_for_chat()
+        ncc, _ = self._chat_score(img)
+        if ncc < 0.75:  # 欄が見えていない所をクリックすると、地面をクリックしてキャラクターが動いてしまう
+            return None
+        s = img.shape[0] / obj.ref_h
+        h, w = obj.gray.shape[:2]
+        return (obj.pos[0] + w * 0.3) * s, (obj.pos[1] + h * 0.5) * s
+
     def _chat_ready(self) -> bool:
         """入力欄にフォーカスがあるか: Windows の入力先が Edit で、見えるならカーソル | が点滅していること。"""
         self._last_blink = None
@@ -564,17 +598,13 @@ class Responder:
                                                 "closed": "欄が閉じているので、Enter で開きます"}.get(
                                      state, "フォーカスが分からないので、Enter でフォーカスを当てます"
                                      f" ({getattr(self, 'last_chat_info', '')})"))
-                        self.run("k:enter")
-                        if not self._chat_ready():
-                            # 入力欄にフォーカスがあったのを Enter で閉じた場合などは、もう一度押して開き直す
-                            self.run("k:enter")
-                            if not self._chat_ready():
-                                st = self.input_state() if self.input_state is not None else {}
-                                self._do("Enter を押してもチャットの入力欄にフォーカスが移らないので、文字は打ちません"
-                                         f" (入力先 {st.get('focus_class') or 'なし'} / カーソル | の点滅"
-                                         f" {({True: 'あり', False: 'なし', None: '確かめられない'})[self._last_blink]})")
-                                self.run("ra")
-                                break
+                        if not self._focus_chat():
+                            st = self.input_state() if self.input_state is not None else {}
+                            self._do("Enter を押してもチャットの入力欄にフォーカスが移らないので、文字は打ちません"
+                                     f" (入力先 {st.get('focus_class') or 'なし'} / カーソル | の点滅"
+                                     f" {({True: 'あり', False: 'なし', None: '確かめられない'})[self._last_blink]})")
+                            self.run("ra")
+                            break
                         self._do("チャットの入力欄にフォーカスがあるのを確かめました"
                                  + (" (カーソル | の点滅を確認)" if self._last_blink else ""))
                 elif self.chat_verify and self._has(self.chat_check):
