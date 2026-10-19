@@ -7,7 +7,8 @@
 #   cd D:\hobby\AutoKeyMouseAI\pc
 #   powershell -ExecutionPolicy Bypass -File .\learn_loop.ps1
 #   powershell -ExecutionPolicy Bypass -File .\learn_loop.ps1 -TrainEvery 40 -OcrEvery 2 -NoViewer
-#   powershell -ExecutionPolicy Bypass -File .\learn_loop.ps1 -Decline party_invite   (decline party invites with Esc)
+#   powershell -ExecutionPolicy Bypass -File .\learn_loop.ps1 -NoDecline   (do not decline party invites)
+# Party invites are declined by default (Cancel + chat), even while the game is in the background.
 # Rare windows (party_invite, trade) are saved to dataset\screens\rare when they appear.
 param(
     [double]$Fps = 10,            # frames per second sent to ESP32
@@ -16,7 +17,8 @@ param(
     [int]$TrainEvery = 60,        # train after this many new frames (60 x 30 s = about 30 min)
     [int]$OcrEvery = 3,           # train OCR every N rounds (slow)
     [int]$RestartWait = 10,       # seconds to wait before restarting after an error
-    [string]$Decline = "",        # windows to decline automatically, e.g. "party_invite" (keys only while the game is in front)
+    [string]$Decline = "party_invite",  # windows to decline automatically (party invite: Cancel + chat "I NO need PT")
+    [switch]$NoDecline,           # do not decline anything (only learn)
     [switch]$NoViewer             # do not open the map viewer
 )
 
@@ -61,7 +63,7 @@ while ($true) {
     # 1st start asks the OBS password (Enter = keep saved one). Restarts use the saved password without asking.
     $ask = @()
     if ($run -gt 1) { $ask = @("--no-ask") }
-    if ($Decline) { $ask += @("--decline", $Decline) }
+    if ($Decline -and -not $NoDecline) { $ask += @("--decline", $Decline) }
     python tools\mirror_only.py --auto-train @ask --fps $Fps --recognize-every $RecognizeEvery `
         --learn-every $LearnEvery --train-every $TrainEvery --ocr-every $OcrEvery
     $code = $LASTEXITCODE

@@ -2561,3 +2561,18 @@ def test_chat_clicks_visible_box_when_enter_does_not_focus():
     click = next(x for x in sent if "bu:L" in x)
     assert click.startswith("a:100,711")                # 欄の左寄りの真ん中
     assert sent.index(click) < sent.index("t:I NO need PT")
+
+
+def test_mirror_slow_down_keeps_updating_and_redraws():
+    from akm.mirror import Mirror
+
+    m = Mirror("127.0.0.1", 0.1, fmt="jpeg", grab=None)
+    m.enabled = False
+    keys = []
+    m._request_key = lambda: keys.append(1)
+    assert m._interval() == 0.1
+    m.slow_down(2)
+    assert m._interval() == 0.5 and not m.paused          # 止めずに毎秒 2 枚
+    m.slow_down(0)
+    assert m._interval() == 0.1 and keys == [1]           # 戻したら液晶を全体描き直す
+    m.stop()

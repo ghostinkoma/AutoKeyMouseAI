@@ -238,13 +238,19 @@ def main() -> None:
                 orig_respond = responder.respond
 
                 def respond_paused(*a, **k):
-                    m.paused = True
-                    # ESP32 は Wi-Fi (画面) と Bluetooth (キー・マウス) で同じ電波を使う。画面の受信が終わるまで
-                    # 少し待ってからキーを送る (同時だとキーが届かなかったり、液晶が消えたりする)
-                    time.sleep(float(rcfg.get("pause_before_keys_s", 0.8)))
+                    # ESP32 は Wi-Fi (画面) と Bluetooth (キー・マウス) で同じ電波を使う。断っている間は
+                    # 液晶への画面送信を減らして (既定 毎秒 2 枚) 電波を空ける。止めはしないので液晶の更新は続く
+                    # (keys_fps: 0 にすると完全に止める = キーは一番確実に届くが、その間液晶は止まる)
+                    keys_fps = float(rcfg.get("mirror_fps_during_keys", 2))
+                    if keys_fps > 0:
+                        m.slow_down(keys_fps)
+                    else:
+                        m.paused = True
+                    time.sleep(float(rcfg.get("pause_before_keys_s", 0.6)))
                     try:
                         return orig_respond(*a, **k)
                     finally:
+                        m.slow_down(0)
                         m.paused = False
 
                 responder.respond = respond_paused

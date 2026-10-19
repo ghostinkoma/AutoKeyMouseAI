@@ -131,6 +131,8 @@ rare_windows:
   chat_check_caret: true                # 入力欄のカーソル | の点滅でフォーカスを確かめる (chat_input を --desktop で登録したとき)
   chat_verify: false                    # チャット欄が開いたかを画面で確かめる (MU の欄は写らないので off。2 つ目以降のチャットは送らない)
   chat_blind_first: true                # 見本 (chat_input) と合わなくても 1 つ目のチャットは打つ (2 つ目以降は確かめられたときだけ)
+  mirror_fps_during_keys: 2             # 断っている間の液晶への画面送信 (枚/秒)。0 = 止める (キーが一番確実に届く)
+  pause_before_keys_s: 0.6              # 画面送信を減らしてからキーを送るまでの秒数
   background: true                      # ゲームが裏にあっても、一時的に手前に出して断り、終わったら元のウィンドウに戻す
   respond:
     party_invite:

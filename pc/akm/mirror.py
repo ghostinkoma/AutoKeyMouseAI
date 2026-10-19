@@ -129,10 +129,20 @@ class Mirror:
         self._last_img: np.ndarray | None = None
         self._stop = threading.Event()
         self._paused = False  # True の間は送らない (ESP32 にキー・マウスを送っている間、負荷を下げる)
+        self.slow_fps = 0.0   # 0 より大きい間はこの枚数/秒に落とす (止めずに液晶を更新し続けながら電波を空ける)
         self._thread = None
         if self.enabled:
             self._thread = threading.Thread(target=self._worker, daemon=True)
             self._thread.start()
+
+    def _interval(self) -> float:
+        return max(self.interval, 1.0 / self.slow_fps) if self.slow_fps > 0 else self.interval
+
+    def slow_down(self, fps: float) -> None:
+        """送る枚数を一時的に減らす (0 で元に戻す)。戻すときは液晶を全体描き直す。"""
+        if self.slow_fps > 0 and fps <= 0:
+            self._request_key()
+        self.slow_fps = float(fps)
 
     @property
     def paused(self) -> bool:
@@ -374,7 +384,7 @@ class Mirror:
                     self._ok(len(data))
                     self._tcp_fail = 0
                     if self.grab is not None:
-                        time.sleep(max(0.0, self.interval - (time.monotonic() - t0)))
+                        time.sleep(max(0.0, self._interval() - (time.monotonic() - t0)))
                     continue
                 except Exception as e:
                     self.errors += 1
@@ -422,4 +432,4 @@ class Mirror:
                 self._warn(str(e))
                 s = requests.Session()  # 接続を張り直す
             if self.grab is not None:
-                time.sleep(max(0.0, self.interval - (time.monotonic() - t0)))
+                time.sleep(max(0.0, self._interval() - (time.monotonic() - t0)))
