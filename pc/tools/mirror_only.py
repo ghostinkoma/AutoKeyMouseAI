@@ -239,6 +239,9 @@ def main() -> None:
 
                 def respond_paused(*a, **k):
                     m.paused = True
+                    # ESP32 は Wi-Fi (画面) と Bluetooth (キー・マウス) で同じ電波を使う。画面の受信が終わるまで
+                    # 少し待ってからキーを送る (同時だとキーが届かなかったり、液晶が消えたりする)
+                    time.sleep(float(rcfg.get("pause_before_keys_s", 0.8)))
                     try:
                         return orig_respond(*a, **k)
                     finally:

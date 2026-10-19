@@ -218,7 +218,7 @@ class Responder:
                 self.sleep(0.5)
             if not self._has_focus() and self.activate is not None:
                 self._bring_front()
-            self.run("k:enter")
+            self.run(f"kd:enter;w:{self.enter_hold_ms};ku:enter")  # 短い押下は取りこぼされやすいので押したまま保つ
             if self._chat_ready():
                 return True
             st = self.input_state() if self.input_state is not None else {}

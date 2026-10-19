@@ -2322,6 +2322,9 @@ def test_chat_open_checked_at_registered_place():
     assert not any(x.startswith("t:") for x in sent)
 
 
+FE = "kd:enter;w:80;ku:enter"  # 入力欄にフォーカスを当てる Enter (押したまま 80ms)
+
+
 def test_chat_stops_when_game_loses_focus():
     from akm.edge.objects import Detection
     from akm.edge.respond import Responder
@@ -2370,9 +2373,9 @@ def test_chat_uses_edit_focus():
 
     def run(s):
         sent.append(s)
-        if s == "k:enter":
+        if s == FE:
             state["cls"] = "Edit" if state["cls"] != "Edit" else "MURex Client"
-        elif "kd:enter" in s:
+        elif s.startswith("w:100;kd:enter"):
             state["cls"] = "MURex Client"   # 送ると入力欄から外れる
 
     r = Responder(run, lambda: None, Det(), sleep=lambda s: None, log=logs.append, is_active=lambda: True,
@@ -2380,14 +2383,14 @@ def test_chat_uses_edit_focus():
     det = Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))
     steps = [{"chat": "I NO need PT"}, {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"}]
     assert r._respond("party_invite", steps, det) == ["chat", "chat"]   # 2 つ目も確かめてから送れる
-    assert [x for x in sent if x == "k:enter"] == ["k:enter", "k:enter"]
+    assert [x for x in sent if x == FE] == [FE, FE]
     # Windows が Edit と言っていても (ほかのウィンドウから戻った後はゲームの中では外れている) Enter を押して戻す。
     # 入力欄にフォーカスがあるときに Enter を押すと閉じるゲームなら、もう一度押して開き直す
     state["cls"] = "Edit"
     sent.clear()
     r._last_chat = -1e9
     assert r._respond("party_invite", steps[:1], det) == ["chat"]
-    assert sent[:2] == ["k:enter", "k:enter"] and sent[2] == "t:I NO need PT"
+    assert sent[:2] == [FE, FE] and sent[2] == "t:I NO need PT"
     # Enter を押しても入力欄に移らなければ打たない
     r.run = lambda s: sent.append(s)
     state["cls"] = "MURex Client"
@@ -2430,7 +2433,7 @@ def test_chat_waits_for_caret_blink():
     r.caret_blinking = lambda: False                                         # カーソルが点滅していない
     det = Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))
     assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == []
-    assert sent.count("k:enter") == 3 and not any(x.startswith("t:") for x in sent)
+    assert sent.count(FE) == 3 and not any(x.startswith("t:") for x in sent)
     r.caret_blinking = lambda: True
     sent.clear()
     assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"] and "t:I NO need PT" in sent
@@ -2454,7 +2457,7 @@ def test_chat_three_states():
         r.chat_state = lambda st=state: st
         r.caret_blinking = lambda: True
         assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"], state
-        assert sent.count("k:enter") == enters, (state, sent)
+        assert sent.count(FE) == enters, (state, sent)
         assert "t:I NO need PT" in sent
 
 
@@ -2481,9 +2484,9 @@ def test_party_invite_full_flow_with_chat_states():
         sent.append(s)
         if "bu:L" in s:
             g["invite"] = False
-        if s == "k:enter":                     # 閉じている → 開いてフォーカス / 出ている → フォーカス
+        if s == FE:                     # 閉じている → 開いてフォーカス / 出ている → フォーカス
             g["chat"], g["cls"] = "focused", "Edit"
-        elif "kd:enter" in s:                  # 送信: 欄は出たまま、フォーカスは外れる (このゲームの場合)
+        elif s.startswith("w:100;kd:enter"):                  # 送信: 欄は出たまま、フォーカスは外れる (このゲームの場合)
             g["chat"], g["cls"] = "open", "MURex Client"
 
     r = Responder(run, lambda: np.zeros((768, 1366, 3), np.uint8), Det(), move=lambda x, y: f"a:{x:.0f},{y:.0f}",
@@ -2499,7 +2502,7 @@ def test_party_invite_full_flow_with_chat_states():
     assert done == ["helper", "text", "click", "close:0", "chat", "chat"]
     texts = [x for x in sent if x.startswith("t:")]
     assert texts == ["t:I NO need PT", "t:Perdon, cazo solo aqui. No hago party, gracias!"]
-    assert sent.count("k:enter") == 2            # 1 つ目: 閉じていた → 開く / 2 つ目: 出ているがフォーカスなし → 当てる
+    assert sent.count(FE) == 2            # 1 つ目: 閉じていた → 開く / 2 つ目: 出ているがフォーカスなし → 当てる
     assert g["fg"] == "notepad" and not g["invite"]
 
 
