@@ -83,7 +83,8 @@ class RareWatch:
             now = self.clock()
             if now - self._last_act.get(d.name, -1e9) < self.cooldown_s:
                 continue
-            if not self.is_active():
+            can_activate = isinstance(act, list) and getattr(self.responder, "activate", None) is not None
+            if not self.is_active() and not can_activate:  # 手順 (responder) ならゲームを手前に出して行う
                 if self.hits[d.name] == self.confirm:  # 見えている間に 1 回だけ知らせる
                     self.log(f"[rare] {d.name} を断りたいが、ゲームの窓が手前に無いので押しません")
                 continue

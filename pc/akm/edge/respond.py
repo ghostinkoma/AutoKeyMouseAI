@@ -110,7 +110,7 @@ class Responder:
     def __init__(self, run, grab, detector, move=None, to_screen=None, is_active=None, keep=KEEP_WINDOWS,
                  chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
                  log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
-                 save_dir=None, cursor=None):
+                 save_dir=None, cursor=None, activate=None, foreground=None, restore=None):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -128,6 +128,9 @@ class Responder:
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
         self.cursor = cursor            # () → 実際のマウスの位置 (確認のログ用)
+        self.activate = activate        # () → ゲームを手前に出す (裏で動いているときも断れるように)
+        self.foreground = foreground    # () → 今手前にあるウィンドウ (終わったら戻す)
+        self.restore = restore          # (ウィンドウ) → そのウィンドウを手前に戻す
         self.save_dir = save_dir        # 文字の確認で弾いた窓の切り抜きを残す (読み方を直す材料)
         self.helper_state = helper_state  # () → (今 ON か: True/False/None, 最後に ON を見てからの秒数)
 
@@ -158,11 +161,29 @@ class Responder:
         self.log(f"[respond] {msg}")
 
     def respond(self, name: str, steps: list[dict], det) -> list[str]:
-        """見つけた窓 det (Detection) に対して手順を順に行う。行ったことの一覧を返す。"""
-        done: list[str] = []
+        """見つけた窓 det (Detection) に対して手順を順に行う。行ったことの一覧を返す。
+        ゲームが裏にあれば一時的に手前に出し (activate)、終わったら元のウィンドウに戻す。"""
+        prev = None
         if not self.is_active():
-            self._do(f"{name}: ゲームの窓が手前に無いので何もしません")
-            return done
+            if self.activate is None:
+                self._do(f"{name}: ゲームの窓が手前に無いので何もしません")
+                return []
+            prev = self.foreground() if self.foreground is not None else None
+            if not self.activate() or not self.is_active():
+                self._do(f"{name}: ゲームの窓を手前に出せないので何もしません")
+                return []
+            self._do(f"{name}: ゲームの窓を一時的に手前に出しました")
+            self.sleep(0.3)
+        try:
+            return self._respond(name, steps, det)
+        finally:
+            if prev and self.restore is not None:
+                self.sleep(0.2)
+                self.restore(prev)
+                self._do(f"{name}: 元のウィンドウに戻しました")
+
+    def _respond(self, name: str, steps: list[dict], det) -> list[str]:
+        done: list[str] = []
         for step in steps:
             if "require_helper" in step:
                 want_on = str(step["require_helper"]).lower() in ("on", "true", "1")

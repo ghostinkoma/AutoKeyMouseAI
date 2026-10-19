@@ -2211,3 +2211,26 @@ def test_read_dialog_lines_and_fuzzy_words():
     assert has_word("Someone requests you to joln their a parly", ["party", "join"]) in ("party", "join")
     assert has_word("lnformation 0n1 C'Qu OK", ["party", "join"]) is None
     assert has_word("Bob requests a trade", ["party", "join"]) is None
+
+
+def test_responder_brings_game_to_front_and_back():
+    from akm.edge.objects import Detection
+    from akm.edge.respond import Responder
+
+    class Det:
+        objects = []
+
+        def detect(self, img):
+            return []
+
+    state = {"fg": "notepad"}
+    logs = []
+    r = Responder(lambda s: None, lambda: None, Det(), is_active=lambda: state["fg"] == "game",
+                  activate=lambda: state.update(fg="game") or True, foreground=lambda: state["fg"],
+                  restore=lambda w: state.update(fg=w), sleep=lambda s: None, log=logs.append)
+    seen = []
+    r._respond = lambda name, steps, det: seen.append(state["fg"]) or ["x"]
+    assert r.respond("party_invite", [], Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == ["x"]
+    assert seen == ["game"] and state["fg"] == "notepad"
+    r.activate = None
+    assert r.respond("party_invite", [], Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1))) == []

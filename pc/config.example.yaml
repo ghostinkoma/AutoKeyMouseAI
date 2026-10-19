@@ -123,6 +123,7 @@ rare_windows:
   confirm: 2
   keep: [hunting_log, helper_panel]
   chat_cooldown_s: 120
+  background: true                      # ゲームが裏にあっても、一時的に手前に出して断り、終わったら元のウィンドウに戻す
   respond:
     party_invite:
       - require_helper: "on"            # MU Helper が動作中 (■) のときだけ (窓が出る前 120 秒以内に ON でも可)

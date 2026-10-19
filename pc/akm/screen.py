@@ -376,6 +376,37 @@ def is_foreground(hwnd: int) -> bool:
     return user32.GetForegroundWindow() == hwnd
 
 
+def foreground_window() -> int | None:
+    return user32.GetForegroundWindow() if IS_WINDOWS else None
+
+
+def bring_to_front(hwnd: int, wait_s: float = 0.4) -> bool:
+    """ウィンドウを手前に出す (最小化されていれば戻す)。Windows は裏のアプリからの切り替えを
+    嫌うので、手前のウィンドウの入力に一時的につないでから切り替える。"""
+    if not IS_WINDOWS or not hwnd:
+        return True
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    fg = user32.GetForegroundWindow()
+    me = ctypes.windll.kernel32.GetCurrentThreadId()
+    other = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+    attached = bool(other and other != me and user32.AttachThreadInput(me, other, True))
+    try:
+        user32.keybd_event(0x12, 0, 0, 0)  # Alt を一瞬押すと切り替えが許される
+        user32.keybd_event(0x12, 0, 2, 0)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(me, other, False)
+    end = time.monotonic() + wait_s
+    while time.monotonic() < end:
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+        time.sleep(0.05)
+    return user32.GetForegroundWindow() == hwnd
+
+
 class GameScreen:
     """ゲームのクライアント領域をキャプチャする。
 
@@ -593,6 +624,10 @@ class GameScreen:
         """クライアント座標 → スクリーン座標"""
         assert self.rect is not None
         return self.rect.left + x, self.rect.top + y
+
+    def activate(self) -> bool:
+        """ゲームを手前に出す。出せたら True。"""
+        return bring_to_front(self.hwnd)
 
     def is_active(self) -> bool:
         return self.hwnd is not None and is_foreground(self.hwnd)

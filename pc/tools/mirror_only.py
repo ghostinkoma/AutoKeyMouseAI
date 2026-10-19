@@ -182,6 +182,7 @@ def main() -> None:
                 press = dev.key
                 click = lambda x, y: dev.click(*screen.to_screen(x, y))  # noqa: E731
                 from akm.edge.respond import read_dialog
+                from akm.screen import bring_to_front, foreground_window
                 from akm.maploc import make_ocr
 
                 t_ocr = None
@@ -200,6 +201,9 @@ def main() -> None:
                                       helper_state=lambda: rec.helper_state(),
                                       save_dir=PC_DIR / "dataset" / "screens" / "rare" / "_text",
                                       cursor=dev.cursor,
+                                      activate=(getattr(screen, "activate", None)
+                                                if rcfg.get("background", True) else None),
+                                      foreground=foreground_window, restore=bring_to_front,
                                       to_screen=screen.to_screen, is_active=getattr(screen, "is_active", None),
                                       keep=rcfg.get("keep", ["hunting_log", "helper_panel"]),
                                       chat_cooldown_s=float(rcfg.get("chat_cooldown_s", 120)))
