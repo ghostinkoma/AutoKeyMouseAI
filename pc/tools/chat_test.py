@@ -49,6 +49,17 @@ def main() -> None:
     print(f"[chat] ゲームが手前: {screen.is_active()}  入力先: {st.get('focus_class') or 'なし'}  → フォーカス {'あり' if focus else 'なし'}")
     if not focus:
         raise SystemExit("[chat] ゲームにフォーカスが無いので送りません (本番もこの場合は送らずに止まります)")
+    checker = before = None
+    if args.check:
+        from akm.edge.objects import ObjectDetector
+        from akm.edge.respond import Responder
+
+        checker = Responder(lambda s: None, screen.grab, ObjectDetector.load(), grab_chat=screen.grab_desktop,
+                            log=print, chat_verify=True)
+        before = screen.grab_desktop()
+        ncc, _ = checker._chat_score(before)
+        print(f"[chat] Enter 前のチャット欄: 一致度 {ncc:.2f} → {'開いている' if ncc >= 0.75 else '閉じている'}"
+              + ("  (chat_input の場所が未登録: add-screen chat_input --kind icon --desktop で登録)" if ncc < 0 else ""))
     text = args.text.replace(";", "\\;")
     wait = args.enter_wait if args.enter_wait is not None else 0.3 + 0.03 * len(args.text)
     print("[chat] Enter (開く)")
