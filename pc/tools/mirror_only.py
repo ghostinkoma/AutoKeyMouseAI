@@ -202,6 +202,8 @@ def main() -> None:
                                       save_dir=PC_DIR / "dataset" / "screens" / "rare" / "_text",
                                       cursor=dev.cursor,
                                       chat_open_wait=float(rcfg.get("chat_open_wait_s", 0.2)),
+                                      grab_chat=(getattr(screen, "grab_desktop", None)
+                                                 if rcfg.get("chat_capture", "desktop") == "desktop" else None),
                                       blind_first=bool(rcfg.get("chat_blind_first", True)),
                                       activate=(getattr(screen, "activate", None)
                                                 if rcfg.get("background", True) else None),

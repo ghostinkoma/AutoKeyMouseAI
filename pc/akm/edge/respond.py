@@ -111,7 +111,7 @@ class Responder:
                  chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
                  log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
                  save_dir=None, cursor=None, activate=None, foreground=None, restore=None,
-                 chat_open_wait: float = 0.2, blind_first: bool = True):
+                 chat_open_wait: float = 0.2, blind_first: bool = True, grab_chat=None):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -129,6 +129,7 @@ class Responder:
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
         self.cursor = cursor            # () → 実際のマウスの位置 (確認のログ用)
+        self.grab_chat = grab_chat      # () → チャット欄を確かめる画面 (画面に映っているとおり。OBS には欄が写らない)
         self.chat_open_wait = chat_open_wait  # Enter を押してからチャット欄を確かめるまでの秒数
         self.blind_first = blind_first  # 見本と合わなくても 1 つ目のチャットは打つ (Enter で開くのは確か)
         self.activate = activate        # () → ゲームを手前に出す (裏で動いているときも断れるように)
@@ -161,9 +162,17 @@ class Responder:
 
             out = self.save_dir.parent.parent / f"{name}.png"  # dataset/screens/<name>.png
             out.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(out), self.grab())
+            cv2.imwrite(str(out), self._grab_for_chat() if name.startswith("chat") else self.grab())
         except Exception:
             pass
+
+    def _grab_for_chat(self):
+        if self.grab_chat is not None:
+            try:
+                return self.grab_chat()
+            except Exception as e:
+                self._do(f"画面を撮れません ({e})。OBS の画像で確かめます")
+        return self.grab()
 
     def _chat_region(self, img):
         """登録した場所 (pos) のチャット欄の切り抜き (画面の大きさに合わせる)。pos が無ければ None。"""
@@ -207,7 +216,7 @@ class Responder:
         for k in range(tries):
             if k:
                 self.sleep(0.2)
-            img = self.grab()
+            img = self._grab_for_chat()
             ncc, diff = self._chat_score(img, closed)
             if ncc >= 0:
                 last = f"登録した場所で 一致度 {ncc:.2f} / Enter 前との違い {diff:.1f}"
@@ -384,7 +393,7 @@ class Responder:
                 if self._has(self.chat_check):
                     # チャット欄が開いているかを画面で確かめる。開いていれば Enter は押さない (押すと閉じてしまう)
                     if self._closed is None or not self._chat_open(closed=self._closed):
-                        before = self.grab()
+                        before = self._grab_for_chat()
                         if self._closed is None:
                             self._closed = before  # 1 つ目の前の画面 = 閉じているときの見た目
                         self.run("k:enter")

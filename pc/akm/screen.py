@@ -546,6 +546,14 @@ class GameScreen:
                      "screen": "画面から (仮想デスクトップを切り替えると別の画面が映ります)"}
             print(f"[screen] 撮影方式: {names[method]}")
 
+    def grab_desktop(self) -> np.ndarray:
+        """画面に映っているとおりに撮る (ゲームの上に重なった入力欄なども写る)。ゲームが手前にあるときに使う。
+        OBS のゲームキャプチャはゲームの描画だけを撮るので、チャットの入力欄が写らないことがある。"""
+        if self.hwnd is None or (IS_WINDOWS and not user32.IsWindow(self.hwnd)):
+            self.locate()
+        self.rect = client_rect(self.hwnd)
+        return self._grab_screen(self.rect)
+
     def grab(self) -> np.ndarray:
         """BGR 画像 (H, W, 3) を返す。起動時に固定したウィンドウを撮り続け、閉じられたら探し直す。"""
         if self.hwnd is None or (IS_WINDOWS and not user32.IsWindow(self.hwnd)):

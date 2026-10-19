@@ -238,7 +238,15 @@ def cmd_add_screen(args) -> None:
     ask_obs_password(cfg, "config.yaml")
     screen = GameScreen.from_config(cfg)
     screen.locate()
-    img = screen.grab()
+    if args.desktop:
+        import time
+
+        print(f"[add] {args.wait:.0f} 秒後に画面に映っているとおりに撮ります。今のうちにゲームを手前にしてください"
+              " (チャット欄を見せるなら、ゲームで Enter を押して開いておく)")
+        time.sleep(args.wait)
+        img = screen.grab_desktop()
+    else:
+        img = screen.grab()
     shot = PC_DIR / "dataset" / "screens" / f"add_{args.name}.png"
     shot.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(shot), img)
@@ -415,6 +423,10 @@ def main() -> None:
         a.add_argument("--kind", choices=["window", "icon"], default="window")
         a.add_argument("--key", help="窓を開閉するキー (例 v)")
         a.add_argument("--group", help="同時には出ないもの同士の名前 (例 helper_button)。一番確からしい 1 つだけ残す")
+        if name == "add-screen":
+            a.add_argument("--desktop", action="store_true",
+                           help="OBS ではなく画面に映っているとおりに撮る (チャットの入力欄など OBS に写らないもの)")
+            a.add_argument("--wait", type=float, default=5.0, help="--desktop で撮るまでの秒数")
         a.add_argument("--box", help="囲む範囲を x,y,幅,高さ で直接指定する (マウスで囲まない)")
         if name == "add":
             a.add_argument("image")
