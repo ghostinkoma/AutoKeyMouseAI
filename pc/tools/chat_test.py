@@ -65,20 +65,19 @@ def main() -> None:
     def edit_focus():
         return (screen.input_state().get("focus_class") or "").lower() == "edit"
 
-    if edit_focus():
-        print("[chat] 入力先が Edit = チャットの入力欄にフォーカスがあるので、Enter は押さずに打ちます")
-    else:
-        print("[chat] Enter (開く)")
-        print("   →", dev.run("k:enter"))
-        time.sleep(args.open_wait)
-        for _ in range(10):
-            if edit_focus():
-                break
-            time.sleep(0.1)
-        print(f"[chat] Enter 後の入力先: {screen.input_state().get('focus_class') or 'なし'} → "
-              + ("チャットの入力欄にフォーカスあり" if edit_focus() else "入力欄にフォーカスなし"))
-        if not edit_focus():
-            raise SystemExit("[chat] チャットの入力欄にフォーカスが移らないので打ちません (本番もこの場合は止まります)")
+    print(f"[chat] 入力先: {screen.input_state().get('focus_class') or 'なし'}"
+          " (ほかのウィンドウから戻った後は Edit でもゲームの中では外れているので、いつも Enter で戻す)")
+    print("[chat] Enter (チャットの入力欄にフォーカスを当てる)")
+    print("   →", dev.run("k:enter"))
+    time.sleep(args.open_wait)
+    for _ in range(10):
+        if edit_focus():
+            break
+        time.sleep(0.1)
+    print(f"[chat] Enter 後の入力先: {screen.input_state().get('focus_class') or 'なし'} → "
+          + ("チャットの入力欄にフォーカスあり" if edit_focus() else "入力欄にフォーカスなし"))
+    if not edit_focus():
+        raise SystemExit("[chat] チャットの入力欄にフォーカスが移らないので打ちません (本番もこの場合は止まります)")
     if checker is not None:
         ncc, diff = checker._chat_score(screen.grab_desktop(), before)
         opened = ncc >= 0.75 or (diff >= 8 and ncc >= 0.45)

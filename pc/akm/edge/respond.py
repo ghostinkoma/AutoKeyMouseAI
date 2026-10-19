@@ -462,16 +462,17 @@ class Responder:
                         pass
                 edit = self._chat_focused()
                 if edit is not None:
-                    # チャットの入力欄は Windows の Edit 部品: 入力先が Edit なら欄にフォーカスがある (確実に分かる)
-                    if not edit:
+                    # チャットの入力欄は Windows の Edit 部品: 入力先が Edit なら欄にフォーカスがある。
+                    # ただしほかのウィンドウに移った後は、Windows が Edit と言っていてもゲームの中では外れているので、
+                    # いつも Enter を 1 回押してフォーカスを戻す (入力欄にフォーカスがあるときに押しても閉じない)
+                    self.run("k:enter")
+                    if not self._wait_chat_focus():
+                        # 入力欄にフォーカスがあったのを Enter で閉じた場合などは、もう一度押して開き直す
                         self.run("k:enter")
                         if not self._wait_chat_focus():
-                            # 入力欄にフォーカスがあったのを Enter で閉じた場合などは、もう一度押して開き直す
-                            self.run("k:enter")
-                            if not self._wait_chat_focus():
-                                self._do("Enter を押してもチャットの入力欄にフォーカスが移らないので、文字は打ちません")
-                                self.run("ra")
-                                break
+                            self._do("Enter を押してもチャットの入力欄にフォーカスが移らないので、文字は打ちません")
+                            self.run("ra")
+                            break
                     self._do("チャットの入力欄にフォーカスがあるのを確かめました")
                 elif self.chat_verify and self._has(self.chat_check):
                     # 開いていても閉じていても Enter を押す: 閉じていれば開いて入力先になり、

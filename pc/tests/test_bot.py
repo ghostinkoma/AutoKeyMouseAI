@@ -2371,11 +2371,13 @@ def test_chat_uses_edit_focus():
     steps = [{"chat": "I NO need PT"}, {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"}]
     assert r._respond("party_invite", steps, det) == ["chat", "chat"]   # 2 つ目も確かめてから送れる
     assert [x for x in sent if x == "k:enter"] == ["k:enter", "k:enter"]
-    # 最初から入力欄にフォーカスがあれば Enter は押さずに打つ
+    # Windows が Edit と言っていても (ほかのウィンドウから戻った後はゲームの中では外れている) Enter を押して戻す。
+    # 入力欄にフォーカスがあるときに Enter を押すと閉じるゲームなら、もう一度押して開き直す
     state["cls"] = "Edit"
     sent.clear()
     r._last_chat = -1e9
-    assert r._respond("party_invite", steps[:1], det) == ["chat"] and sent[0] == "t:I NO need PT"
+    assert r._respond("party_invite", steps[:1], det) == ["chat"]
+    assert sent[:2] == ["k:enter", "k:enter"] and sent[2] == "t:I NO need PT"
     # Enter を押しても入力欄に移らなければ打たない
     r.run = lambda s: sent.append(s)
     state["cls"] = "MURex Client"
