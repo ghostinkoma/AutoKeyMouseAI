@@ -134,14 +134,14 @@ rare_windows:
   background: true                      # ゲームが裏にあっても、一時的に手前に出して断り、終わったら元のウィンドウに戻す
   respond:
     party_invite:
-      - require_helper: "on"            # MU Helper が動作中 (■) のときだけ (窓が出る前 120 秒以内に ON でも可)
-        within_s: 120
-      - require_text: [party, join]       # 本文 "Someone requests you to join their a party" (読み違いは少し許す)
+      # - require_helper: "on"          # MU Helper が動作中 (■) のときだけ断るなら、この 2 行の # を外す
+      #   within_s: 120
+      - require_text: [party, join]     # 本文 "Someone requests you to join their a party" (読み違いは少し許す)
       - click: "@cancel"                # python tools\edge_objects.py point party_invite cancel で覚えた場所
                                         # (勧誘の窓は Esc では消えない。押しても消えなければ以降は行わない)
       - close_windows: esc
-      - chat: "I NO need PT"           # 入力欄にフォーカスがある (入力先が Edit) のを確かめてから送る
-      - chat: "Perdon, cazo solo aqui. No hago party, gracias!"   # 50 文字まで
+      - chat: "I NO need PT"           # チャット欄の状態に合わせて送る (50 文字まで)
+      # - chat: "Perdon, cazo solo aqui. No hago party, gracias!"   # 2 つ目も送るなら # を外す
 
 popups:
   # - name: party request

@@ -20,7 +20,7 @@ class RareWatch:
     def __init__(self, names, out_dir: Path, decline: dict | None = None, press=None, click=None,
                  is_active=None, confirm: int = 2, cooldown_s: float = 4.0, save_every_s: float = 3.0,
                  maybe: float = 0.55, maybe_every_s: float = 60.0, max_per_name: int = 60, log=print,
-                 clock=time.monotonic, responder=None):
+                 clock=time.monotonic, responder=None, skip_wait_s: float = 30.0):
         self.names = set(names) | set(decline or {})
         self.out = Path(out_dir)
         self.decline = decline or {}   # 名前 → {"key": "esc"} / {"click": [横の割合, 縦の割合]} (窓の枠の中の位置)
@@ -36,6 +36,7 @@ class RareWatch:
         self.max_per_name = max_per_name
         self.log = log
         self.clock = clock
+        self.skip_wait_s = skip_wait_s  # 条件に合わず断らなかった窓に、もう一度試すまでの秒数
         self.responder = responder     # akm.edge.respond.Responder (decline が手順の list のとき)
         self.hits: dict[str, int] = {}
         self.seen: dict[str, int] = {}       # 見つけた回数 (続けて見えている間は 1 回)
@@ -92,7 +93,11 @@ class RareWatch:
             if isinstance(act, list):  # 手順 (Cancel をクリック → 窓を閉じる → チャット …)
                 if self.responder is None:
                     continue
-                self.responder.respond(d.name, act, d)
+                res = self.responder.respond(d.name, act, d)
+                if "click" not in res:
+                    # 条件に合わず断らなかった: 同じ窓に何度も試さないよう、しばらく (skip_wait_s) 待つ
+                    self._last_act[d.name] = now + self.skip_wait_s - self.cooldown_s
+                    continue
                 self.declined[d.name] = self.declined.get(d.name, 0) + 1
                 done.append(f"decline:{d.name}")
                 self.hits[d.name] = 0

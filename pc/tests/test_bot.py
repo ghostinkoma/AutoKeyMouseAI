@@ -2007,6 +2007,16 @@ def test_rare_watch_saves_and_declines_only_when_game_is_in_front(tmp_path):
     assert clicks == [(300.0, 250.0)] and w.declined["trade"] == 1
 
 
+FULL_STEPS = [  # Helper の条件と 2 つのチャットを含む手順 (設定で書いた場合)
+    {"require_helper": "on", "within_s": 120},
+    {"require_text": ["party", "join"]},
+    {"click": "@cancel"},
+    {"close_windows": "esc"},
+    {"chat": "I NO need PT"},
+    {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"},
+]
+
+
 def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     from akm.edge.objects import Detection
     from akm.edge.respond import DEFAULT_RESPONSES, Responder, chat_text_ok
@@ -2045,24 +2055,24 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
                   to_screen=lambda x, y: (x + 10, y + 20), sleep=lambda s: None, clock=lambda: t[0], log=lambda m: None,
                   read_text=lambda img: text[0], helper_state=lambda: helper[0])
     inv = Detection("party_invite", "window", True, 0.95, 0.99, (300, 150, 424, 288))
-    done = r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)
+    done = r.respond("party_invite", FULL_STEPS, inv)
     # チャット欄の見本 (chat_input) が無いと、1 つ目だけ送る (2 つ目は欄が開いているか分からないので打たない)
     assert done == ["helper", "text", "click", "close:1", "chat"]
     assert sent[0] == "a:628,429;w:120;bd:L;w:90;bu:L"         # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
     assert sent[2] == "k:enter" and sent[3] == "t:I NO need PT"
     assert sent[4] == "w:100;kd:enter;w:80;ku:enter" and sent[5] == "ra"   # 2 つ目は確かめられないので送らない
-    assert all(chat_text_ok(st["chat"]) is None for st in DEFAULT_RESPONSES["party_invite"] if "chat" in st)
+    assert all(chat_text_ok(st["chat"]) is None for st in FULL_STEPS if "chat" in st)
     # 2 分以内にまた勧誘されたら、断るだけでチャットはしない
     det.open.add("party_invite")
     sent.clear()
     t[0] = 60
-    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper", "text", "click", "close:0"]
+    assert r.respond("party_invite", FULL_STEPS, inv) == ["helper", "text", "click", "close:0"]
     assert not any(s.startswith("t:") for s in sent)
     # 同じ "Information" の窓でも、本文に party / join が無ければ何もしない
     text[0] = "Information  Bob  Someone requests a trade"
     sent.clear()
-    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper"] and sent == ["ra"]
+    assert r.respond("party_invite", FULL_STEPS, inv) == ["helper"] and sent == ["ra"]
     # 押しても窓が消えなければ (2 回試して) Esc もチャットもしない
     text[0] = "Information  Bob  Someone requests you to join their a party"
     helper[0] = (True, 0.0)
@@ -2071,7 +2081,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     stuck[0] = True
     sent.clear()
     t[0] = 1000
-    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper", "text"]
+    assert r.respond("party_invite", FULL_STEPS, inv) == ["helper", "text"]
     assert sum("bu:L" in x for x in sent) == 2 and sum("bu:R" in x for x in sent) == 2 and not any("k:esc" in x or x.startswith("t:") for x in sent)
     stuck[0] = False
     det.open.discard("inventory")
@@ -2081,7 +2091,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     for st in [(False, 600.0), None]:
         helper[0] = st
         sent.clear()
-        assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == [] and sent == ["ra"]
+        assert r.respond("party_invite", FULL_STEPS, inv) == [] and sent == ["ra"]
     helper[0] = (True, 0.0)
     # チャット欄の見本があれば、開いているのを確かめて 2 つとも送る。送った後も開いたままなら Enter は押さない
     det.objects.append(Obj("chat_input"))
@@ -2103,7 +2113,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     det.detect = detect2
     r.run = run2
     r.chat_verify = True
-    two = DEFAULT_RESPONSES["party_invite"]
+    two = FULL_STEPS
     det.open.add("party_invite")
     sent.clear()
     t[0] = 5000
@@ -2122,7 +2132,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     r.chat_verify = False
     # ゲームが手前に無ければ何もしない
     r.is_active = lambda: False
-    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == []
+    assert r.respond("party_invite", FULL_STEPS, inv) == []
     assert chat_text_ok("Perdón") and chat_text_ok("x" * 80) and chat_text_ok("ok") is None
 
 
@@ -2484,10 +2494,32 @@ def test_party_invite_full_flow_with_chat_states():
                   input_state=lambda: {"focus": 5, "focus_class": g["cls"]})
     r.chat_state = lambda: g["chat"]
     r.caret_blinking = lambda: g["chat"] == "focused"
-    done = r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], Detection("party_invite", "window", True, 0.93,
+    done = r.respond("party_invite", FULL_STEPS, Detection("party_invite", "window", True, 0.93,
                                                                                     0.9, (516, 138, 323, 221)))
     assert done == ["helper", "text", "click", "close:0", "chat", "chat"]
     texts = [x for x in sent if x.startswith("t:")]
     assert texts == ["t:I NO need PT", "t:Perdon, cazo solo aqui. No hago party, gracias!"]
     assert sent.count("k:enter") == 2            # 1 つ目: 閉じていた → 開く / 2 つ目: 出ているがフォーカスなし → 当てる
     assert g["fg"] == "notepad" and not g["invite"]
+
+
+def test_default_party_invite_steps_and_precheck_without_switching():
+    from akm.edge.objects import Detection
+    from akm.edge.respond import DEFAULT_RESPONSES, Responder
+
+    steps = DEFAULT_RESPONSES["party_invite"]
+    assert [list(st)[0] for st in steps] == ["require_text", "click", "close_windows", "chat"]
+    assert steps[-1]["chat"] == "I NO need PT"
+
+    class Det:
+        objects = []
+
+        def detect(self, img):
+            return []
+
+    switched = []
+    r = Responder(lambda s: None, lambda: np.zeros((768, 1366, 3), np.uint8), Det(), sleep=lambda s: None,
+                  log=lambda m: None, is_active=lambda: False, activate=lambda: switched.append(1) or True,
+                  read_text=lambda img: "Information Bob requests a trade")
+    det = Detection("party_invite", "window", True, 0.9, 0.9, (0, 0, 10, 10))
+    assert r.respond("party_invite", steps, det) == [] and switched == []   # 本文が合わなければ切り替えない

@@ -26,18 +26,16 @@ import time
 
 DEFAULT_RESPONSES = {
     "party_invite": [
-        # MU Helper で狩りをしているとき (■) だけ断る。勧誘の窓が出ると Helper が止まることがあるので
-        # 「今 ON」か「窓が出る前 within_s 秒以内に ON だった」なら行う
-        {"require_helper": "on", "within_s": 120},
         # タイトルは "Information" で、ほかの知らせ (トレードの申し込みなど) と同じ。本文の文字で確かめる
         {"require_text": ["party", "join"]},  # "requests" はトレードの申し込みにもあるので使わない
         {"click": "@cancel"},  # 勧誘の窓は Esc では消えないので、押せなければ以降 (Esc・チャット) は行わない
         {"close_windows": "esc"},
-        # チャットの入力欄にフォーカスがあるか (入力先が Edit) を確かめてから 1 つずつ送る。50 文字まで
+        # チャット欄の状態 (フォーカスあり / 出ているがフォーカスなし / 閉じている) に合わせて送る。50 文字まで
         {"chat": "I NO need PT"},
-        {"chat": "Perdon, cazo solo aqui. No hago party, gracias!"},
     ],
 }
+# 条件の手順 (ゲームを手前に出す前に確かめられるもの)。満たさなければウィンドウを切り替えずに終わる
+PRECHECKS = ("require_helper", "require_text")
 KEEP_WINDOWS = ("hunting_log", "helper_panel")  # MU Helper の表示。閉じると Helper の判定ができなくなる
 CHAT_MAX = 50  # MU のチャット欄はおよそ 51 文字で入らなくなる (実測)
 
@@ -383,6 +381,18 @@ class Responder:
     def respond(self, name: str, steps: list[dict], det) -> list[str]:
         """見つけた窓 det (Detection) に対して手順を順に行う。行ったことの一覧を返す。
         ゲームが裏にあれば一時的に手前に出し (activate)、終わったら元のウィンドウに戻す。"""
+        # Helper・本文の確認は画面 (OBS) だけで分かるので、ゲームを手前に出す前に済ませる
+        # (条件に合わないのに、何度もウィンドウを切り替えないように)
+        pre = []
+        while steps and any(k in steps[0] for k in PRECHECKS):
+            pre.append(steps[0])
+            steps = steps[1:]
+        if pre:
+            done_pre = self._respond(name, pre, det, release=False)
+            if len(done_pre) < len(pre):
+                return done_pre
+        else:
+            done_pre = []
         prev = None
         if not self.is_active():
             if self.activate is None:
@@ -394,14 +404,14 @@ class Responder:
                 return []
             self._do(f"{name}: ゲームの窓を一時的に手前に出しました")
         try:
-            return self._respond(name, steps, det)
+            return done_pre + self._respond(name, steps, det)
         finally:
             if prev and self.restore is not None:
                 self.sleep(0.2)
                 self.restore(prev)
                 self._do(f"{name}: 元のウィンドウに戻しました")
 
-    def _respond(self, name: str, steps: list[dict], det) -> list[str]:
+    def _respond(self, name: str, steps: list[dict], det, release: bool = True) -> list[str]:
         done: list[str] = []
         self._closed = None
         for step in steps:
@@ -617,5 +627,6 @@ class Responder:
                 self._last_chat = now
                 self._do(f"チャット: {text}")
                 done.append("chat")
-        self.run("ra")
+        if release:
+            self.run("ra")
         return done
