@@ -140,11 +140,11 @@ class Responder:
     def _has(self, name: str) -> bool:
         return any(o.name == name for o in self._det().objects)
 
-    def _click(self, x: float, y: float) -> tuple[float, float]:
+    def _click(self, x: float, y: float, button: str = "L") -> tuple[float, float]:
         sx, sy = self.to_screen(x, y)  # 画面の中の位置 → スクリーン座標
         mv = self.move(sx, sy)
         # ゲームはクリックが速すぎると取りこぼすので、動かしてから少し待ち、押す・離すを分けて送る
-        self.run((f"{mv};" if mv else "") + "w:120;bd:L;w:90;bu:L")
+        self.run((f"{mv};" if mv else "") + f"w:120;bd:{button};w:90;bu:{button}")
         return sx, sy
 
     def _still(self, name: str) -> bool:
@@ -233,14 +233,17 @@ class Responder:
                     pos = (x + w * float(fx), y + h * float(fy))
                 if pos is not None and self.move is not None:
                     ok = False
-                    for k, (dx, dy) in enumerate([(0, 0), (2, 1)]):  # 消えなければ少しずらしてもう 1 回
-                        sx, sy = self._click(pos[0] + dx, pos[1] + dy)
+                    buttons = [b.upper()[0] for b in step.get("buttons", ["L", "R"])]
+                    tries = [(b, dx, dy) for b in buttons for dx, dy in [(0, 0), (2, 1)]]
+                    for button, dx, dy in tries:  # 左で消えなければ少しずらして、それでも駄目なら右クリック
+                        sx, sy = self._click(pos[0] + dx, pos[1] + dy, button)
                         cur = self.cursor() if self.cursor is not None else None
-                        self._do(f"{name}: {target} をクリック (画面 {pos[0]:.0f},{pos[1]:.0f} → スクリーン {sx:.0f},{sy:.0f}"
+                        self._do(f"{name}: {target} を{'左' if button == 'L' else '右'}クリック (画面 {pos[0]:.0f},{pos[1]:.0f} → スクリーン {sx:.0f},{sy:.0f}"
                                  + (f"、マウスの位置 {cur[0]:.0f},{cur[1]:.0f}" if cur else "") + ")")
                         self.sleep(0.6)
                         if not self._still(det.name):
                             ok = True
+                            self._do(f"{name}: 窓が消えました ({'左' if button == 'L' else '右'}クリック)")
                             break
                     if not ok:
                         self._do(f"{name}: クリックしても窓が消えません。以降 (Esc・チャット) は行いません"

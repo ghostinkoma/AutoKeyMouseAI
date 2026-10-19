@@ -345,10 +345,14 @@ def cmd_press(args) -> None:
     if args.move_only:
         print("[press] 動かしただけです (--move-only)。マウスが Cancel の上にあるか見てください")
         return
-    dev.run("w:120;bd:L;w:90;bu:L")
-    time.sleep(0.8)
-    still = any(e.name == args.name and e.present for e in det.detect(screen.grab()))
-    print(f"[press] 押しました → {args.name} は " + ("まだ見えます (押せていない)" if still else "消えました (成功)"))
+    for b in args.buttons.upper():
+        dev.run(f"w:120;bd:{b};w:90;bu:{b}")
+        time.sleep(0.8)
+        still = any(e.name == args.name and e.present for e in det.detect(screen.grab()))
+        label = "左" if b == "L" else "右"
+        print(f"[press] {label}クリックしました → {args.name} は " + ("まだ見えます (押せていない)" if still else "消えました (成功)"))
+        if not still:
+            return
 
 
 def cmd_remove(args) -> None:
@@ -431,6 +435,7 @@ def main() -> None:
     pr.add_argument("name")
     pr.add_argument("point", nargs="?", default="cancel")
     pr.add_argument("--move-only", action="store_true", help="マウスを動かすだけで押さない")
+    pr.add_argument("--buttons", default="LR", help="試すボタンの順 (L = 左, R = 右。既定 LR = 左で消えなければ右)")
     pr.add_argument("--wait", type=float, default=5.0, help="押すまでの秒数 (その間にゲームを手前に)")
     fr = sub.add_parser("fix-ref")
     fr.add_argument("--old", type=int, required=True)

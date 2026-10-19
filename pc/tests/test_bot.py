@@ -2033,7 +2033,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
 
     def run(script):
         sent.append(script)
-        if "bu:L" in script and not stuck[0]:
+        if "bu:" in script and not stuck[0]:
             det.open.discard("party_invite")      # Cancel を押したら勧誘の窓が消える
         if "k:esc" in script:
             det.open.discard("inventory")
@@ -2070,7 +2070,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     sent.clear()
     t[0] = 1000
     assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper", "text"]
-    assert sum("bu:L" in x for x in sent) == 2 and not any("k:esc" in x or x.startswith("t:") for x in sent)
+    assert sum("bu:L" in x for x in sent) == 2 and sum("bu:R" in x for x in sent) == 2 and not any("k:esc" in x or x.startswith("t:") for x in sent)
     stuck[0] = False
     det.open.discard("inventory")
     # Helper を使っていない (最後に ON だったのが 10 分前 / 分からない) ときは断らない
