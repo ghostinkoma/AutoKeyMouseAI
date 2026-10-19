@@ -5,7 +5,7 @@
                                  (場所は python tools\\edge_objects.py point party_invite cancel で 1 回クリックして覚える)
     click: party_invite_cancel   登録した物体 (Cancel ボタンなど) の真ん中をクリック
     click: [0.75, 0.9]           見つけた窓の枠の中の位置 (横, 縦 の割合) をクリック
-                                 (ボタンが見つからないときは fallback_key を押す。既定 esc)
+                                 (ボタンが見つからないときは fallback_key を押す。無ければ以降を行わない)
   - close_windows: esc           開いている窓の数だけ esc を押す (keep に書いた窓は数えない)
                                  窓が無いのに esc を押すとゲームのメニューが開くので、見えている数しか押さない
   - require_helper: on           MU Helper が動作中 (■) のときだけ行う。今 ON か、within_s 秒 (既定 120) 以内に
@@ -31,7 +31,7 @@ DEFAULT_RESPONSES = {
         {"require_helper": "on", "within_s": 120},
         # タイトルは "Information" で、ほかの知らせ (トレードの申し込みなど) と同じ。本文の文字で確かめる
         {"require_text": ["party", "join"]},  # "requests" はトレードの申し込みにもあるので使わない
-        {"click": "@cancel", "fallback_key": "esc"},
+        {"click": "@cancel"},  # 勧誘の窓は Esc では消えないので、押せなければ以降 (Esc・チャット) は行わない
         {"close_windows": "esc"},
         {"chat": "Sorry, I no need PT."},
         {"chat": "Perdon, estoy cazando solo en este spot. No hago party, gracias!"},
@@ -110,7 +110,7 @@ class Responder:
     def __init__(self, run, grab, detector, move=None, to_screen=None, is_active=None, keep=KEEP_WINDOWS,
                  chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
                  log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
-                 save_dir=None):
+                 save_dir=None, cursor=None):
         self.run = run                  # (script) → ESP32 の HID マクロを実行 (k:esc;w:100 …)
         self.grab = grab                # () → 今の等倍の画面
         self.detector = detector        # ObjectDetector (load し直されても使えるよう、関数でも可)
@@ -127,6 +127,7 @@ class Responder:
         self._last_chat = -1e9
         self.history: list[str] = []
         self.read_text = read_text      # (画像) → 読んだ文字 (先生役の OCR)。require_text に使う
+        self.cursor = cursor            # () → 実際のマウスの位置 (確認のログ用)
         self.save_dir = save_dir        # 文字の確認で弾いた窓の切り抜きを残す (読み方を直す材料)
         self.helper_state = helper_state  # () → (今 ON か: True/False/None, 最後に ON を見てからの秒数)
 
@@ -139,10 +140,15 @@ class Responder:
     def _has(self, name: str) -> bool:
         return any(o.name == name for o in self._det().objects)
 
-    def _click(self, x: float, y: float) -> None:
+    def _click(self, x: float, y: float) -> tuple[float, float]:
         sx, sy = self.to_screen(x, y)  # 画面の中の位置 → スクリーン座標
         mv = self.move(sx, sy)
-        self.run(f"{mv};w:40;c:L" if mv else "w:40;c:L")
+        # ゲームはクリックが速すぎると取りこぼすので、動かしてから少し待ち、押す・離すを分けて送る
+        self.run((f"{mv};" if mv else "") + "w:120;bd:L;w:90;bu:L")
+        return sx, sy
+
+    def _still(self, name: str) -> bool:
+        return any(d.name == name and d.present for d in self._detect())
 
     def _do(self, msg: str) -> None:
         self.history.append(msg)
@@ -210,7 +216,7 @@ class Responder:
                         x, y, w, h = det.box
                         pos = (x + w * float(pt[0]), y + h * float(pt[1]))
                     else:
-                        self._do(f"{det.name} の {target[1:]} の場所が未登録なので {step.get('fallback_key', 'esc')} で閉じます"
+                        self._do(f"{det.name} の {target[1:]} の場所が未登録です"
                                  f" (python tools\\edge_objects.py point {det.name} {target[1:]})")
                 elif isinstance(target, str):
                     if self._has(target):
@@ -219,27 +225,45 @@ class Responder:
                                 x, y, w, h = d.box
                                 pos = (x + w / 2, y + h / 2)
                     else:
-                        self._do(f"{target} が未登録なので {step.get('fallback_key', 'esc')} で閉じます"
+                        self._do(f"{target} が未登録です"
                                  f" (python tools\\edge_objects.py add {target} --kind icon 画面.png で登録)")
                 else:
                     fx, fy = target
                     x, y, w, h = det.box
                     pos = (x + w * float(fx), y + h * float(fy))
                 if pos is not None and self.move is not None:
-                    self._click(*pos)
-                    self._do(f"{name}: {target} をクリック ({pos[0]:.0f}, {pos[1]:.0f})")
+                    ok = False
+                    for k, (dx, dy) in enumerate([(0, 0), (2, 1)]):  # 消えなければ少しずらしてもう 1 回
+                        sx, sy = self._click(pos[0] + dx, pos[1] + dy)
+                        cur = self.cursor() if self.cursor is not None else None
+                        self._do(f"{name}: {target} をクリック (画面 {pos[0]:.0f},{pos[1]:.0f} → スクリーン {sx:.0f},{sy:.0f}"
+                                 + (f"、マウスの位置 {cur[0]:.0f},{cur[1]:.0f}" if cur else "") + ")")
+                        self.sleep(0.6)
+                        if not self._still(det.name):
+                            ok = True
+                            break
+                    if not ok:
+                        self._do(f"{name}: クリックしても窓が消えません。以降 (Esc・チャット) は行いません"
+                                 " (マウスの位置がずれていないか python tools\\edge_objects.py press で確かめてください)")
+                        self.run("ra")
+                        return done
                     done.append("click")
-                else:
-                    key = step.get("fallback_key", "esc")
+                elif step.get("fallback_key"):
+                    key = step["fallback_key"]
                     self.run(f"k:{key}")
                     self._do(f"{name}: {key} で閉じます")
                     done.append(f"key:{key}")
+                else:
+                    self._do(f"{name}: 押す場所が分からないので、以降は行いません")
+                    self.run("ra")
+                    return done
                 self.sleep(0.4)
             elif "close_windows" in step:
                 key = step["close_windows"] or "esc"
                 pressed = 0
                 for _ in range(2):  # 押した後にもう一度数え直す
-                    opened = [d.name for d in self._detect() if d.present and d.kind == "window" and d.name not in self.keep]
+                    opened = [d.name for d in self._detect() if d.present and d.kind == "window"
+                              and d.name not in self.keep and d.name != det.name]  # 断った窓は Esc で消えない
                     n = min(len(opened), self.max_esc - pressed)
                     if n <= 0:
                         break

@@ -129,7 +129,7 @@ rare_windows:
         within_s: 120
       - require_text: [party, join]       # 本文 "Someone requests you to join their a party" (読み違いは少し許す)
       - click: "@cancel"                # python tools\edge_objects.py point party_invite cancel で覚えた場所
-        fallback_key: esc
+                                        # (勧誘の窓は Esc では消えない。押しても消えなければ以降は行わない)
       - close_windows: esc
       - chat: "Sorry, I no need PT."
       - chat: "Perdon, estoy cazando solo en este spot. No hago party, gracias!"

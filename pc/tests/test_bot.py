@@ -2029,10 +2029,11 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
 
     det = Det()
     sent = []
+    stuck = [False]
 
     def run(script):
         sent.append(script)
-        if "c:L" in script:
+        if "bu:L" in script and not stuck[0]:
             det.open.discard("party_invite")      # Cancel を押したら勧誘の窓が消える
         if "k:esc" in script:
             det.open.discard("inventory")
@@ -2046,7 +2047,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     inv = Detection("party_invite", "window", True, 0.95, 0.99, (300, 150, 424, 288))
     done = r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)
     assert done == ["helper", "text", "click", "close:1", "chat", "chat"]
-    assert sent[0] == "a:628,429;w:40;c:L"                     # 窓の中の cancel の場所 (+ ウィンドウの位置)
+    assert sent[0] == "a:628,429;w:120;bd:L;w:90;bu:L"         # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
     assert sent[2] == "k:enter;w:300" and sent[3].startswith("t:Sorry, I no need PT.;")
     assert sent[5].startswith("t:Perdon,") and sent[-1] == "ra"
@@ -2060,6 +2061,18 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     text[0] = "Information  Bob  Someone requests a trade"
     sent.clear()
     assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper"] and sent == ["ra"]
+    # 押しても窓が消えなければ (2 回試して) Esc もチャットもしない
+    text[0] = "Information  Bob  Someone requests you to join their a party"
+    helper[0] = (True, 0.0)
+    det.open.add("party_invite")
+    det.open.add("inventory")
+    stuck[0] = True
+    sent.clear()
+    t[0] = 1000
+    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper", "text"]
+    assert sum("bu:L" in x for x in sent) == 2 and not any("k:esc" in x or x.startswith("t:") for x in sent)
+    stuck[0] = False
+    det.open.discard("inventory")
     # Helper を使っていない (最後に ON だったのが 10 分前 / 分からない) ときは断らない
     text[0] = "Information  Bob  Someone requests you to join their a party"
     det.open.add("party_invite")

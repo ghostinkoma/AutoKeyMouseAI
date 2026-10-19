@@ -11,6 +11,7 @@
     python tools\\edge_objects.py find 画面.png               画面で探して結果を表示 (画面_found.png に枠を描く)
     python tools\\edge_objects.py find screen                 今のゲーム画面を撮って探す (dataset/screens/find_screen.png)
     python tools\\edge_objects.py point party_invite cancel   登録した窓の画像で、押す場所 (Cancel ボタン) を 1 回クリックして覚える
+    python tools\\edge_objects.py press party_invite cancel   今の画面で窓を探し、覚えた場所を押す (--move-only で動かすだけ)
     python tools\\edge_objects.py remove 名前                 登録を消す
     python tools\\edge_objects.py restore helper_running      最初から入っている登録 (helper_*, hunting_log) を元に戻す
 囲み方: 1 回目は縮小した画面で大まかに → 2 回目は拡大した画面でぴったり → 切り抜きを見て y で登録。
@@ -304,6 +305,52 @@ def cmd_fix_ref(args) -> None:
     print(f"[fix-ref] 画面の高さ {args.old} → {args.new}: {', '.join(done) or 'なし'}。train で学習し直してください")
 
 
+def cmd_press(args) -> None:
+    """今の画面で窓を探し、覚えた場所 (Cancel など) にマウスを動かして押す (確かめ用)。"""
+    import time
+
+    from akm.config import abs_map_from, load_config
+    from akm.device import open_device
+    from akm.screen import GameScreen
+
+    cfg = load_config("config.yaml")
+    from akm.config import ask_obs_password
+
+    ask_obs_password(cfg, "config.yaml")
+    screen = GameScreen.from_config(cfg)
+    screen.locate()
+    det = ObjectDetector.load()
+    obj = next((o for o in det.objects if o.name == args.name), None)
+    if obj is None or args.point not in obj.points:
+        raise SystemExit(f"{args.name} の {args.point} が未登録です (python tools\\edge_objects.py point {args.name} {args.point})")
+    dev = open_device(cfg, abs_map_from(cfg))
+    print(f"[press] {args.wait} 秒後に押します。今のうちにゲームの画面をクリックして手前にしてください")
+    time.sleep(args.wait)
+    img = screen.grab()
+    d = next((d for d in det.detect(img) if d.name == args.name), None)
+    if d is None or not d.present:
+        raise SystemExit(f"[press] 画面に {args.name} が見えません (一致度 {d.ncc if d else 0:.2f})")
+    x, y, w, h = d.box
+    fx, fy = obj.points[args.point]
+    px, py = x + w * fx, y + h * fy
+    sx, sy = screen.to_screen(px, py)
+    mv = dev.s_move(sx, sy)
+    dev.run(mv or "w:1")
+    time.sleep(0.3)
+    cur = dev.cursor() if dev.cursor else None
+    print(f"[press] {args.name} の {args.point}: 画面 {px:.0f},{py:.0f} → スクリーン {sx:.0f},{sy:.0f}"
+          + (f" / 実際のマウスの位置 {cur[0]:.0f},{cur[1]:.0f}" if cur else ""))
+    if cur and (abs(cur[0] - sx) > 6 or abs(cur[1] - sy) > 6):
+        print("[press] マウスの位置がずれています。python tools\\calibrate_mouse.py でマウスの合わせ込みをしてください")
+    if args.move_only:
+        print("[press] 動かしただけです (--move-only)。マウスが Cancel の上にあるか見てください")
+        return
+    dev.run("w:120;bd:L;w:90;bu:L")
+    time.sleep(0.8)
+    still = any(e.name == args.name and e.present for e in det.detect(screen.grab()))
+    print(f"[press] 押しました → {args.name} は " + ("まだ見えます (押せていない)" if still else "消えました (成功)"))
+
+
 def cmd_remove(args) -> None:
     if not remove_object(args.name):
         raise SystemExit(f"{args.name} は登録されていません")
@@ -380,6 +427,11 @@ def main() -> None:
     rm.add_argument("name")
     rs = sub.add_parser("restore")
     rs.add_argument("name")
+    pr = sub.add_parser("press")
+    pr.add_argument("name")
+    pr.add_argument("point", nargs="?", default="cancel")
+    pr.add_argument("--move-only", action="store_true", help="マウスを動かすだけで押さない")
+    pr.add_argument("--wait", type=float, default=5.0, help="押すまでの秒数 (その間にゲームを手前に)")
     fr = sub.add_parser("fix-ref")
     fr.add_argument("--old", type=int, required=True)
     fr.add_argument("--new", type=int, required=True)
@@ -389,7 +441,8 @@ def main() -> None:
     args = ap.parse_args()
     {"list": cmd_list, "add": cmd_add, "add-screen": cmd_add_screen, "import-ui": cmd_import_ui,
      "train": cmd_train, "find": cmd_find, "remove": cmd_remove, "point": cmd_point,
-     "restore": cmd_restore, "fix-ref": cmd_fix_ref}[args.cmd](args)
+     "restore": cmd_restore, "fix-ref": cmd_fix_ref,
+     "press": cmd_press}[args.cmd](args)
 
 
 if __name__ == "__main__":
