@@ -429,6 +429,12 @@ class Responder:
         else:
             done_pre = []
         prev = None
+        cur0 = None
+        if self.cursor is not None:
+            try:
+                cur0 = self.cursor()  # 断り終わったらマウスもここに戻す
+            except Exception:
+                cur0 = None
         if not self.is_active():
             if self.activate is None:
                 self._do(f"{name}: ゲームの窓が手前に無いので何もしません")
@@ -441,10 +447,17 @@ class Responder:
         try:
             return done_pre + self._respond(name, steps, det)
         finally:
+            if cur0 is not None and self.move is not None:
+                try:
+                    mv = self.move(*cur0)
+                    if mv:
+                        self.run(mv)
+                except Exception:
+                    pass
             if prev and self.restore is not None:
                 self.sleep(0.2)
                 self.restore(prev)
-                self._do(f"{name}: 元のウィンドウに戻しました")
+                self._do(f"{name}: 元のウィンドウとマウスの位置に戻しました")
 
     def _respond(self, name: str, steps: list[dict], det, release: bool = True) -> list[str]:
         done: list[str] = []

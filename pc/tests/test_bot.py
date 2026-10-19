@@ -2576,3 +2576,23 @@ def test_mirror_slow_down_keeps_updating_and_redraws():
     m.slow_down(0)
     assert m._interval() == 0.1 and keys == [1]           # 戻したら液晶を全体描き直す
     m.stop()
+
+
+def test_respond_restores_mouse_position():
+    from akm.edge.objects import Detection
+    from akm.edge.respond import Responder
+
+    class Det:
+        objects = []
+
+        def detect(self, img):
+            return []
+
+    sent = []
+    g = {"fg": "notepad"}
+    r = Responder(sent.append, lambda: None, Det(), move=lambda x, y: f"a:{x:.0f},{y:.0f}", sleep=lambda s: None,
+                  log=lambda m: None, is_active=lambda: g["fg"] == "game", activate=lambda: g.update(fg="game") or True,
+                  foreground=lambda: g["fg"], restore=lambda w: g.update(fg=w), cursor=lambda: (1500, 300))
+    r._respond = lambda *a, **k: ["click"]
+    assert r.respond("party_invite", [{"click": "@cancel"}], Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1)))
+    assert sent[-1] == "a:1500,300" and g["fg"] == "notepad"
