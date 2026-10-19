@@ -234,16 +234,26 @@ class Responder:
                 pass
         return True
 
+    def _bring_front(self, tries: int = 3, settle_s: float = 0.6) -> bool:
+        """ゲームを手前に出す。Windows がすぐ戻してしまうことがあるので数回試し、
+        出せたらゲームがキーを受け付けるまで少し待つ (直後の Enter は取りこぼされることがある)。"""
+        if self.activate is None:
+            return self._has_focus()
+        for _ in range(tries):
+            self.activate()
+            self.sleep(0.3)
+            if self._has_focus():
+                self.sleep(settle_s)
+                return self._has_focus()
+        return False
+
     def _ensure_focus(self, what: str) -> bool:
         """キーを送る前に、ゲームに入力が届く状態か確かめる。外れていれば手前に出し直す。"""
         if self._has_focus():
             return True
-        if self.activate is not None:
-            self.activate()
-            self.sleep(0.3)
-            if self._has_focus():
-                self._do(f"{what}の前にゲームの窓が手前から外れていたので、手前に出し直しました")
-                return True
+        if self.activate is not None and self._bring_front():
+            self._do(f"{what}の前にゲームの窓が手前から外れていたので、手前に出し直しました")
+            return True
         self._do(f"ゲームの窓にフォーカスが無いので{what}をやめます (文字がほかのアプリに入らないように)")
         return False
 
@@ -367,11 +377,10 @@ class Responder:
                 self._do(f"{name}: ゲームの窓が手前に無いので何もしません")
                 return []
             prev = self.foreground() if self.foreground is not None else None
-            if not self.activate() or not self.is_active():
+            if not self._bring_front():
                 self._do(f"{name}: ゲームの窓を手前に出せないので何もしません")
                 return []
             self._do(f"{name}: ゲームの窓を一時的に手前に出しました")
-            self.sleep(0.3)
         try:
             return self._respond(name, steps, det)
         finally:

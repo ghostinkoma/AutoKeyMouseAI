@@ -39,8 +39,15 @@ def main() -> None:
         print("[chat] 3 秒後にゲームを手前に出して送ります (ほかのウィンドウを手前にしておいてください)")
         time.sleep(3)
         prev = foreground_window()
-        print(f"[chat] 手前に出す: {'できた' if screen.activate() else 'できなかった'}")
-        time.sleep(0.3)
+        ok = False
+        for k in range(3):  # Windows がすぐ戻してしまうことがあるので数回試す
+            screen.activate()
+            time.sleep(0.3)
+            if screen.is_active() and screen.input_state().get("focus"):
+                ok = True
+                break
+        print(f"[chat] 手前に出す: {'できた' if ok else 'できなかった'} ({k + 1} 回目)")
+        time.sleep(0.6)  # 手前に出た直後の Enter はゲームが取りこぼすことがある
     else:
         print("[chat] 5 秒後に送ります。今のうちにゲームをクリックして手前にしてください")
         time.sleep(5)
@@ -68,13 +75,16 @@ def main() -> None:
 
     print(f"[chat] 入力先: {screen.input_state().get('focus_class') or 'なし'}"
           " (ほかのウィンドウから戻った後は Edit でもゲームの中では外れているので、いつも Enter で戻す)")
-    print("[chat] Enter (チャットの入力欄にフォーカスを当てる)")
-    print("   →", dev.run("k:enter"))
-    time.sleep(args.open_wait)
-    for _ in range(10):
+    for attempt in range(2):  # 入力欄に移らなければ (Enter で閉じた・取りこぼした) もう一度押す
+        print(f"[chat] Enter (チャットの入力欄にフォーカスを当てる{'、2 回目' if attempt else ''})")
+        print("   →", dev.run("k:enter"))
+        time.sleep(args.open_wait)
+        for _ in range(10):
+            if edit_focus():
+                break
+            time.sleep(0.1)
         if edit_focus():
             break
-        time.sleep(0.1)
     print(f"[chat] Enter 後の入力先: {screen.input_state().get('focus_class') or 'なし'} → "
           + ("チャットの入力欄にフォーカスあり" if edit_focus() else "入力欄にフォーカスなし"))
     if not edit_focus():
