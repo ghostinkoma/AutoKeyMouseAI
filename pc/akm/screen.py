@@ -459,6 +459,20 @@ def bring_to_front(hwnd: int, wait_s: float = 0.4) -> bool:
         if user32.GetForegroundWindow() == hwnd:
             return True
         time.sleep(0.05)
+    if user32.GetForegroundWindow() != hwnd:
+        # Windows が切り替えを許さなかった: 一時的に最前面にしてから戻す / SwitchToThisWindow を試す
+        try:
+            flags = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+            user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, flags)   # HWND_TOPMOST
+            user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, flags)   # HWND_NOTOPMOST
+            user32.SwitchToThisWindow(hwnd, True)
+        except Exception:
+            pass
+        end = time.monotonic() + wait_s
+        while time.monotonic() < end:
+            if user32.GetForegroundWindow() == hwnd:
+                return True
+            time.sleep(0.05)
     return user32.GetForegroundWindow() == hwnd
 
 

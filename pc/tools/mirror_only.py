@@ -228,7 +228,7 @@ def main() -> None:
                                       foreground=foreground_window, restore=bring_to_front,
                                       to_screen=screen.to_screen, is_active=getattr(screen, "is_active", None),
                                       keep=rcfg.get("keep", ["hunting_log", "helper_panel"]),
-                                      chat_cooldown_s=float(rcfg.get("chat_cooldown_s", 120)))
+                                      chat_cooldown_s=float(rcfg.get("chat_cooldown_s", 10)))
             known = {o.name for o in det.objects}
             missing = [n for n in set(watch) | set(decline) if n not in known]
             if missing:

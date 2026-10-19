@@ -18,7 +18,7 @@
   * ゲームの窓が手前にあるときだけ動く
   * チャット欄の見本 (chat_input) を登録してあれば、Enter の後にチャット欄が開いたことを確かめてから打つ
     (開いていないのに文字を打つと、ゲームのショートカットキーとして効いてしまう)
-  * チャットは chat_cooldown_s 秒 (既定 120 秒) に 1 回まで。何度も勧誘されても連投しない
+  * チャットは chat_cooldown_s 秒 (既定 10 秒) に 1 回まで。同じ勧誘に二重に送らない (勧誘のたびには送る)
 """
 from __future__ import annotations
 
@@ -130,7 +130,7 @@ def chat_text_ok(text: str) -> str | None:
 
 class Responder:
     def __init__(self, run, grab, detector, move=None, to_screen=None, is_active=None, keep=KEEP_WINDOWS,
-                 chat_cooldown_s: float = 120.0, chat_check: str = "chat_input", max_esc: int = 5,
+                 chat_cooldown_s: float = 10.0, chat_check: str = "chat_input", max_esc: int = 5,
                  log=print, sleep=time.sleep, clock=time.monotonic, read_text=None, helper_state=None,
                  save_dir=None, cursor=None, activate=None, foreground=None, restore=None,
                  chat_open_wait: float = 0.3, blind_first: bool = True, grab_chat=None, input_state=None,

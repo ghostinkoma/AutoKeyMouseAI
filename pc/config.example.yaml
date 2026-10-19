@@ -122,7 +122,7 @@ rare_windows:
   watch: [party_invite, trade]
   confirm: 2
   keep: [hunting_log, helper_panel]
-  chat_cooldown_s: 120
+  chat_cooldown_s: 10                   # 同じ勧誘への二重送信を防ぐ間隔 (秒)。勧誘のたびに送る。連投を避けたいなら 120 など
   ime_off: true                         # チャットの前にゲームの日本語入力 (IME) を OFF にする (ON だと Enter が確定だけになる)
   chat_capture: desktop                 # チャット欄は OBS に写らないので、画面に映っているとおりに撮って確かめる
   chat_open_wait_s: 0.3                 # Enter でチャット欄を開いてから、文字を打つまでの秒数

@@ -2053,7 +2053,7 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     helper = [(False, 30.0)]  # 今は OFF (勧誘で止まった) だが 30 秒前までは ON
     r = Responder(run, lambda: np.zeros((907, 1866, 3), np.uint8), det, move=lambda x, y: f"a:{x:.0f},{y:.0f}",
                   to_screen=lambda x, y: (x + 10, y + 20), sleep=lambda s: None, clock=lambda: t[0], log=lambda m: None,
-                  read_text=lambda img: text[0], helper_state=lambda: helper[0])
+                  read_text=lambda img: text[0], helper_state=lambda: helper[0], chat_cooldown_s=120)
     inv = Detection("party_invite", "window", True, 0.95, 0.99, (300, 150, 424, 288))
     done = r.respond("party_invite", FULL_STEPS, inv)
     # チャット欄の見本 (chat_input) が無いと、1 つ目だけ送る (2 つ目は欄が開いているか分からないので打たない)
