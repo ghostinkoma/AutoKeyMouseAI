@@ -2446,3 +2446,48 @@ def test_chat_three_states():
         assert r._respond("party_invite", [{"chat": "I NO need PT"}], det) == ["chat"], state
         assert sent.count("k:enter") == enters, (state, sent)
         assert "t:I NO need PT" in sent
+
+
+def test_party_invite_full_flow_with_chat_states():
+    """勧誘 → Helper 確認 → 本文確認 → Cancel → 窓を閉じる → チャット 2 つ (状態に合わせて Enter) → 元の窓に戻す。"""
+    from akm.edge.objects import Detection
+    from akm.edge.respond import DEFAULT_RESPONSES, Responder
+
+    class Obj:
+        def __init__(self, n):
+            self.name, self.points = n, ({"cancel": [0.73, 0.87]} if n == "party_invite" else {})
+
+    g = {"invite": True, "fg": "notepad", "cls": "MURex Client", "chat": "closed"}
+
+    class Det:
+        objects = [Obj("party_invite")]
+
+        def detect(self, img):
+            return [Detection("party_invite", "window", g["invite"], 0.93, 0.9, (516, 138, 323, 221))]
+
+    sent = []
+
+    def run(s):
+        sent.append(s)
+        if "bu:L" in s:
+            g["invite"] = False
+        if s == "k:enter":                     # 閉じている → 開いてフォーカス / 出ている → フォーカス
+            g["chat"], g["cls"] = "focused", "Edit"
+        elif "kd:enter" in s:                  # 送信: 欄は出たまま、フォーカスは外れる (このゲームの場合)
+            g["chat"], g["cls"] = "open", "MURex Client"
+
+    r = Responder(run, lambda: np.zeros((768, 1366, 3), np.uint8), Det(), move=lambda x, y: f"a:{x:.0f},{y:.0f}",
+                  sleep=lambda s: None, log=lambda m: None, is_active=lambda: g["fg"] == "game",
+                  activate=lambda: g.update(fg="game") or True, foreground=lambda: g["fg"],
+                  restore=lambda w: g.update(fg=w), helper_state=lambda: (False, 20.0),
+                  read_text=lambda img: "Information Bob Someone requests you to join their a party",
+                  input_state=lambda: {"focus": 5, "focus_class": g["cls"]})
+    r.chat_state = lambda: g["chat"]
+    r.caret_blinking = lambda: g["chat"] == "focused"
+    done = r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], Detection("party_invite", "window", True, 0.93,
+                                                                                    0.9, (516, 138, 323, 221)))
+    assert done == ["helper", "text", "click", "close:0", "chat", "chat"]
+    texts = [x for x in sent if x.startswith("t:")]
+    assert texts == ["t:I NO need PT", "t:Perdon, cazo solo aqui. No hago party, gracias!"]
+    assert sent.count("k:enter") == 2            # 1 つ目: 閉じていた → 開く / 2 つ目: 出ているがフォーカスなし → 当てる
+    assert g["fg"] == "notepad" and not g["invite"]
