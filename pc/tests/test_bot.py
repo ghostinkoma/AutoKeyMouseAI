@@ -2124,3 +2124,24 @@ def test_find_window_prefers_game_over_browser_tab(monkeypatch):
     assert screen.find_window("MU", "brave.exe") == 1
     monkeypatch.setattr(screen, "list_windows", lambda: wins[:1])
     assert screen.find_window("MU") == 1   # ブラウザしか無ければそれを使う (注意を出す)
+
+
+def test_big_window_with_high_match_is_present_even_if_net_disagrees():
+    from akm.edge.objects import ObjectDef, ObjectDetector
+
+    rng = np.random.default_rng(3)
+    dlg = rng.integers(0, 255, (221, 323, 3), np.uint8)
+    small = rng.integers(0, 255, (20, 20, 3), np.uint8)
+    img = np.full((768, 1366, 3), 60, np.uint8)
+    img[138:359, 516:839] = dlg
+    img[5:25, 224:244] = small
+
+    class NoNet:  # 何でも「背景」と言うネット
+        labels = ["party_invite", "icon", "background"]
+
+        def logits(self, b, f):
+            return np.array([[-9.0, -9.0, 9.0]])
+
+    det = ObjectDetector([ObjectDef("party_invite", "window", dlg, 768), ObjectDef("icon", "icon", small, 768)], NoNet())
+    got = {d.name: d.present for d in det.detect(img)}
+    assert got == {"party_invite": True, "icon": False}   # 小さいものはネットの否定に従う

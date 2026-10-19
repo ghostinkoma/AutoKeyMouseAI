@@ -132,6 +132,7 @@ class ObjectDetector:
         self.objects = objects
         self.model = model
         self.hi, self.lo, self.nn_min = hi, lo, nn_min
+        self.big_area, self.big_ncc = 20000, 0.85  # 大きな窓 (ピクセル数) はこの一致度以上なら、ネットに関わらず「ある」
         self._cache: dict = {}
 
     @classmethod
@@ -207,6 +208,10 @@ class ObjectDetector:
                 present = ncc >= self.hi
             else:  # ネットがあれば、一致度がとても高くてもネットが強く否定したら「無い」
                 present = (ncc >= self.hi and nn >= 0.2) or (ncc >= self.lo and nn >= self.nn_min)
+                # 大きな窓 (勧誘の知らせなど) は見た目の一致だけで十分確か。画面の撮り方が変わった直後に
+                # ネットが知らない見た目として否定しても「ある」とする
+                if not present and box[2] * box[3] >= self.big_area and ncc >= self.big_ncc:
+                    present = True
             out.append(Detection(o.name, o.kind, present, ncc, nn, box))
         # 同じ場所に重なった結果や、同じグループ (同時には出ないもの) は、確からしい方だけ残す
         groups = {o.name: o.group for o in self.objects}
