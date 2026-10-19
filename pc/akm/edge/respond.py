@@ -439,23 +439,29 @@ class Responder:
                     except Exception:
                         pass
                 if self.chat_verify and self._has(self.chat_check):
-                    # チャット欄が開いているかを画面で確かめる。開いていれば Enter は押さない (押すと閉じてしまう)
-                    if self._closed is None or not self._chat_open(closed=self._closed):
-                        before = self._grab_for_chat()
-                        if self._closed is None:
-                            self._closed = before  # 1 つ目の前の画面 = 閉じているときの見た目
+                    # 開いていても閉じていても Enter を押す: 閉じていれば開いて入力先になり、
+                    # 開いていれば入力先になる (チャット欄が出ていてもフォーカスが無いと文字はショートカットキーになる)
+                    before = self._grab_for_chat()
+                    was_open = self._chat_open()
+                    self.run("k:enter")
+                    self.sleep(self.chat_open_wait)
+                    ok = self._chat_open(tries=4, closed=None if was_open else before)
+                    if not ok and was_open:
+                        # 入力先だった欄を Enter で閉じてしまった: もう一度押して開き直す
                         self.run("k:enter")
-                        self.sleep(self.chat_open_wait)  # チャット欄が開くまで待ってから確かめる
-                        if not self._chat_open(tries=4, closed=before):
-                            self._save_screen("chat_check")
-                            if sent_before == 0 and self.blind_first:
-                                # 1 つ目は、Enter で開いたものとして打つ (見本が合っていないだけのことが多い)
-                                self._do("チャット欄の見本と合わないが、Enter で開いたものとして 1 つ目を打ちます"
-                                         " (今の画面を dataset/screens/chat_check.png に保存。ここから chat_input を登録し直せます)")
-                            else:
-                                self._do("Enter を押してもチャット欄が開かないので、文字は打ちません")
-                                self.run("ra")
-                                break
+                        self.sleep(self.chat_open_wait)
+                        ok = self._chat_open(tries=4, closed=before)
+                    if not ok:
+                        self._save_screen("chat_check")
+                        if sent_before == 0 and self.blind_first:
+                            self._do("チャット欄が開いたと判定できないが、Enter で開いたものとして 1 つ目を打ちます"
+                                     " (今の画面を dataset/screens/chat_check.png に保存)")
+                        else:
+                            self._do("Enter を押してもチャット欄が開かないので、文字は打ちません")
+                            self.run("ra")
+                            break
+                    else:
+                        self._do(f"チャット欄: {'出ていた欄に Enter で入力先を移しました' if was_open else 'Enter で開きました'}")
                 elif sent_before:
                     # 送った直後のチャット欄が開いたままか閉じたかは、見本 (chat_input) が無いと分からない。
                     # 分からないまま打つと文字がショートカットキー (A = スキルツリー など) になるので、2 つ目以降は送らない

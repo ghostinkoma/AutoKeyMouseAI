@@ -27,6 +27,8 @@ def main() -> None:
     ap.add_argument("--enter-wait", type=float, default=None, help="打ち終わってから送信の Enter までの秒数")
     ap.add_argument("--hold", type=int, default=80, help="送信の Enter を押したままにするミリ秒")
     ap.add_argument("--enters", type=int, default=1, help="送信の Enter の回数")
+    ap.add_argument("--check", action="store_true",
+                    help="チャット欄の見本 (chat_input) で、Enter の前後に欄が開いているか判定して表示する")
     args = ap.parse_args()
     cfg = load_config("config.yaml")
     screen = GameScreen.from_config(cfg)
@@ -47,11 +49,19 @@ def main() -> None:
     print(f"[chat] ゲームが手前: {screen.is_active()}  入力先: {st.get('focus_class') or 'なし'}  → フォーカス {'あり' if focus else 'なし'}")
     if not focus:
         raise SystemExit("[chat] ゲームにフォーカスが無いので送りません (本番もこの場合は送らずに止まります)")
-    text = args.text.replace(";", "\;")
+    text = args.text.replace(";", "\\;")
     wait = args.enter_wait if args.enter_wait is not None else 0.3 + 0.03 * len(args.text)
     print("[chat] Enter (開く)")
     print("   →", dev.run("k:enter"))
     time.sleep(args.open_wait)
+    if checker is not None:
+        ncc, diff = checker._chat_score(screen.grab_desktop(), before)
+        opened = ncc >= 0.75 or (diff >= 8 and ncc >= 0.45)
+        print(f"[chat] Enter 後のチャット欄: 一致度 {ncc:.2f} / Enter 前との違い {diff:.1f} → "
+              + ("開いた (入力できる)" if opened else "開いていない"))
+        if not opened:
+            dev.run("k:enter")  # 開いていない = 閉じてしまった可能性。もう一度押して元に戻す
+            raise SystemExit("[chat] 開いたと判定できないので打ちません (Enter をもう一度押して元に戻しました)")
     print(f"[chat] 文字: {args.text}")
     print("   →", dev.run(f"t:{text}"))
     time.sleep(wait)

@@ -2109,7 +2109,8 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
     sent.clear()
     t[0] = 5000
     assert r.respond("party_invite", two, inv) == ["helper", "text", "click", "close:0", "chat", "chat"]
-    assert [x for x in sent if x.startswith("k:enter")] == ["k:enter"]   # 2 つ目は開いたままなので押さない
+    # 2 つ目: 欄が出ていても Enter で入力先にする。このゲーム (模擬) では Enter で閉じてしまうので、開き直して打つ
+    assert [x for x in sent if x.startswith("k:enter")] == ["k:enter", "k:enter", "k:enter"]
     # 送ると閉じるゲームなら、2 つ目の前にもう一度 Enter で開く。開かなければ打たない
     chat.update(open=False, stay_open=False)
     det.open.add("party_invite")
