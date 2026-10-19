@@ -150,8 +150,18 @@ class Responder:
         self.run((f"{mv};" if mv else "") + f"w:120;bd:{button};w:90;bu:{button}")
         return sx, sy
 
-    def _chat_open(self) -> bool:
-        return any(d.name == self.chat_check and d.present for d in self._detect())
+    def _chat_open(self, tries: int = 1) -> bool:
+        """チャット欄が開いているか (開くまで少しかかるので tries 回まで見直す)。"""
+        d = None
+        for k in range(tries):
+            if k:
+                self.sleep(0.3)
+            d = next((x for x in self._detect() if x.name == self.chat_check), None)
+            if d is not None and d.present:
+                return True
+        if d is not None and tries > 1:
+            self._do(f"チャット欄の見本 {self.chat_check}: 一致度 {d.ncc:.2f} ネット {d.nn:.2f} (開いていないと判定)")
+        return False
 
     def _still(self, name: str) -> bool:
         return any(d.name == name and d.present for d in self._detect())
@@ -315,7 +325,7 @@ class Responder:
                     if not self._chat_open():
                         self.run("k:enter;w:300")
                         self.sleep(0.3)
-                        if not self._chat_open():
+                        if not self._chat_open(tries=4):
                             self._do("Enter を押してもチャット欄が開かないので、文字は打ちません")
                             self.run("k:esc;w:100" if sent_before else "ra")
                             break
