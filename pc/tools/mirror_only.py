@@ -224,7 +224,7 @@ def main() -> None:
                                                  if rcfg.get("chat_capture", "desktop") == "desktop" else None),
                                       blind_first=bool(rcfg.get("chat_blind_first", True)),
                                       activate=(getattr(screen, "activate", None)
-                                                if rcfg.get("background", True) else None),
+                                                if rcfg.get("background", False) else None),
                                       foreground=foreground_window, restore=bring_to_front,
                                       to_screen=screen.to_screen, is_active=getattr(screen, "is_active", None),
                                       keep=rcfg.get("keep", ["hunting_log", "helper_panel"]),
@@ -266,6 +266,10 @@ def main() -> None:
             print(f"[rare] 見張る窓: {', '.join(sorted(rare.names))} (見えたら dataset/screens/rare に画面を保存)")
             for n, a in decline.items():
                 print(f"[rare] {n} が出たら: {how(a)}")
+            if decline:
+                print("[rare] " + ("ゲームが裏にあっても、一時的に手前に出して断ります (background: true)"
+                                   if rcfg.get("background", False) else
+                                   "ゲームが手前にあるときに断ります (裏のときは、手前に戻ったときに断ります)"))
         rec = LiveRecognizer(grab_full, det, ocr if args.recognize else None, period=args.recognize_every,
                              on_result=(lambda r: m.set_lines(overlay_lines(r))) if args.recognize else None,
                              learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None,

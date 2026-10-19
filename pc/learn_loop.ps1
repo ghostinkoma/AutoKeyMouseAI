@@ -8,7 +8,7 @@
 #   powershell -ExecutionPolicy Bypass -File .\learn_loop.ps1
 #   powershell -ExecutionPolicy Bypass -File .\learn_loop.ps1 -TrainEvery 40 -OcrEvery 2 -NoViewer
 #   powershell -ExecutionPolicy Bypass -File .\learn_loop.ps1 -NoDecline   (do not decline party invites)
-# Party invites are declined by default (Cancel + chat), even while the game is in the background.
+# Party invites are declined by default (Cancel + chat "I NO need PT") while the game is in front.
 # Rare windows (party_invite, trade) are saved to dataset\screens\rare when they appear.
 param(
     [double]$Fps = 10,            # frames per second sent to ESP32

@@ -133,7 +133,8 @@ rare_windows:
   chat_blind_first: true                # 見本 (chat_input) と合わなくても 1 つ目のチャットは打つ (2 つ目以降は確かめられたときだけ)
   mirror_fps_during_keys: 2             # 断っている間の液晶への画面送信 (枚/秒)。0 = 止める (キーが一番確実に届く)
   pause_before_keys_s: 0.6              # 画面送信を減らしてからキーを送るまでの秒数
-  background: true                      # ゲームが裏にあっても、一時的に手前に出して断り、終わったら元のウィンドウに戻す
+  background: false                     # false: ゲームが手前にあるときだけ断る (裏のときは手前に戻った時に断る)
+                                        # true : 裏にあっても一時的に手前に出して断り、元のウィンドウとマウスの位置に戻す
   respond:
     party_invite:
       # - require_helper: "on"          # MU Helper が動作中 (■) のときだけ断るなら、この 2 行の # を外す
