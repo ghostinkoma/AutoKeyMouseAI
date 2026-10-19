@@ -12,7 +12,7 @@
                                  ON だったなら OK (勧誘の窓が出ると Helper が止まることがあるので)。分からなければ行わない
   - require_text: [party, join]  窓の中の文字を読み、どれかの語が無ければ以降を行わない
                                  (タイトルが同じ別の窓を取り違えて、断ったりチャットしたりしないように)
-  - chat: "Sorry, I no need PT." Enter → 文字 → Enter でチャットに送る (ASCII だけ。chat_cooldown_s 秒に 1 回まで)
+  - chat: "I NO need PT" Enter → 文字 → Enter でチャットに送る (ASCII だけ。chat_cooldown_s 秒に 1 回まで)
 
 安全のため:
   * ゲームの窓が手前にあるときだけ動く
@@ -33,7 +33,7 @@ DEFAULT_RESPONSES = {
         {"require_text": ["party", "join"]},  # "requests" はトレードの申し込みにもあるので使わない
         {"click": "@cancel"},  # 勧誘の窓は Esc では消えないので、押せなければ以降 (Esc・チャット) は行わない
         {"close_windows": "esc"},
-        {"chat": "Sorry, I no need PT."},
+        {"chat": "I NO need PT"},
         {"chat": "Perdon, estoy cazando solo en este spot. No hago party, gracias!"},
     ],
 }
