@@ -2046,12 +2046,12 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
                   read_text=lambda img: text[0], helper_state=lambda: helper[0])
     inv = Detection("party_invite", "window", True, 0.95, 0.99, (300, 150, 424, 288))
     done = r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)
-    assert done == ["helper", "text", "click", "close:1", "chat", "chat"]
+    # チャット欄の見本 (chat_input) が無いと、1 つ目だけ送る (2 つ目は欄が開いているか分からないので打たない)
+    assert done == ["helper", "text", "click", "close:1", "chat"]
     assert sent[0] == "a:628,429;w:120;bd:L;w:90;bu:L"         # 窓の中の cancel の場所 (+ ウィンドウの位置)
     assert sent[1] == "k:esc;w:150"                            # hunting_log は閉じない、inventory だけ 1 回
     assert sent[2] == "k:enter;w:300" and sent[3] == "t:I NO need PT" and sent[4] == "w:100;k:enter;w:400"
-    assert sent[5] == "k:enter;w:300" and sent[6].startswith("t:Perdon,") and sent[7] == "w:100;k:enter;w:400"
-    assert sent[-1] == "ra"
+    assert sent[5] == "ra" and not any(x.startswith("t:Perdon") for x in sent)
     assert all(chat_text_ok(st["chat"]) is None for st in DEFAULT_RESPONSES["party_invite"] if "chat" in st)
     # 2 分以内にまた勧誘されたら、断るだけでチャットはしない
     det.open.add("party_invite")
@@ -2083,6 +2083,40 @@ def test_responder_cancels_closes_windows_and_chats_once(tmp_path):
         sent.clear()
         assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == [] and sent == ["ra"]
     helper[0] = (True, 0.0)
+    # チャット欄の見本があれば、開いているのを確かめて 2 つとも送る。送った後も開いたままなら Enter は押さない
+    det.objects.append(Obj("chat_input"))
+    chat = {"open": False, "stay_open": True}
+    old_detect = det.detect
+
+    def detect2(img):
+        return old_detect(img) + [Detection("chat_input", "icon", chat["open"], 0.9, 0.9, (10, 700, 300, 20))]
+
+    def run2(script):
+        run(script)
+        if script.startswith("k:enter"):
+            chat["open"] = not chat["open"]
+        elif "k:enter" in script:            # 送信
+            chat["open"] = chat["stay_open"]
+        elif script.startswith("t:") and not chat["open"]:
+            raise AssertionError("チャット欄が閉じているのに打った")
+
+    det.detect = detect2
+    r.run = run2
+    det.open.add("party_invite")
+    sent.clear()
+    t[0] = 5000
+    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == ["helper", "text", "click", "close:0",
+                                                                                 "chat", "chat"]
+    assert [x for x in sent if x.startswith("k:enter")] == ["k:enter;w:300"]   # 2 つ目は開いたままなので押さない
+    # 送ると閉じるゲームなら、2 つ目の前にもう一度 Enter で開く。開かなければ打たない
+    chat.update(open=False, stay_open=False)
+    det.open.add("party_invite")
+    sent.clear()
+    t[0] = 9000
+    assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv)[-2:] == ["chat", "chat"]
+    assert [x for x in sent if x.startswith("k:enter")] == ["k:enter;w:300", "k:enter;w:300"]
+    det.detect = old_detect
+    r.run = run
     # ゲームが手前に無ければ何もしない
     r.is_active = lambda: False
     assert r.respond("party_invite", DEFAULT_RESPONSES["party_invite"], inv) == []

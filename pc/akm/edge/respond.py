@@ -147,6 +147,9 @@ class Responder:
         self.run((f"{mv};" if mv else "") + f"w:120;bd:{button};w:90;bu:{button}")
         return sx, sy
 
+    def _chat_open(self) -> bool:
+        return any(d.name == self.chat_check and d.present for d in self._detect())
+
     def _still(self, name: str) -> bool:
         return any(d.name == name and d.present for d in self._detect())
 
@@ -285,17 +288,29 @@ class Responder:
                 if now - self._last_chat < self.chat_cooldown_s and "chat" not in " ".join(done):
                     self._do(f"チャットは {self.chat_cooldown_s:.0f} 秒に 1 回までなので送りません")
                     break  # 残りのチャットも送らない
-                self.run("k:enter;w:300")
+                sent_before = done.count("chat")
                 if self._has(self.chat_check):
-                    self.sleep(0.2)
-                    if not any(d.name == self.chat_check and d.present for d in self._detect()):
-                        self._do("Enter を押してもチャット欄が開かないので、文字は打ちません")
-                        self.run("ra")
-                        break
+                    # チャット欄が開いているかを画面で確かめる。開いていれば Enter は押さない (押すと閉じてしまう)
+                    if not self._chat_open():
+                        self.run("k:enter;w:300")
+                        self.sleep(0.3)
+                        if not self._chat_open():
+                            self._do("Enter を押してもチャット欄が開かないので、文字は打ちません")
+                            self.run("k:esc;w:100" if sent_before else "ra")
+                            break
+                elif sent_before:
+                    # 送った直後のチャット欄が開いたままか閉じたかは、見本 (chat_input) が無いと分からない。
+                    # 分からないまま打つと文字がショートカットキー (A = スキルツリー など) になるので、2 つ目以降は送らない
+                    self._do(f"チャット「{text}」は送りません (2 つ目以降は、チャット欄の見本 {self.chat_check} を登録すると送れます:"
+                             f" python tools\\edge_objects.py add-screen {self.chat_check} --kind icon)")
+                    break
+                else:
+                    self.run("k:enter;w:300")
                 # 打ち終わるのを待ってから、Enter を別に送る (打っている途中の Enter は効かないことがある)
                 self.run(f"t:{text.replace(';', chr(92) + ';')}")
                 self.sleep(0.3 + 0.03 * len(text))
                 self.run("w:100;k:enter;w:400")
+                self.sleep(0.8)  # 送った後、チャット欄が落ち着くまで待つ
                 self._last_chat = now
                 self._do(f"チャット: {text}")
                 done.append("chat")
