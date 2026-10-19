@@ -128,6 +128,7 @@ class Mirror:
         self._ok_once = False
         self._last_img: np.ndarray | None = None
         self._stop = threading.Event()
+        self.paused = False  # True の間は送らない (ESP32 にキー・マウスを送っている間、負荷を下げる)
         self._thread = None
         if self.enabled:
             self._thread = threading.Thread(target=self._worker, daemon=True)
@@ -330,6 +331,9 @@ class Mirror:
         except Exception as e:
             print(f"[mirror] ESP32 の状態を取得できません: {e}")
         while not self._stop.is_set():
+            if self.paused:
+                time.sleep(0.05)
+                continue
             t0 = time.monotonic()
             if self.grab is not None:
                 try:

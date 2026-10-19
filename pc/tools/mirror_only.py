@@ -197,7 +197,19 @@ def main() -> None:
 
                 # 窓の文字を行ごとに、自分の文字認識 (ゲームの字体) と先生役の OCR で読む
                 read_text = lambda crop: read_dialog(crop, own_read, t_ocr)  # noqa: E731
-                responder = Responder(dev.run, grab_full, lambda: rec.detector, move=dev.s_move, read_text=read_text,
+                def safe_run(script):
+                    # ESP32 が固まったときに 35 秒待たない。失敗したらキー・ボタンを全部離す
+                    try:
+                        return dev.run(script, timeout=8)
+                    except Exception:
+                        try:
+                            dev.stop()
+                            dev.run("ra", timeout=3)
+                        except Exception:
+                            pass
+                        raise
+
+                responder = Responder(safe_run, grab_full, lambda: rec.detector, move=dev.s_move, read_text=read_text,
                                       helper_state=lambda: rec.helper_state(),
                                       save_dir=PC_DIR / "dataset" / "screens" / "rare" / "_text",
                                       cursor=dev.cursor,
@@ -221,6 +233,18 @@ def main() -> None:
             missing = [n for n in set(watch) | set(decline) if n not in known]
             if missing:
                 print(f"[rare] 未登録の窓: {', '.join(missing)} (python tools\\edge_objects.py add-screen 名前 で登録)")
+            if responder is not None:
+                # 断っている間は液晶への画面送信を止める (ESP32 がキー入力と画面の受信で詰まらないように)
+                orig_respond = responder.respond
+
+                def respond_paused(*a, **k):
+                    m.paused = True
+                    try:
+                        return orig_respond(*a, **k)
+                    finally:
+                        m.paused = False
+
+                responder.respond = respond_paused
             rare = RareWatch(watch, PC_DIR / "dataset" / "screens" / "rare", decline, press=press, click=click,
                              is_active=getattr(screen, "is_active", None), confirm=int(rcfg.get("confirm", 2)),
                              responder=responder)

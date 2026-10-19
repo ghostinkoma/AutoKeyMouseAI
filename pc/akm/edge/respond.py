@@ -205,6 +205,7 @@ class Responder:
             return "focused"
         img = self._grab_for_chat()
         ncc, _ = self._chat_score(img)
+        self.last_chat_info = f"カーソルの点滅 {blink} / 欄の見本との一致度 {ncc:.2f}"
         if ncc < 0:
             return None
         return "open" if ncc >= 0.75 else "closed"
@@ -561,14 +562,17 @@ class Responder:
                     else:
                         self._do("チャット: " + {"open": "欄は出ているがフォーカスが無いので、Enter でフォーカスを当てます",
                                                 "closed": "欄が閉じているので、Enter で開きます"}.get(
-                                     state, "フォーカスが分からないので、Enter でフォーカスを当てます"))
+                                     state, "フォーカスが分からないので、Enter でフォーカスを当てます"
+                                     f" ({getattr(self, 'last_chat_info', '')})"))
                         self.run("k:enter")
                         if not self._chat_ready():
                             # 入力欄にフォーカスがあったのを Enter で閉じた場合などは、もう一度押して開き直す
                             self.run("k:enter")
                             if not self._chat_ready():
-                                self._do("Enter を押してもチャットの入力欄にフォーカスが移らない (カーソル | が点滅しない)"
-                                         " ので、文字は打ちません")
+                                st = self.input_state() if self.input_state is not None else {}
+                                self._do("Enter を押してもチャットの入力欄にフォーカスが移らないので、文字は打ちません"
+                                         f" (入力先 {st.get('focus_class') or 'なし'} / カーソル | の点滅"
+                                         f" {({True: 'あり', False: 'なし', None: '確かめられない'})[self._last_blink]})")
                                 self.run("ra")
                                 break
                         self._do("チャットの入力欄にフォーカスがあるのを確かめました"
