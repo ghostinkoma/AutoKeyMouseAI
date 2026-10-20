@@ -5,6 +5,7 @@
           窓の発見:     毎回 (tools/discover_windows.py --register: 貯めた画面から新しい窓を見つけて登録)
           窓・アイコン: 毎回 (tools/edge_objects.py train)
           文字認識:     ocr_every 回に 1 回 (時間がかかるので)。評価用の実画面で前より悪ければ採用しない
+          窓の種類 (ESP32): 毎回 (tools/window_tour.py auto → tools/window_train.py train。前より悪ければ採用しない)
           登録の判定 AI: 毎回 (tools/record_filter.py train。ビューアで人が承認 / 却下した目撃も学ぶ)
   出力: models/*.npz と ESP32 用の firmware/AutoKeyMouse/edge_*_model.h を書き出す
   反映: 動いている認識 (LiveRecognizer) に新しいモデルを差し替える → また蓄積へ
@@ -88,6 +89,7 @@ class LearnCycle:
                 self._record(f"第 {n} 回 窓・アイコン: 出力しました {res[-1][9:] if res else ''}")
             else:
                 self._record(f"第 {n} 回 窓・アイコン: 失敗 ({out.strip().splitlines()[-1] if out.strip() else code})")
+            self._windows(n, py)
             if self.ocr_every and n % self.ocr_every == 0:
                 code2, out2 = self.runner([py, "tools/edge_train.py", "train", "--lines", "20000", "--keep-better"],
                                           self.pc)
@@ -107,6 +109,16 @@ class LearnCycle:
             self.log(f"[learn] 第 {n} 回を反映しました ({time.time() - t0:.0f} 秒)。また画面を貯めます")
         finally:
             self.busy = False
+
+    def _windows(self, n: int, py: str) -> None:
+        """窓の種類の認識 (ESP32 用): 新しい画面から見本を足して学習し直す。見本がまだ無ければ何もしない。"""
+        self.runner([py, "tools/window_tour.py", "auto", "--n", "300"], self.pc)
+        code, out = self.runner([py, "tools/window_train.py", "train", "--keep-better"], self.pc)
+        res = [l for l in out.splitlines() if l.startswith("[result]")]
+        if res:
+            self._record(f"第 {n} 回 {res[-1][9:]}")
+        elif code != 0 and "見本がありません" not in out:
+            self._record(f"第 {n} 回 窓の種類: 失敗 ({out.strip().splitlines()[-1] if out.strip() else code})")
 
     def due(self) -> bool:
         return not self.busy and self.new_frames() >= self.every_frames

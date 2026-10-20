@@ -201,7 +201,11 @@ def cmd_auto(args) -> None:
     wins = {o.name for o in det.objects if o.kind == "window"}
     if not wins:
         print("[auto] 登録された窓がありません (edge_objects.py add-screen ... --kind window)")
-    done = {e.get("orig") for e in load_labels()}
+    entries = load_labels()
+    scanned_file = OUT / "scanned.txt"
+    done = {e.get("orig") for e in entries}
+    if scanned_file.exists():
+        done |= set(scanned_file.read_text(encoding="utf-8").splitlines())
     files = []
     for d in FRAME_DIRS:
         files += list((PC_DIR / "dataset" / d).rglob("*.png"))
@@ -211,8 +215,11 @@ def cmd_auto(args) -> None:
         files = files[:args.n]
     cnt = Counter()
     rng = np.random.default_rng(0)
-    none_left = args.max_none
+    # 窓の無い画面は全部で max_none 枚まで (学習のたびに増え続けないように)
+    none_left = args.max_none - sum(1 for e in entries if e.get("src") == "det" and not e.get("windows"))
+    scanned = []
     for i, f in enumerate(files, 1):
+        scanned.append(str(f))
         img = cv2.imread(str(f)) if f.exists() else None
         if img is None or img.shape[0] < 300:
             continue
@@ -231,6 +238,10 @@ def cmd_auto(args) -> None:
         cnt[tag] += 1
         if i % 200 == 0:
             print(f"[auto] {i}/{len(files)}  {dict(cnt)}")
+    if scanned:
+        OUT.mkdir(parents=True, exist_ok=True)
+        with open(scanned_file, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(scanned) + "\n")
     print(f"[auto] 追加: {dict(cnt) or 'なし'}")
     cmd_list(args)
 

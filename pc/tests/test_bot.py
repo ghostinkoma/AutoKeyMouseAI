@@ -1226,13 +1226,15 @@ def test_learn_cycle_trains_when_enough_new_frames_and_reloads(tmp_path):
     assert c.due()
     c.round()  # 第 1 回: 窓・アイコンだけ
     assert [c[:2] for c in calls] == [["tools/discover_windows.py", "--register"], ["tools/edge_objects.py", "train"],
+                                      ["tools/window_tour.py", "auto"], ["tools/window_train.py", "train"],
                                       ["tools/record_filter.py", "train"]]
+    assert "--keep-better" in calls[3]  # 窓の種類 (ESP32) も前より悪ければ採用しない
     assert reloaded == [1] and not c.due()
     for i in range(3, 6):
         (frames / f"f{i}.png").write_bytes(b"x")
     c.round()  # 第 2 回: 文字認識も (前より悪ければ採用しない)
     assert calls[-2][:2] == ["tools/edge_train.py", "train"] and "--keep-better" in calls[-2]
-    assert len(c.history) == 5 and (tmp_path / "models" / "learn_log.txt").exists()
+    assert len(c.history) == 7 and (tmp_path / "models" / "learn_log.txt").exists()
 
 
 def test_lexicon_fix_and_harvester_only_saves_checked_labels(tmp_path):

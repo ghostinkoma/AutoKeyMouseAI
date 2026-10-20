@@ -28,6 +28,7 @@ from window_tour import OUT, load_labels
 
 MODEL = PC_DIR / "models" / "edge_win.npz"
 SLOTS = PC_DIR / "models" / "edge_win_slots.json"
+SCORE = PC_DIR / "models" / "edge_win_score.txt"  # 前回の評価用の画面での正解率 (--keep-better で使う)
 HEADER = PC_DIR.parent / "firmware" / "AutoKeyMouse" / "edge_win_model.h"
 
 
@@ -111,9 +112,16 @@ def cmd_train(args) -> None:
     q = model.quantize(X[:3000], F[:3000])
     k, _ = q.predict(X, F)
     print(f"[win] 学習した見本での正解率 {(k == Y).mean():.1%}")
+    acc = None
     if te and not args.all:
         print(f"[win] 学習に使っていない画面 {len(te)} 枚で評価:")
         acc = report(q, slots, te, args.thr)
+        prev = float(SCORE.read_text().split()[0]) if SCORE.exists() else None
+        # 窓の種類が増えたときは比べられないので採用する
+        same = SLOTS.exists() and [s.names for s in load_slots(SLOTS)] == [s.names for s in slots]
+        if args.keep_better and prev is not None and same and acc < prev - 0.02:
+            print(f"[result] 窓の種類: 前の方が良いので採用しません (今回 {acc:.1%} < 前回 {prev:.1%})")
+            return
         if acc < 0.9:
             print("[win] 正解率が 90% 未満です。window_tour.py で見本を増やしてから学習し直すのがおすすめ")
         # 評価が済んだら全部で学習し直して書き出す
@@ -131,7 +139,11 @@ def cmd_train(args) -> None:
     save_slots(SLOTS, slots)
     export_header(q, slots, HEADER, thr=args.thr,
                   note=f"窓 {len(labels) - 1} 種 / スロット {len(slots)} / 見本の画面 {len(entries)} 枚")
+    if acc is not None:
+        SCORE.write_text(f"{acc:.4f} {len(te)}\n")
     print(f"[win] 保存: {MODEL.name}, {SLOTS.name}, {HEADER}")
+    print(f"[result] 窓の種類 {len(labels) - 1} 種 / 画面 {len(entries)} 枚"
+          + (f" / 正解率 {acc:.1%} ({len(te)} 枚)" if acc is not None else ""))
     print("[win] ESP32 に入れるときは Arduino IDE で firmware/AutoKeyMouse を書き込み直してください")
 
 
@@ -189,6 +201,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--min-count", type=int, default=1, help="スロットを作るのに要る窓の見本の数")
     ap.add_argument("--all", action="store_true", help="評価用に分けず全部で学習")
+    ap.add_argument("--keep-better", action="store_true", help="前回より正解率が下がったら保存しない")
     args = ap.parse_args()
     {"train": cmd_train, "eval": cmd_eval, "test": cmd_test}[args.cmd](args)
 
