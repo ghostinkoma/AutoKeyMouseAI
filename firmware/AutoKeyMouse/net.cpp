@@ -380,6 +380,49 @@ void handleFrameDone() {
   gServer.send(HAS_TFT ? 400 : 501, "text/plain", "bad frame: " + gFrameErr + "\n");
 }
 
+// POST /winmodel  本文 = 窓の種類の認識のモデル (pc/akm/edge/winmodel.py pack_model)。PC が学習のたびに送ってくる
+uint8_t* gWinBuf = nullptr;
+size_t gWinLen = 0;
+String gWinErr;
+
+void handleWinModelBody() {
+  HTTPRaw& raw = gServer.raw();
+  if (raw.status == RAW_START) {
+    free(gWinBuf);
+    gWinBuf = (uint8_t*)malloc(edge_win::MODEL_MAX);
+    gWinLen = 0;
+    gWinErr = gWinBuf ? "" : "no memory";
+  } else if (raw.status == RAW_WRITE) {
+    if (!gWinErr.isEmpty()) return;
+    if (gWinLen + raw.currentSize > edge_win::MODEL_MAX) {
+      gWinErr = "model too large";
+      return;
+    }
+    memcpy(gWinBuf + gWinLen, raw.buf, raw.currentSize);
+    gWinLen += raw.currentSize;
+  } else if (raw.status == RAW_ABORTED) {
+    gWinErr = "aborted";
+  }
+}
+
+void handleWinModelDone() {
+  String err = gWinErr;
+  if (err.isEmpty() && gWinBuf) {
+    uint8_t* d = (uint8_t*)realloc(gWinBuf, gWinLen ? gWinLen : 1);  // 余った分を返す
+    err = edge_win::setModel(d ? d : gWinBuf, gWinLen);              // 渡したバッファは向こうが持つ
+  } else {
+    free(gWinBuf);
+    if (err.isEmpty()) err = "empty body";
+  }
+  gWinBuf = nullptr;
+  if (err.isEmpty()) {
+    sendText(200, "ok " + edge_win::json());
+  } else {
+    Serial.printf("[HTTP] /winmodel error: %s\n", err.c_str());
+    sendText(400, "bad model: " + err);
+  }
+}
+
 void handleNotFound() { sendText(404, "not found"); }
 
 }  // namespace
@@ -417,6 +460,7 @@ void begin() {
   gServer.on("/settings", handleSettings);
   gServer.on("/wifi", HTTP_POST, handleWifi);
   gServer.on("/frame", HTTP_POST, handleFrameDone, handleFrameBody);
+  gServer.on("/winmodel", HTTP_POST, handleWinModelDone, handleWinModelBody);
   gServer.onNotFound(handleNotFound);
   gServer.begin();
 }

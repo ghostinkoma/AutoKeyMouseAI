@@ -44,6 +44,10 @@ WINDOW_TITLES: dict[str, tuple[list[str], str | None]] = {
     "jewel_mix": (["Jewel Mix", "Jewel Combination"], None),
     "move": (["Move", "Teleport", "Warp"], None),
     "message": (["Message", "Mail", "Letter"], None),
+    "jewel_bank": (["Jewel Bank", "Jewel Storage", "Jewel Box"], None),
+    "gremory_case": (["Gremory Case", "Gremory"], None),
+    "muun": (["Muun", "Muun Inventory"], None),
+    "ranking": (["Ranking", "Rank"], None),
 }
 
 

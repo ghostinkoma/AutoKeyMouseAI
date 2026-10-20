@@ -294,8 +294,21 @@ def main() -> None:
                 rec.world.filt = RecordFilter.load(ok=old.ok, ng=old.ng)
                 rec.world.reload_lists()  # 承認された名前・マップを辞書に入れ直す
 
+        def push_win_model():
+            # 窓の種類の認識 (ESP32): 学習したモデルを Wi-Fi で送る (同じものが入っていれば送らない)
+            from akm.edge.winmodel import push_model
+
+            blob_path = PC_DIR / "models" / "edge_win.bin"
+            if blob_path.exists():
+                push_model(host, blob_path.read_bytes())
+
+        def reload_and_push():
+            reload_models()
+            push_win_model()
+
+        threading.Thread(target=push_win_model, daemon=True).start()
         cycle = LearnCycle(PC_DIR, PC_DIR / "dataset" / "frames", every_frames=args.train_every,
-                           ocr_every=args.ocr_every, reload=reload_models)
+                           ocr_every=args.ocr_every, reload=reload_and_push)
         cycle.start()
         print(f"[learn] 自動学習: 画面を {args.learn_every:.0f} 秒ごとに保存し、新しい画面が {args.train_every} 枚"
               f" (約 {args.learn_every * args.train_every / 60:.0f} 分) たまるたびに 学習 → 出力 → 反映 します"

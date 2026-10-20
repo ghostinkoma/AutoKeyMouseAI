@@ -6,10 +6,12 @@
     python tools\\window_train.py test 画面.png  1 枚の画面を判定 (液晶と同じ大きさにした絵も保存)
     python tools\\window_train.py test screen    今のゲーム画面を判定
 
-見本は tools\\window_tour.py で集める (dataset/windows/)。ESP32 に入れるのは正解率を確かめてから
-(Arduino IDE で firmware/AutoKeyMouse を書き込み直す)。
+見本は tools\\window_tour.py で集める (dataset/windows/。auto なら Windows の OCR でタイトルを読んで自動で)。
+学習したモデルは models/edge_win.bin。学習ループ (mirror_only) が ESP32 に Wi-Fi で送るので、
+ファームウェア (frame-stream-13 以降) を一度書き込めば、学習のたびに書き込み直す必要はない。
 """
 import argparse
+import json
 import sys
 import zlib
 from collections import Counter
@@ -23,11 +25,14 @@ import numpy as np
 from akm.config import PC_DIR
 from akm.edge.mlp import QModel, train
 from akm.edge.winfeat import NONE, half_from_image, load_slots, save_slots
-from akm.edge.winmodel import build, detect, export_header, label_names, slots_from_labels
+from akm.edge.winmodel import (build, detect, export_header, label_names, model_id, pack_model, push_model,
+                               slots_from_labels, window_table)
 from window_tour import OUT, load_labels
 
 MODEL = PC_DIR / "models" / "edge_win.npz"
 SLOTS = PC_DIR / "models" / "edge_win_slots.json"
+BLOB = PC_DIR / "models" / "edge_win.bin"           # ESP32 に Wi-Fi で送るモデル
+TABLE = PC_DIR / "models" / "window_table.json"     # 窓の一覧 (名前・タイトル・場所・見本の数)
 SCORE = PC_DIR / "models" / "edge_win_score.txt"  # 前回の評価用の画面での正解率 (--keep-better で使う)
 HEADER = PC_DIR.parent / "firmware" / "AutoKeyMouse" / "edge_win_model.h"
 
@@ -137,14 +142,25 @@ def cmd_train(args) -> None:
     MODEL.parent.mkdir(parents=True, exist_ok=True)
     q.save(MODEL)
     save_slots(SLOTS, slots)
-    export_header(q, slots, HEADER, thr=args.thr,
-                  note=f"窓 {len(labels) - 1} 種 / スロット {len(slots)} / 見本の画面 {len(entries)} 枚")
+    table = window_table(entries, slots)
+    TABLE.write_text(json.dumps(table, ensure_ascii=False, indent=1), encoding="utf-8")
+    blob = pack_model(q, slots, args.thr)
+    BLOB.write_bytes(blob)
+    if args.header:  # 書き込み時の初期モデル (普段は Wi-Fi で送るので書き換えない。git pull がぶつからないように)
+        export_header(q, slots, HEADER, thr=args.thr, table=table,
+                      note=f"窓 {len(labels) - 1} 種 / スロット {len(slots)} / 見本の画面 {len(entries)} 枚")
+        print(f"[win] ファームウェアに組み込むモデルも書き換えました: {HEADER}")
+    print("[win] 窓の一覧:")
+    for t in table:
+        print(f"    {t['name']:16s} {', '.join(t['titles'])[:30]:30s} {t['slot']:16s} 見本 {t['count']}  {t['src']}")
+    if args.push:
+        push_model(args.push, blob)
     if acc is not None:
         SCORE.write_text(f"{acc:.4f} {len(te)}\n")
-    print(f"[win] 保存: {MODEL.name}, {SLOTS.name}, {HEADER}")
+    print(f"[win] 保存: {MODEL.name}, {BLOB.name} ({len(blob)} バイト, {model_id(blob)}), {TABLE.name}")
     print(f"[result] 窓の種類 {len(labels) - 1} 種 / 画面 {len(entries)} 枚"
           + (f" / 正解率 {acc:.1%} ({len(te)} 枚)" if acc is not None else ""))
-    print("[win] ESP32 に入れるときは Arduino IDE で firmware/AutoKeyMouse を書き込み直してください")
+    print("[win] ESP32 へは学習ループ (mirror_only) が Wi-Fi で送ります (--push IP でも送れる)")
 
 
 def load_model():
@@ -201,6 +217,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--min-count", type=int, default=1, help="スロットを作るのに要る窓の見本の数")
     ap.add_argument("--all", action="store_true", help="評価用に分けず全部で学習")
+    ap.add_argument("--header", action="store_true",
+                    help="firmware/AutoKeyMouse/edge_win_model.h (書き込み時の初期モデル) も書き換える")
+    ap.add_argument("--push", default="", help="学習したモデルを ESP32 (IP) に送る")
     ap.add_argument("--keep-better", action="store_true", help="前回より正解率が下がったら保存しない")
     args = ap.parse_args()
     {"train": cmd_train, "eval": cmd_eval, "test": cmd_test}[args.cmd](args)

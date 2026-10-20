@@ -192,15 +192,57 @@ def _iou(a, b) -> float:
     return iou(a, b)
 
 
+def make_readers(use_teacher: bool = True):
+    """窓のタイトルを読む OCR: 自分の OCR と、先生役 (Windows の OCR)。無ければ None。"""
+    from akm.config import load_config
+
+    ocr = teacher = None
+    try:
+        from akm.edge.ocr import OcrReader
+
+        ocr = OcrReader.load()
+    except FileNotFoundError:
+        pass
+    if use_teacher:
+        try:
+            from akm.maploc import make_ocr
+
+            cfg = load_config("config.yaml") if (PC_DIR / "config.yaml").exists() else {}
+            lcfg = cfg.get("maplog") or {}
+            teacher = make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd"))
+        except Exception:
+            teacher = None
+    return ocr, teacher
+
+
+def label_frame(img, det, wins: set, ocr, teacher) -> tuple[list[dict], bool]:
+    """1 枚の画面の窓。(窓の一覧, 何か窓らしいものがあるか)
+    1. 窓のパネルを探し、タイトルの帯を OCR (Windows) で読んで WINDOW_TITLES と照らす → 名前とパネル全体の枠 (ocr)
+    2. 読めなかった窓は、登録した窓の認識で見つかれば足す (det)"""
+    from akm.edge.windows import find_panels, read_titles
+
+    panels = read_titles(img, find_panels(img), ocr, teacher) if (ocr or teacher) else []
+    windows = [{"name": p.name, "box": [p.x, p.y, p.w, p.h], "src": "ocr", "title": p.title}
+               for p in panels if p.name]
+    have = {w["name"] for w in windows}
+    found = [r for r in det.detect(img) if r.present] if det else []
+    windows += [{"name": r.name, "box": [int(v) for v in r.box], "src": "det"}
+                for r in found if r.name in wins and r.name not in have]
+    others = {r.name for r in found} - {"helper_running", "helper_stopped", "helper_panel"}
+    return windows, bool(panels or others)
+
+
 def cmd_auto(args) -> None:
-    """登録済みの窓の認識で、貯めた画面に窓のラベルを付ける (src=det)。認識が間違えることもあるので、
-    tour の見本と一緒に使う。どの窓も無い画面は「窓の無い画面」として max_none 枚まで。"""
+    """貯めた画面に窓のラベルを付ける。Windows の OCR で窓のタイトルを読む (src=ocr) のが基本で、
+    読めなかった窓は登録済みの窓の認識 (src=det) で補う。窓らしいものが何も無い画面は
+    「窓の無い画面」として全部で max_none 枚まで。"""
     from akm.edge.objects import ObjectDetector
 
     det = ObjectDetector.load()
     wins = {o.name for o in det.objects if o.kind == "window"}
-    if not wins:
-        print("[auto] 登録された窓がありません (edge_objects.py add-screen ... --kind window)")
+    ocr, teacher = make_readers(not args.no_teacher)
+    if teacher is None:
+        print("[auto] Windows の OCR が使えません (自分の OCR と登録した窓の認識だけで付けます)")
     entries = load_labels()
     scanned_file = OUT / "scanned.txt"
     done = {e.get("orig") for e in entries}
@@ -216,27 +258,27 @@ def cmd_auto(args) -> None:
     cnt = Counter()
     rng = np.random.default_rng(0)
     # 窓の無い画面は全部で max_none 枚まで (学習のたびに増え続けないように)
-    none_left = args.max_none - sum(1 for e in entries if e.get("src") == "det" and not e.get("windows"))
+    none_left = args.max_none - sum(1 for e in entries if e.get("src") != "tour" and not e.get("windows"))
     scanned = []
     for i, f in enumerate(files, 1):
         scanned.append(str(f))
         img = cv2.imread(str(f)) if f.exists() else None
         if img is None or img.shape[0] < 300:
             continue
-        found = [r for r in det.detect(img) if r.present]
-        names = {r.name for r in found}
-        windows = [{"name": r.name, "box": [int(v) for v in r.box]} for r in found if r.name in wins]
+        windows, something = label_frame(img, det, wins, ocr, teacher)
         if not windows:
-            # どの窓・アイコンも出ていない画面だけ「窓の無い画面」にする (見逃しの窓が混ざりにくいように)
-            if names - {"helper_running", "helper_stopped", "helper_panel"} or none_left <= 0 or rng.random() > 0.3:
+            # 窓らしいものが何も無い画面だけ「窓の無い画面」にする (読めない窓が混ざらないように)
+            if something or none_left <= 0 or rng.random() > 0.3:
                 continue
             none_left -= 1
         H, W = img.shape[:2]
         tag = windows[0]["name"] if windows else "none"
-        append_label({"file": save_frame(img, tag, "auto"), "w": W, "h": H, "windows": windows, "src": "det",
+        src = "ocr" if any(w["src"] == "ocr" for w in windows) else "det"
+        append_label({"file": save_frame(img, tag, "auto"), "w": W, "h": H, "windows": windows, "src": src,
                       "orig": str(f)})
-        cnt[tag] += 1
-        if i % 200 == 0:
+        for w in windows or [{"name": "none", "src": src}]:
+            cnt[f"{w['name']}({w['src']})"] += 1
+        if i % 100 == 0:
             print(f"[auto] {i}/{len(files)}  {dict(cnt)}")
     if scanned:
         OUT.mkdir(parents=True, exist_ok=True)
@@ -252,19 +294,20 @@ def cmd_list(args) -> None:
         ws = e.get("windows", [])
         for w in ws or [{"name": "none"}]:
             cnt[w["name"]] += 1
-            src[(w["name"], e.get("src", "?"))] += 1
+            src[(w["name"], w.get("src", e.get("src", "?")))] += 1
     if not cnt:
         print("見本がありません (python tools\\window_tour.py で集める)")
         return
-    print("窓の見本の数 (tour = 手で撮った / det = 認識で見つけた):")
+    print("窓の見本の数 (ocr = Windows の OCR でタイトルを読んだ / tour = 手で撮った / det = 登録した窓の認識):")
     for n, c in cnt.most_common():
-        print(f"  {n:16s} {c:5d}  (tour {src[(n, 'tour')]}, det {src[(n, 'det')]})")
+        print(f"  {n:16s} {c:5d}  (ocr {src[(n, 'ocr')]}, tour {src[(n, 'tour')]}, det {src[(n, 'det')]})")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", nargs="?", default="tour", choices=["tour", "auto", "list"])
     ap.add_argument("--n", type=int, default=0, help="auto: 新しい画面から何枚調べるか (0 = 全部)")
+    ap.add_argument("--no-teacher", action="store_true", help="auto: Windows の OCR を使わない")
     ap.add_argument("--max-none", type=int, default=400, help="auto: 窓の無い画面を何枚まで加えるか")
     args = ap.parse_args()
     {"tour": cmd_tour, "auto": cmd_auto, "list": cmd_list}[args.cmd](args)

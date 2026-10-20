@@ -95,4 +95,116 @@ inline void slotFeatures(const uint8_t* buf, int x, int y, int w, int h, uint8_t
   feats[2] = tex / (float)(N * (N - 1)) / 16.f;
 }
 
+// ---- モデル (PC の pc/akm/edge/winmodel.py pack_model と同じ形式。little endian) ----
+//   "AKW1" u8 版=1, u8 K, u16 H, u8 NSLOT, 3 バイト空き, f32 S1 SH S2 THR,
+//   i8 W1Q[256*H], f32 W1F[3*H], f32 B1[H], i8 W2Q[H*K], f32 B2[K],
+//   スロット NSLOT x {u8 x y w h, u32 mask}, 名前 K x 24 バイト, u32 CRC32 (それより前の全部)
+constexpr int NAME_LEN = 24, MAX_H = 128, MAX_K = 32, MAX_SLOT = 32;
+
+struct SlotDef {
+  uint8_t x, y, w, h;
+  uint32_t mask;  // そこに開く窓 (名前の番号のビット)
+};
+
+struct Model {
+  const uint8_t* data = nullptr;  // 受け取ったバイト列 (持ち主は呼び出し側。モデルを使う間は消さない)
+  int H = 0, K = 0, nslot = 0;
+  float S1 = 0, SH = 0, S2 = 0, thr = 0.6f;
+  const int8_t* W1Q = nullptr;
+  const uint8_t *W1F = nullptr, *B1 = nullptr, *B2 = nullptr;  // float (境界がそろっていないので memcpy で読む)
+  const int8_t* W2Q = nullptr;
+  SlotDef slots[MAX_SLOT];
+  const char* names = nullptr;  // K x NAME_LEN
+  uint32_t id = 0;              // CRC32
+  bool ok() const { return data && K > 0 && nslot > 0; }
+  const char* name(int k) const { return names + k * NAME_LEN; }
+};
+
+inline uint32_t crc32(const uint8_t* p, size_t n) {
+  uint32_t c = 0xFFFFFFFFu;
+  for (size_t i = 0; i < n; i++) {
+    c ^= p[i];
+    for (int b = 0; b < 8; b++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1)));
+  }
+  return ~c;
+}
+
+inline float rdf(const uint8_t* p, int i) {
+  float v;
+  memcpy(&v, p + 4 * i, 4);
+  return v;
+}
+
+// 壊れていたら false (m は変えない)
+inline bool parseModel(const uint8_t* d, size_t len, Model& out) {
+  if (len < 32 + 4 || memcmp(d, "AKW1", 4) != 0 || d[4] != 1) return false;
+  uint32_t crc;
+  memcpy(&crc, d + len - 4, 4);
+  if (crc32(d, len - 4) != crc) return false;
+  Model m;
+  m.data = d;
+  m.K = d[5];
+  m.H = d[6] | d[7] << 8;
+  m.nslot = d[8];
+  if (m.K < 1 || m.K > MAX_K || m.H < 1 || m.H > MAX_H || m.nslot > MAX_SLOT) return false;
+  m.S1 = rdf(d + 12, 0), m.SH = rdf(d + 12, 1), m.S2 = rdf(d + 12, 2), m.thr = rdf(d + 12, 3);
+  size_t o = 28;
+  size_t need = o + 256 * m.H + 4 * 3 * m.H + 4 * m.H + m.H * m.K + 4 * m.K + 8 * m.nslot + NAME_LEN * m.K + 4;
+  if (need != len) return false;
+  m.W1Q = (const int8_t*)(d + o), o += 256 * m.H;
+  m.W1F = d + o, o += 4 * 3 * m.H;
+  m.B1 = d + o, o += 4 * m.H;
+  m.W2Q = (const int8_t*)(d + o), o += m.H * m.K;
+  m.B2 = d + o, o += 4 * m.K;
+  for (int i = 0; i < m.nslot; i++, o += 8) {
+    SlotDef& s = m.slots[i];
+    s.x = d[o], s.y = d[o + 1], s.w = d[o + 2], s.h = d[o + 3];
+    memcpy(&s.mask, d + o + 4, 4);
+    if (s.w == 0 || s.h == 0 || s.x + s.w > GW || s.y + s.h > GH) return false;
+  }
+  m.names = (const char*)(d + o);
+  for (int k = 0; k < m.K; k++)
+    if (m.names[k * NAME_LEN + NAME_LEN - 1] != 0) return false;
+  m.id = crc;
+  out = m;
+  return true;
+}
+
+// edge_nn::classify と同じ計算 (モデルを後から差し替えられる版)。PC の QModel.logits と同じ答え
+inline int classify(const Model& M, const uint8_t bits[32], const float feats[3], float* conf) {
+  int32_t acc[MAX_H] = {0};
+  for (int byte = 0; byte < 32; byte++) {
+    uint8_t v = bits[byte];
+    while (v) {
+      int b = __builtin_ctz(v);
+      v &= v - 1;
+      const int8_t* w = M.W1Q + (byte * 8 + b) * M.H;
+      for (int j = 0; j < M.H; j++) acc[j] += w[j];
+    }
+  }
+  auto clip = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
+  float f[3] = {clip(feats[0], 0.f, 2.f) - 1.f, clip(feats[1], -1.f, 1.f), clip(feats[2], 0.f, 3.f) / 1.5f - 1.f};
+  uint8_t hq[MAX_H];
+  for (int j = 0; j < M.H; j++) {
+    float h = (float)acc[j] * M.S1 + f[0] * rdf(M.W1F, j) + f[1] * rdf(M.W1F, M.H + j) +
+              f[2] * rdf(M.W1F, 2 * M.H + j) + rdf(M.B1, j);
+    float q = floorf((h > 0 ? h : 0) / M.SH + 0.5f);
+    hq[j] = q > 255 ? 255 : (uint8_t)q;
+  }
+  int best = 0;
+  float bestV = -1e30f, logits[MAX_K];
+  for (int k = 0; k < M.K; k++) {
+    int32_t a = 0;
+    for (int j = 0; j < M.H; j++) a += (int32_t)hq[j] * M.W2Q[j * M.K + k];
+    logits[k] = (float)a * (M.S2 * M.SH) + rdf(M.B2, k);
+    if (logits[k] > bestV) bestV = logits[k], best = k;
+  }
+  if (conf) {
+    float s = 0;
+    for (int k = 0; k < M.K; k++) s += expf(logits[k] - bestV);
+    *conf = 1.f / s;
+  }
+  return best;
+}
+
 }  // namespace edge_win

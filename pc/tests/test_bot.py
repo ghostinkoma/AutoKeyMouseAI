@@ -2687,7 +2687,7 @@ def test_window_recognition_learns_and_matches_esp32(tmp_path):
 
     from akm.edge.mlp import train
     from akm.edge.winfeat import buffer_of, display565, half_from_image, half_of, slot_features
-    from akm.edge.winmodel import build, detect, export_header, label_names, slots_from_labels
+    from akm.edge.winmodel import build, detect, label_names, model_id, pack_model, slots_from_labels
 
     entries, imgs = _win_samples()
     slots = slots_from_labels(entries)
@@ -2703,19 +2703,69 @@ def test_window_recognition_learns_and_matches_esp32(tmp_path):
     gxx = shutil.which("g++")
     if not gxx:
         return
-    export_header(q, slots, tmp_path / "edge_win_model.h")
+    blob = pack_model(q, slots)
+    (tmp_path / "win.bin").write_bytes(blob)
     exe = tmp_path / "edge_win_test"
     fw = PC.parent / "firmware" / "AutoKeyMouse"
-    subprocess.run([gxx, "-std=c++17", "-O1", f"-I{tmp_path}", f"-I{fw}", "-o", str(exe),
-                    str(PC / "tests" / "edge_win_test.cpp")], check=True)
+    subprocess.run([gxx, "-std=c++17", "-O1", f"-I{fw}", "-o", str(exe), str(PC / "tests" / "edge_win_test.cpp")],
+                   check=True)
+    bad = bytearray(blob)
+    bad[100] ^= 1  # 1 ビット壊れたモデルは使わない (CRC)
+    (tmp_path / "bad.bin").write_bytes(bytes(bad))
+    r = subprocess.run([str(exe), str(tmp_path / "bad.bin")], input=b"", capture_output=True)
+    assert r.returncode == 2
     for e in te[:10]:
         p = display565(imgs[e["file"]])
-        out = subprocess.run([str(exe)], input=p.astype("<u2").tobytes(), capture_output=True, check=True)
+        out = subprocess.run([str(exe), str(tmp_path / "win.bin")], input=p.astype("<u2").tobytes(),
+                             capture_output=True, check=True)
+        head, *lines = out.stdout.decode().splitlines()
+        assert head.split()[1] == model_id(blob) and f"K {len(labels)}" in head
         half = half_of(buffer_of(p))
-        for line, s in zip(out.stdout.decode().splitlines(), slots):
+        assert len(lines) == len(slots)
+        for line, s in zip(lines, slots):
             k, conf, hexbits, *fs = line.split()
             bits, feats = slot_features(half, s)
             assert hexbits == np.packbits(bits, bitorder="little").tobytes().hex()  # 特徴が ESP32 と同じ
             assert np.allclose(np.array(fs, float), feats, atol=1e-4)
             pk, pp = q.predict(bits[None], feats[None])
             assert int(k) == int(pk[0]) and abs(float(conf) - float(pp[0])) < 1e-3  # 答えも同じ
+
+
+def test_window_auto_labels_from_ocr_titles_and_pushes_model(monkeypatch):
+    sys.path.insert(0, str(PC / "tools"))
+    from window_tour import label_frame
+
+    from akm.edge.winmodel import model_id, push_model
+
+    # 明るい地面に、枠のある暗いパネル (窓) が 1 つ。タイトルは Windows の OCR (ここでは偽物) が読む
+    img = np.full((768, 1366, 3), 150, np.uint8)
+    cv2.rectangle(img, (1000, 80), (1360, 640), (25, 20, 15), -1)
+    cv2.rectangle(img, (1000, 80), (1360, 640), (200, 200, 200), 3)
+    windows, something = label_frame(img, None, set(), None, lambda band: "Inventory")
+    assert something and [w["name"] for w in windows] == ["inventory"] and windows[0]["src"] == "ocr"
+    x, y, w, h = windows[0]["box"]
+    assert abs(x - 1000) <= 4 and abs(y - 80) <= 4 and abs(w - 360) <= 8
+    empty, something = label_frame(np.full((768, 1366, 3), 150, np.uint8), None, set(), None, lambda b: "")
+    assert empty == [] and not something  # 窓の無い画面
+
+    blob = b"AKW1model" + b"\x01\x02\x03\x04"
+    posted = []
+
+    class R:
+        def __init__(self, data, code=200):
+            self.data, self.status_code, self.text = data, code, "ok"
+
+        def json(self):
+            return self.data
+
+    status = {"win": {"id": "", "on": False}}
+    import requests
+
+    monkeypatch.setattr(requests, "get", lambda url, timeout: R(status))
+    monkeypatch.setattr(requests, "post", lambda url, data, timeout, headers: posted.append((url, data)) or R({}))
+    assert push_model("192.168.1.43", blob, log=lambda *a: None)
+    assert posted == [("http://192.168.1.43/winmodel", blob)]
+    status["win"]["id"] = model_id(blob)  # 同じモデルが入っていれば送らない
+    assert push_model("192.168.1.43", blob, log=lambda *a: None) and len(posted) == 1
+    status.pop("win")  # 古いファームウェア
+    assert not push_model("192.168.1.43", blob, log=lambda *a: None)
