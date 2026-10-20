@@ -27,7 +27,7 @@ details summary{cursor:pointer;color:var(--mute)}code{font-size:12px}
 <h1>AutoKeyMouse</h1>
 <div class="card st">
  <div>BLE<b id="ble">-</b></div><div>Wi-Fi (STA)<b id="wifi">-</b></div>
- <div>実行中<b id="cur">-</b></div><div>前回の結果<b id="last">-</b></div>
+ <div>開いている窓<b id="win">-</b></div><div>実行中<b id="cur">-</b></div><div>前回の結果<b id="last">-</b></div>
 </div>
 <div class="card"><h2>マクロ</h2>
  <div class="row"><label><input type="checkbox" id="loop" style="width:auto"> 停止するまで繰り返す</label>
@@ -71,7 +71,8 @@ let first=true;
 async function poll(){try{const s=await (await fetch('/status')).json();
  $('ble').textContent=s.ble?'接続済み':(s.blePeers>0?'接続中 (ペアリング未完了)':'未接続');$('ble').className=s.ble?'ok':'ng';
  $('wifi').textContent=s.wifi?s.ssid+' / '+s.ip:'未接続 (AP '+s.apIp+')';$('wifi').className=s.wifi?'ok':'ng';
- $('cur').textContent=s.busy?s.current:'待機中';$('last').textContent=s.last;
+ $('cur').textContent=s.busy?s.current:'待機中';
+ if(s.win)$('win').textContent=!s.win.on?'(モデル無し)':(s.win.windows.map(w=>w.name+' '+w.p.toFixed(2)).join(', ')||'なし');$('last').textContent=s.last;
  if(first){$('delay').value=s.delay;$('layout').value=s.layout;$('ssid').value=s.ssid;first=false}
 }catch(e){$('ble').textContent='?'}}
 load();poll();setInterval(poll,1000);

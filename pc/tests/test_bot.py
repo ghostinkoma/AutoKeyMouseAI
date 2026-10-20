@@ -2619,3 +2619,101 @@ def test_mirror_watchdog_reconnects_when_stalled():
     m.watchdog(stall_s=0)          # 送れていない → つなぎ直す
     assert sock.closed and m._sock is None and keys
     m._stop.set()
+
+
+# ------------------------------------------------------------------ 窓の種類の認識 (ESP32) --
+def _win_samples(n=120, seed=3):
+    """合成の画面: 背景はいろいろ、窓は決まった場所に (中身は毎回違う)。"""
+    rng = np.random.default_rng(seed)
+    W, H = 1366, 768
+    types = {"inventory": (1000, 80, 360, 560), "character": (0, 80, 330, 560), "party_invite": (483, 300, 400, 140)}
+
+    def draw(img, name):
+        x, y, w, h = types[name]
+        cv2.rectangle(img, (x, y), (x + w, y + h), (25, 20, 15), -1)
+        cv2.rectangle(img, (x, y), (x + w, y + h), (120, 140, 160), 3)
+        cv2.rectangle(img, (x, y), (x + w, y + 30), (60, 50, 40), -1)
+        if name == "inventory":
+            for i in range(8):
+                for j in range(8):
+                    if rng.random() < 0.5:
+                        c = tuple(int(v) for v in rng.integers(50, 255, 3))
+                        cv2.rectangle(img, (x + 20 + j * 40, y + 200 + i * 40), (x + 55 + j * 40, y + 235 + i * 40), c, -1)
+        elif name == "character":
+            for i in range(10):
+                cv2.putText(img, "STR %d" % rng.integers(1, 999), (x + 20, y + 80 + i * 40), 0, 0.7, (200, 200, 200), 1)
+        else:
+            cv2.putText(img, "Someone requests party", (x + 20, y + 60), 0, 0.7, (255, 255, 255), 1)
+            cv2.rectangle(img, (x + 80, y + 95), (x + 160, y + 125), (80, 80, 200), -1)
+            cv2.rectangle(img, (x + 240, y + 95), (x + 320, y + 125), (80, 80, 200), -1)
+
+    entries, imgs = [], {}
+    for i in range(n):
+        img = np.zeros((H, W, 3), np.uint8)
+        img[:] = rng.integers(40, 160, 3)
+        for _ in range(40):
+            c = tuple(int(v) for v in rng.integers(0, 255, 3))
+            cv2.circle(img, (int(rng.integers(0, W)), int(rng.integers(0, H))), int(rng.integers(5, 60)), c, -1)
+        img = cv2.GaussianBlur(img, (0, 0), 3)
+        present = [t for t in types if rng.random() < 0.3]
+        for t in present:
+            draw(img, t)
+        imgs[f"f{i}.png"] = img
+        entries.append({"file": f"f{i}.png", "w": W, "h": H, "src": "tour",
+                        "windows": [{"name": t, "box": list(types[t])} for t in present]})
+    return entries, imgs
+
+
+def test_window_features_match_esp32_buffer_math():
+    from akm.edge.winfeat import buffer_of, box_to_slot, display565, half_of, slot_features
+
+    img = np.random.default_rng(0).integers(0, 256, (768, 1366, 3)).astype(np.uint8)
+    p = display565(img)
+    assert p.shape == (135, 240)
+    half = half_of(buffer_of(p))
+    assert half.shape == (68, 120)
+    assert half[67, 5] == buffer_of(p)[134, 5]  # 最後の組は行 134 を 2 回
+    s = box_to_slot((1000, 80, 360, 560), 1366, 768)
+    assert 0 <= s[0] and s[0] + s[2] <= 120 and s[1] + s[3] <= 68
+    bits, feats = slot_features(half, s)
+    assert bits.shape == (256,) and set(np.unique(bits)) <= {0, 1} and feats.shape == (3,)
+
+
+def test_window_recognition_learns_and_matches_esp32(tmp_path):
+    import shutil
+    import subprocess
+
+    from akm.edge.mlp import train
+    from akm.edge.winfeat import buffer_of, display565, half_from_image, half_of, slot_features
+    from akm.edge.winmodel import build, detect, export_header, label_names, slots_from_labels
+
+    entries, imgs = _win_samples()
+    slots = slots_from_labels(entries)
+    assert sorted(n for s in slots for n in s.names) == ["character", "inventory", "party_invite"]
+    tr, te = entries[:90], entries[90:]
+    X, F, Y, _, _ = build(tr, slots, lambda e: imgs[e["file"]], log=lambda s: None)
+    labels = label_names(slots)
+    q = train(X, F, Y, labels, hidden=32, epochs=30, log=lambda s: None).quantize(X[:2000], F[:2000])
+    ok = sum({w["name"] for w in e["windows"]} == {n for n, _, _ in detect(q, slots, half_from_image(imgs[e["file"]]))}
+             for e in te)
+    assert ok >= 0.9 * len(te)  # 学習に使っていない画面で 9 割以上
+
+    gxx = shutil.which("g++")
+    if not gxx:
+        return
+    export_header(q, slots, tmp_path / "edge_win_model.h")
+    exe = tmp_path / "edge_win_test"
+    fw = PC.parent / "firmware" / "AutoKeyMouse"
+    subprocess.run([gxx, "-std=c++17", "-O1", f"-I{tmp_path}", f"-I{fw}", "-o", str(exe),
+                    str(PC / "tests" / "edge_win_test.cpp")], check=True)
+    for e in te[:10]:
+        p = display565(imgs[e["file"]])
+        out = subprocess.run([str(exe)], input=p.astype("<u2").tobytes(), capture_output=True, check=True)
+        half = half_of(buffer_of(p))
+        for line, s in zip(out.stdout.decode().splitlines(), slots):
+            k, conf, hexbits, *fs = line.split()
+            bits, feats = slot_features(half, s)
+            assert hexbits == np.packbits(bits, bitorder="little").tobytes().hex()  # 特徴が ESP32 と同じ
+            assert np.allclose(np.array(fs, float), feats, atol=1e-4)
+            pk, pp = q.predict(bits[None], feats[None])
+            assert int(k) == int(pk[0]) and abs(float(conf) - float(pp[0])) < 1e-3  # 答えも同じ

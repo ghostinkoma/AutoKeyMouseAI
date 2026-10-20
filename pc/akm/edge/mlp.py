@@ -52,6 +52,13 @@ class Model:
                       self.b2.astype(np.float32), self.labels)
 
 
+def _cfloat(v, digits: int = 7) -> str:
+    t = f"{float(v):.{digits}g}"
+    if not any(c in t for c in ".en"):
+        t += ".0"
+    return t + "f"
+
+
 @dataclass
 class QModel:
     w1q: np.ndarray   # (256, H) int8
@@ -87,22 +94,24 @@ class QModel:
         return cls(d["w1q"], float(d["s1"]), d["w1f"], d["b1"], float(d["sh"]), d["w2q"], float(d["s2"]), d["b2"],
                    [str(x) for x in d["labels"]])
 
-    def export_c(self, path, name: str = "edge_ocr", note: str = "") -> None:
-        """ESP32 用の C ヘッダー (重みは const なのでフラッシュに置かれる)。"""
+    def export_c(self, path, name: str = "edge_ocr", note: str = "", extra: str = "") -> None:
+        """ESP32 用の C ヘッダー (重みは const なのでフラッシュに置かれる)。extra は namespace の最後に足す C のコード。"""
         H, K = self.w2q.shape
 
         def arr(a, fmt):
+            if fmt.endswith("f"):  # float: 0 や 1 を "0f" にしない (C では 0.0f / 1.0f)
+                return ",".join(_cfloat(v) for v in np.asarray(a).ravel())
             return ",".join(fmt % v for v in np.asarray(a).ravel())
 
         labels = "".join(l if len(l) == 1 else "?" for l in self.labels)
         esc = labels.replace("\\", "\\\\").replace('"', '\\"')
-        txt = f"""// 自動生成: pc/tools/edge_train.py / edge_objects.py ({note})。手で編集しない
+        txt = f"""// 自動生成: pc/tools/edge_train.py / edge_objects.py / window_train.py ({note})。手で編集しない
 // 推論は edge_nn.h
 #pragma once
 #include <stdint.h>
 namespace {name} {{
 constexpr int NB = {NB}, NF = 3, H = {H}, K = {K};
-constexpr float S1 = {self.s1!r}f, SH = {self.sh!r}f, S2 = {self.s2!r}f;
+constexpr float S1 = {_cfloat(self.s1, 17)}, SH = {_cfloat(self.sh, 17)}, S2 = {_cfloat(self.s2, 17)};
 static const char LABELS[] = "{esc}";  // K 文字。最後の '?' は「文字ではない」
 static const int8_t W1Q[NB * H] = {{{arr(self.w1q, '%d')}}};
 static const float W1F[NF * H] = {{{arr(self.w1f, '%.7gf')}}};
@@ -119,7 +128,7 @@ struct Model {{
   static constexpr const int8_t* W2Q = {name}::W2Q;
   static constexpr const float* B2 = {name}::B2;
 }};
-}}  // namespace {name}
+{extra}}}  // namespace {name}
 """
         with open(path, "w", encoding="utf-8") as f:
             f.write(txt)

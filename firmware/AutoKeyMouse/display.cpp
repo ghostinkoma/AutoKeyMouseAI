@@ -11,6 +11,7 @@
 #include "akm_tjpgd.h"
 #include "bc_decode.h"
 #include "bad16.h"
+#include "edge_win.h"
 #include <esp_heap_caps.h>
 
 #include "ble_hid.h"
@@ -147,7 +148,9 @@ int jpegOut(JDEC* jd, void* bitmap, JRECT* r) {
   // RGB565 (ホストのバイト順) のブロックが来るのでそのまま液晶へ
   if (r->left >= FRAME_W || r->top >= FRAME_H) return 1;
   uint32_t t0 = micros();
-  gTft.drawRGBBitmap(r->left, r->top, (uint16_t*)bitmap, r->right - r->left + 1, r->bottom - r->top + 1);
+  int bw = r->right - r->left + 1, bh = r->bottom - r->top + 1;
+  edge_win::feedBlock(r->left, r->top, bw, bh, (const uint16_t*)bitmap, bw);  // 窓の認識にも同じ画素を
+  gTft.drawRGBBitmap(r->left, r->top, (uint16_t*)bitmap, bw, bh);
   gDrawUsFrame += micros() - t0;
   return 1;
 }
@@ -179,6 +182,7 @@ bool drawRaw(const uint8_t* data, size_t len) {
   for (int y = 0; y < FRAME_H; ++y) {
     const uint8_t* p = data + (size_t)y * FRAME_W * 2;
     for (int x = 0; x < FRAME_W; ++x) row[x] = (uint16_t)(p[2 * x] << 8 | p[2 * x + 1]);
+    edge_win::feedBlock(0, y, FRAME_W, 1, row, FRAME_W);
     gTft.writePixels(row, FRAME_W);
   }
   gTft.endWrite();
@@ -219,11 +223,13 @@ struct TftSink {
   uint32_t drawUs = 0;
   void fill(int x, int y, int h, uint16_t c) {
     uint32_t d0 = micros();
+    edge_win::feedFill(x, y, 8, h, c);
     gTft.writeFillRect(x, y, 8, h, c);
     drawUs += micros() - d0;
   }
   void block(int x, int y, int h, const uint16_t* px) {
     uint32_t d0 = micros();
+    edge_win::feedBlock(x, y, 8, h, px, 8);
     gTft.setAddrWindow(x, y, 8, h);
     gTft.writePixels(const_cast<uint16_t*>(px), 8 * h);
     drawUs += micros() - d0;
@@ -336,6 +342,7 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
     gTft.startWrite();
     int n = bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) {
       uint32_t d0 = micros();
+      edge_win::feedBlock(bx * 8, by * 8, 8, rows, px, 8);  // 液晶に送る前に (送ると並びが変わることがある)
       gTft.setAddrWindow(bx * 8, by * 8, 8, rows);
       gTft.writePixels(px, 8 * rows);
       drawUs += micros() - d0;
@@ -382,7 +389,10 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
       uint32_t d0 = micros();
       gTft.startWrite();
       gTft.setAddrWindow(0, y0, FRAME_W, y1 - y0 + 1);
-      bad16::compose(gB16, y0, y1, [](int, uint16_t* row) { gTft.writePixels(row, FRAME_W); });
+      bad16::compose(gB16, y0, y1, [](int y, uint16_t* row) {
+        edge_win::feedBlock(0, y, FRAME_W, 1, row, FRAME_W);
+        gTft.writePixels(row, FRAME_W);
+      });
       gTft.endWrite();
       drawUs = micros() - d0;
     }

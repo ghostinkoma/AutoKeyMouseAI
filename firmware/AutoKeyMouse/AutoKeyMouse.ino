@@ -17,6 +17,7 @@
 #include "config.h"
 #include <esp_heap_caps.h>
 #include "display.h"
+#include "edge_win.h"
 #include "frame_stream.h"
 #include "macro.h"
 #include "net.h"
@@ -173,6 +174,7 @@ void printHelp() {
   Serial.println("  wifi              set up Wi-Fi interactively (SSID / password)");
   Serial.println("  wifi clear        forget Wi-Fi settings (SoftAP only)");
   Serial.println("  status            show BLE / Wi-Fi / macro state");
+  Serial.println("  win               show the game windows recognized on the mirrored screen");
   Serial.println("  run <script>      run a macro script (e.g. run t:hello;k:enter)");
   Serial.println("  macro <id> [rep]  run macro slot 1-10 (rep 0 = loop until stop)");
   Serial.println("  stop              stop the running macro");
@@ -230,6 +232,8 @@ void handleLine(String line) {
                   macro::lastResult().c_str());
     Serial.printf("   %s heapMin=%u heapBlock=%u\n", display::frameStatsLine().c_str(), (unsigned)ESP.getMinFreeHeap(),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  } else if (line == "win") {
+    Serial.println("OK windows: " + edge_win::line() + " " + edge_win::json());
   } else if (line == "wifi") {
     wifiWizard();
   } else if (line == "wifi clear") {
@@ -316,6 +320,7 @@ void setup() {
   led(0, 0, 255);
 
   display::begin();
+  edge_win::begin();
   frame_stream::begin();
   macro::begin();
   hid::begin(DEVICE_NAME, BLE_MANUFACTURER);
@@ -331,6 +336,7 @@ void loop() {
   net::loop();
   hid::loop();
   display::loop();
+  edge_win::loop();
   updateLed();
   delay(1);
 }

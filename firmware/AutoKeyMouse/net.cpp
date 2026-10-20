@@ -10,6 +10,7 @@
 #include "ble_hid.h"
 #include "config.h"
 #include "display.h"
+#include "edge_win.h"
 #include "macro.h"
 #include "web_ui.h"
 
@@ -243,6 +244,7 @@ void handleStatus() {
   j += ",\"heapBlock\":" + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   j += ",\"cpuMHz\":" + String(getCpuFrequencyMhz());
   j += ",\"mirror\":" + display::frameStatsJson();
+  j += ",\"win\":" + edge_win::json();
   j += "}";
   sendJson(j);
 }
