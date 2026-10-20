@@ -8,7 +8,7 @@
 
 見本は tools\\window_tour.py で集める (dataset/windows/。auto なら Windows の OCR でタイトルを読んで自動で)。
 学習したモデルは models/edge_win.bin。学習ループ (mirror_only) が ESP32 に Wi-Fi で送るので、
-ファームウェア (frame-stream-13 以降) を一度書き込めば、学習のたびに書き込み直す必要はない。
+ファームウェア (frame-stream-14 以降) を一度書き込めば、学習のたびに書き込み直す必要はない。
 """
 import argparse
 import json

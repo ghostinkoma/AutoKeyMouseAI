@@ -75,7 +75,7 @@ def push_model(host: str, blob: bytes, timeout: float = 8.0, log=print) -> bool:
         return False
     win = st.get("win")
     if win is None or "id" not in win:
-        log("[win] ESP32 のファームウェアが古く、窓の認識がありません (frame-stream-13 以降を書き込んでください)")
+        log("[win] ESP32 のファームウェアが古く、窓の認識がありません (frame-stream-14 以降を書き込んでください)")
         return False
     if win.get("id") == model_id(blob):
         return True

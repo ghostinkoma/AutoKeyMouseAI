@@ -23,15 +23,23 @@ int main(int argc, char** argv) {
   printf("id %08lx K %d H %d slots %d name0 %s\n", (unsigned long)m.id, m.K, m.H, m.nslot, m.name(0));
   static uint16_t frame[edge_win::FH][edge_win::FW];
   if (fread(frame, 2, edge_win::FH * edge_win::FW, stdin) != (size_t)(edge_win::FH * edge_win::FW)) return 1;
-  static uint8_t buf[edge_win::BW * edge_win::BH];
+  static edge_win::Gray buf, rows;
   for (int by = 0; by * 8 < edge_win::FH; by++)
     for (int bx = 0; bx < edge_win::FW / 8; bx++) {
       uint16_t px[64];
-      int rows = edge_win::FH - by * 8 > 8 ? 8 : edge_win::FH - by * 8;  // 最後は 7 行 (bad16 と同じ)
-      for (int y = 0; y < rows; y++)
+      int n = edge_win::FH - by * 8 > 8 ? 8 : edge_win::FH - by * 8;  // 最後は 7 行 (bad16 と同じ)
+      for (int y = 0; y < n; y++)
         for (int x = 0; x < 8; x++) px[y * 8 + x] = frame[by * 8 + y][bx * 8 + x];
-      edge_win::feedBlock(buf, bx * 8, by * 8, 8, rows, px, 8);
+      edge_win::feedBlock(&buf, bx * 8, by * 8, 8, n, px, 8);
     }
+  // 1 行ずつ来ても (bad16 の面の版・RGB565) 同じ明るさの画面になる
+  for (int y = 0; y < edge_win::FH; y++) edge_win::feedBlock(&rows, 0, y, edge_win::FW, 1, frame[y], edge_win::FW);
+  if (memcmp(buf.half, rows.half, sizeof(buf.half)) != 0) {
+    printf("rows differ\n");
+    return 3;
+  }
+  // 端が画面からはみ出したブロック (JPEG の MCU) でも壊れない
+  edge_win::feedBlock(&rows, 232, 128, 16, 16, frame[0], edge_win::FW);
   for (int i = 0; i < m.nslot; i++) {
     const auto& s = m.slots[i];
     uint8_t bits[32];

@@ -2,7 +2,7 @@
 // 窓の種類の認識 (エッジ AI) の特徴づくり。Arduino に依存しない部分 (PC のテスト tests/edge_win_test.cpp でも使う)。
 // PC 側の同じ計算: pc/akm/edge/winfeat.py
 //
-//   液晶に描いた RGB565 → 明るさ → 横 2 画素の平均 = 120x136 のバッファ (16KB。ESP32 が持つのはこれだけ)
+//   液晶に描いた RGB565 → 明るさ → 縦横 2 画素の平均 = 120x68 (8KB。ESP32 が持つのはこれだけ)
 //   スロット (窓が開く場所, 120x68 の座標) を 16x16 のマスに分けて平均 → 平均より明るいマスが 1 の 1 ビット画像
 //   + 数値 3 つ (平均 / 128, ばらつき / 64 - 1, 横の明るさの変化 / 16)
 #include <math.h>
@@ -13,7 +13,6 @@
 namespace edge_win {
 
 constexpr int FW = 240, FH = 135;  // 液晶に出る画面
-constexpr int BW = 120, BH = 136;  // バッファ (行 135 は使わない)
 constexpr int GW = 120, GH = 68;   // スロットの座標
 constexpr int N = 16;
 
@@ -23,47 +22,55 @@ inline uint8_t gray565(uint16_t p) {
   return (uint8_t)((77 * r8 + 150 * g8 + 29 * b8) >> 8);
 }
 
-// 液晶に描いた w x h の画素 (1 行 stride 画素) をバッファへ。x は偶数 (8x8 ブロック・JPEG の MCU・行全体)
-inline void feedBlock(uint8_t* buf, int x, int y, int w, int h, const uint16_t* px, int stride) {
-  if (!buf) return;
-  int sx = 0;
-  if (x & 1) sx = 1;  // 奇数から始まることは無いはずだが、来たら 1 画素捨てて偶数にそろえる
+// 明るさの画面 (120x68 = 8KB)。half = (横 2 画素の平均 の 縦 2 行の平均)。最後の組 (行 134 だけ) はその行
+// 描画は 8x8 ブロック (縦の組がそろう) か 1 行ずつ (偶数行を line に取っておき、次の奇数行と組にする) で来る
+struct Gray {
+  uint8_t half[GW * GH];
+  uint8_t line[GW];
+  int lineY = -1;
+};
+
+template <typename Px>
+inline void feedRows(Gray& g, int x, int y, int w, int h, Px px) {
+  int sx = (x & 1) ? 1 : 0;  // 奇数から始まることは無いはずだが、来たら 1 画素捨てて偶数にそろえる
+  int c0 = sx, c1 = w;       // 使う列 [c0, c1): 画面の外 (x < 0, x >= 240) は除く
+  while (x + c0 < 0) c0 += 2;
+  while (c1 > c0 && x + c1 > FW) c1--;
+  auto hp = [&](int r, int c) { return (gray565(px(r, c)) + gray565(px(r, c + 1))) >> 1; };
   for (int r = 0; r < h; r++) {
     int yy = y + r;
     if (yy < 0 || yy >= FH) continue;
-    const uint16_t* p = px + r * stride;
-    uint8_t* d = buf + yy * BW;
-    for (int c = sx; c + 1 < w; c += 2) {
-      int xx = x + c;
-      if (xx < 0 || xx + 1 >= FW) continue;
-      d[xx >> 1] = (uint8_t)((gray565(p[c]) + gray565(p[c + 1])) >> 1);
+    uint8_t* d = g.half + (yy >> 1) * GW;
+    if ((yy & 1) == 0) {
+      if (yy == FH - 1) {  // 行 134 は組の相手が無いのでそのまま
+        for (int c = c0; c + 1 < c1; c += 2) d[(x + c) >> 1] = (uint8_t)hp(r, c);
+      } else if (r + 1 < h) {  // 次の行と組にする
+        for (int c = c0; c + 1 < c1; c += 2) d[(x + c) >> 1] = (uint8_t)((hp(r, c) + hp(r + 1, c)) >> 1);
+        r++;
+      } else {  // 1 行だけ来た: 次の奇数行まで取っておく
+        for (int c = c0; c + 1 < c1; c += 2) g.line[(x + c) >> 1] = (uint8_t)hp(r, c);
+        g.lineY = yy;
+      }
+    } else if (g.lineY == yy - 1) {  // 奇数行から始まった: 取っておいた偶数行と組にする
+      for (int c = c0; c + 1 < c1; c += 2) d[(x + c) >> 1] = (uint8_t)((g.line[(x + c) >> 1] + hp(r, c)) >> 1);
     }
   }
 }
 
-// 1 色で塗った 8 x h のブロック (BlockDiff)
-inline void feedFill(uint8_t* buf, int x, int y, int w, int h, uint16_t color) {
-  if (!buf) return;
-  uint8_t g = gray565(color);
-  for (int r = 0; r < h; r++) {
-    int yy = y + r;
-    if (yy < 0 || yy >= FH) continue;
-    for (int c = (x & 1); c + 1 < w; c += 2) {
-      int xx = x + c;
-      if (xx >= 0 && xx + 1 < FW) buf[yy * BW + (xx >> 1)] = g;
-    }
-  }
+// 液晶に描いた w x h の画素 (1 行 stride 画素)。x は偶数 (8x8 ブロック・JPEG の MCU・行全体)
+inline void feedBlock(Gray* g, int x, int y, int w, int h, const uint16_t* px, int stride) {
+  if (g) feedRows(*g, x, y, w, h, [&](int r, int c) { return px[r * stride + c]; });
 }
 
-// 120x68 の 1 画素 (縦 2 行の平均。最後の組は行 134 を 2 回)
-inline int halfAt(const uint8_t* buf, int gx, int gy) {
-  int y0 = gy * 2, y1 = gy * 2 + 1;
-  if (y1 >= FH) y0 = y1 = FH - 1;
-  return (buf[y0 * BW + gx] + buf[y1 * BW + gx]) >> 1;
+// 1 色で塗ったブロック (BlockDiff)
+inline void feedFill(Gray* g, int x, int y, int w, int h, uint16_t color) {
+  if (g) feedRows(*g, x, y, w, h, [&](int, int) { return color; });
 }
+
+inline int halfAt(const Gray& g, int gx, int gy) { return g.half[gy * GW + gx]; }
 
 // スロット (x, y, w, h は 120x68 の座標、画面の中) の特徴。bits は 32 バイト (1 行 2 バイト, LSB = 左)
-inline void slotFeatures(const uint8_t* buf, int x, int y, int w, int h, uint8_t bits[32], float feats[3]) {
+inline void slotFeatures(const Gray& buf, int x, int y, int w, int h, uint8_t bits[32], float feats[3]) {
   int32_t cells[N][N];
   int64_t total = 0;
   for (int i = 0; i < N; i++) {
@@ -133,6 +140,14 @@ inline float rdf(const uint8_t* p, int i) {
   float v;
   memcpy(&v, p + 4 * i, 4);
   return v;
+}
+
+// 先頭 (12 バイト) から分かるモデル全体の大きさ。モデルでなければ 0
+inline size_t modelSize(const uint8_t* d) {
+  if (memcmp(d, "AKW1", 4) != 0 || d[4] != 1) return 0;
+  size_t K = d[5], H = d[6] | d[7] << 8, ns = d[8];
+  if (K < 1 || K > (size_t)MAX_K || H < 1 || H > (size_t)MAX_H || ns > (size_t)MAX_SLOT) return 0;
+  return 28 + 256 * H + 4 * 3 * H + 4 * H + H * K + 4 * K + 8 * ns + NAME_LEN * K + 4;
 }
 
 // 壊れていたら false (m は変えない)

@@ -1,7 +1,9 @@
 #include "edge_win.h"
 
 #include <Arduino.h>
-#include <LittleFS.h>
+#include <esp_partition.h>
+
+#include <new>
 
 #include "edge_win_core.h"
 #include "edge_win_model.h"
@@ -12,17 +14,19 @@ namespace {
 constexpr uint32_t PERIOD_MS = 300;   // 判定の間隔
 constexpr uint32_t STALE_MS = 3000;   // これより画面が来なければ「分からない」(状態画面などに戻った)
 constexpr int CONFIRM = 2;            // 同じ答えが続いたら確定 (一瞬のちらつきで変わらないように)
-constexpr const char* PATH = "/win.bin";
 
-uint8_t* gBuf = nullptr;
+Gray* gGray = nullptr;  // 8KB。モデルがあるときだけ
 volatile uint32_t gLastFeed = 0;
 volatile bool gDirty = false;
 uint32_t gLastRun = 0, gRunUs = 0;
-bool gFs = false;
 
 Model gModel;
-uint8_t* gOwned = nullptr;  // Wi-Fi / フラッシュから読んだモデルのバイト列 (組み込みのときは nullptr)
 const char* gSrc = "none";
+const esp_partition_t* gPart = nullptr;  // モデルを置くフラッシュの領域 (パーティション表の spiffs)
+esp_partition_mmap_handle_t gMap = 0;
+bool gMapped = false;
+size_t gUpLen = 0;
+uint8_t* gRam = nullptr;  // spiffs 領域が無いときだけ、受け取ったモデルをメモリに置く
 
 struct Found {
   int8_t label = -1;  // 名前の番号 (-1 = 無い)
@@ -36,33 +40,35 @@ void resetSlots() {
   for (auto& s : gSlots) s = Found();
 }
 
-bool ensureBuffer() {
-  if (!gBuf) gBuf = (uint8_t*)calloc(BW * BH, 1);
-  return gBuf != nullptr;
+bool ensureGray() {
+  if (!gGray) gGray = new (std::nothrow) Gray();
+  return gGray != nullptr;
 }
 
 void announce() {
-  Serial.printf("[WIN] model %08lx (%s): %d windows, %d slots, buffer %s\n", (unsigned long)gModel.id, gSrc,
-                gModel.K - 1, gModel.nslot, gBuf ? "16KB" : "FAILED");
+  Serial.printf("[WIN] model %08lx (%s): %d windows, %d slots, gray %s\n", (unsigned long)gModel.id, gSrc,
+                gModel.K - 1, gModel.nslot, gGray ? "8KB" : "FAILED");
 }
 
-// フラッシュの /win.bin を読む (壊れていれば使わない)
+void unmap() {
+  if (gMapped) esp_partition_munmap(gMap);
+  gMapped = false;
+}
+
+// フラッシュの領域にあるモデルを (メモリに読まずに) 使う
 bool loadFromFlash() {
-  if (!gFs || !LittleFS.exists(PATH)) return false;
-  File f = LittleFS.open(PATH, "r");
-  if (!f) return false;
-  size_t n = f.size();
-  uint8_t* d = n && n <= MODEL_MAX ? (uint8_t*)malloc(n) : nullptr;
-  bool ok = d && f.read(d, n) == n;
-  f.close();
+  if (!gPart) return false;
+  const void* p = nullptr;
+  if (esp_partition_mmap(gPart, 0, MODEL_MAX, ESP_PARTITION_MMAP_DATA, &p, &gMap) != ESP_OK) return false;
+  gMapped = true;
+  const uint8_t* d = (const uint8_t*)p;
+  size_t n = modelSize(d);
   Model m;
-  if (!ok || !parseModel(d, n, m) || !m.ok()) {
-    free(d);
-    Serial.println("[WIN] /win.bin is broken, ignored");
+  if (n == 0 || n > MODEL_MAX || !parseModel(d, n, m) || !m.ok()) {
+    unmap();
     return false;
   }
   gModel = m;
-  gOwned = d;
   gSrc = "flash";
   return true;
 }
@@ -70,8 +76,9 @@ bool loadFromFlash() {
 }  // namespace
 
 void begin() {
-  gFs = LittleFS.begin(true);  // 初回はフォーマット (16MB のパーティション表の spiffs 領域)
-  if (!gFs) Serial.println("[WIN] LittleFS not available (Wi-Fi で届いたモデルは再起動で消えます)");
+  gPart = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+  if (gPart && gPart->size < MODEL_MAX) gPart = nullptr;
+  if (!gPart) Serial.println("[WIN] no spiffs partition: Wi-Fi で届いたモデルはメモリに置き、再起動で消えます");
   if (!loadFromFlash()) {
     Model m;
     if (edge_win_builtin::SIZE && parseModel(edge_win_builtin::BLOB, edge_win_builtin::SIZE, m) && m.ok()) {
@@ -83,57 +90,74 @@ void begin() {
     Serial.println("[WIN] no window model yet (PC の window_train.py が学習すると Wi-Fi で届きます)");
     return;
   }
-  ensureBuffer();  // 起動直後 (Wi-Fi・BLE より前) に取るとメモリが割れにくい
+  ensureGray();  // 起動直後 (Wi-Fi・BLE より前) に取るとメモリが割れにくい
   announce();
 }
 
-String setModel(uint8_t* data, size_t len) {
-  Model m;
-  if (!data) return "no memory";
-  if (!parseModel(data, len, m) || !m.ok()) {
-    free(data);
-    return "bad model (format / CRC)";
-  }
-  if (m.id == gModel.id && gModel.ok()) {
-    free(data);
+String uploadBegin() {
+  // 受信の間は判定しない (Web サーバーと loop() は同じタスクなので、判定の途中で変わることは無い)
+  gModel = Model();
+  gSrc = "none";
+  resetSlots();
+  unmap();
+  free(gRam);
+  gRam = nullptr;
+  gUpLen = 0;
+  if (gPart) {
+    if (esp_partition_erase_range(gPart, 0, MODEL_MAX) != ESP_OK) return "flash erase failed";
     return "";
   }
-  if (!ensureBuffer()) {
-    free(data);
-    return "no memory for the 16KB buffer";
+  gRam = (uint8_t*)malloc(MODEL_MAX);
+  return gRam ? "" : "no memory";
+}
+
+String uploadWrite(const uint8_t* data, size_t len) {
+  if (gUpLen + len > MODEL_MAX) return "model too large";
+  if (gPart) {
+    if (esp_partition_write(gPart, gUpLen, data, len) != ESP_OK) return "flash write failed";
+  } else if (gRam) {
+    memcpy(gRam + gUpLen, data, len);
+  } else {
+    return "no memory";
   }
-  uint8_t* old = gOwned;
-  gModel = m;  // loop() と同じタスク (Web サーバー) から呼ばれるので、判定の途中で変わることは無い
-  gOwned = data;
-  gSrc = "wifi";
-  free(old);
+  gUpLen += len;
+  return "";
+}
+
+String uploadEnd() {
+  if (gPart) {
+    if (!loadFromFlash()) return "bad model (format / CRC)";
+  } else {
+    Model m;
+    if (!gRam || !parseModel(gRam, gUpLen, m) || !m.ok()) return "bad model (format / CRC)";
+    gModel = m;
+    gSrc = "wifi (ram)";
+  }
+  if (!ensureGray()) {
+    gModel = Model();
+    return "no memory for the 8KB gray image";
+  }
   resetSlots();
-  if (gFs) {
-    File f = LittleFS.open(PATH, "w");
-    bool saved = f && f.write(data, len) == len;
-    if (f) f.close();
-    if (!saved) Serial.println("[WIN] could not save /win.bin");
-  }
   announce();
   return "";
 }
 
 void feedBlock(int x, int y, int w, int h, const uint16_t* px, int stride) {
-  if (!gBuf) return;
-  edge_win::feedBlock(gBuf, x, y, w, h, px, stride);
+  if (!gGray) return;
+  edge_win::feedBlock(gGray, x, y, w, h, px, stride);
   gDirty = true;
   gLastFeed = millis();
 }
 
 void feedFill(int x, int y, int w, int h, uint16_t color) {
-  if (!gBuf) return;
-  edge_win::feedFill(gBuf, x, y, w, h, color);
+  if (!gGray) return;
+  edge_win::feedFill(gGray, x, y, w, h, color);
   gDirty = true;
   gLastFeed = millis();
 }
 
 void loop() {
-  if (!gBuf || !gModel.ok()) return;
+  if (!gGray || !gModel.ok()) return;
   uint32_t now = millis();
   if (now - gLastRun < PERIOD_MS) return;
   gLastRun = now;
@@ -149,7 +173,7 @@ void loop() {
     const SlotDef& sl = gModel.slots[i];
     uint8_t bits[32];
     float feats[3], conf = 0;
-    slotFeatures(gBuf, sl.x, sl.y, sl.w, sl.h, bits, feats);
+    slotFeatures(*gGray, sl.x, sl.y, sl.w, sl.h, bits, feats);
     int k = classify(gModel, bits, feats, &conf);
     // そのスロットに開かない窓の答え・自信の無い答えは「無い」(最後の番号が「無い」)
     int got = (k != gModel.K - 1 && (sl.mask >> k & 1) && conf >= gModel.thr) ? k : -1;
@@ -180,7 +204,7 @@ String json() {
   char id[12];
   snprintf(id, sizeof(id), "%08lx", (unsigned long)gModel.id);
   String j = "{\"on\":";
-  j += (gBuf && gModel.ok()) ? "true" : "false";
+  j += (gGray && gModel.ok()) ? "true" : "false";
   j += ",\"id\":\"" + String(gModel.ok() ? id : "") + "\",\"src\":\"" + String(gSrc) + "\",\"windows\":[";
   bool first = true;
   for (int i = 0; i < gModel.nslot; i++) {
@@ -194,7 +218,7 @@ String json() {
 }
 
 String line() {
-  if (!gBuf || !gModel.ok()) return "off";
+  if (!gGray || !gModel.ok()) return "off";
   String s;
   for (int i = 0; i < gModel.nslot; i++) {
     if (gSlots[i].label < 0) continue;
