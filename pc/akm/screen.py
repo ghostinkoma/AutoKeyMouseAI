@@ -94,23 +94,45 @@ def process_name(hwnd: int) -> str:
         kernel32.CloseHandle(h)
 
 
+_U32 = None
+_WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM) if IS_WINDOWS else None
+
+
+def _own_user32():
+    global _U32
+    if _U32 is None:
+        u = ctypes.WinDLL("user32")
+        u.IsWindowVisible.argtypes = [wintypes.HWND]
+        u.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        u.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        u.EnumWindows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
+        _U32 = u
+    return _U32
+
+
 def list_windows() -> list[tuple[int, str, str, "Rect"]]:
     """可視でタイトルのあるウィンドウ一覧: (hwnd, タイトル, プロセス名, クライアント領域)"""
     if not IS_WINDOWS:
         return []
     out: list[tuple[int, str, str, Rect]] = []
 
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    # ほかのライブラリが共有の windll.user32 の引数の型を 32 ビットに変えていることがあるので、自前の user32 を使う
+    u32 = _own_user32()
+
+    @_WNDENUMPROC
     def cb(hwnd, _):
-        if user32.IsWindowVisible(hwnd):
-            n = user32.GetWindowTextLengthW(hwnd)
-            if n:
-                buf = ctypes.create_unicode_buffer(n + 1)
-                user32.GetWindowTextW(hwnd, buf, n + 1)
-                out.append((hwnd, buf.value, process_name(hwnd), client_rect(hwnd)))
+        try:
+            if u32.IsWindowVisible(hwnd):
+                n = u32.GetWindowTextLengthW(hwnd)
+                if n:
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    u32.GetWindowTextW(hwnd, buf, n + 1)
+                    out.append((hwnd, buf.value, process_name(hwnd), client_rect(hwnd)))
+        except Exception:
+            pass
         return True
 
-    user32.EnumWindows(cb, 0)
+    u32.EnumWindows(cb, 0)
     return out
 
 

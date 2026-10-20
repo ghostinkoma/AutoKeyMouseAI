@@ -47,8 +47,9 @@ def main() -> None:
     if db.exists():
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         try:
-            maps = [r[0] for r in con.execute("SELECT name FROM guide_maps")] + \
-                   [r[0] for r in con.execute("SELECT name FROM maps")]
+            # マップガイドの名前 (正しい名前) だけで照らし合わせる。maps 表には読み違いの名前も入っていることがある
+            maps = [r[0] for r in con.execute("SELECT name FROM guide_maps")] or \
+                [r[0] for r in con.execute("SELECT name FROM maps")]
         except sqlite3.Error:
             pass
     loc, raw, conf = read_location_own(OcrReader.load(), crop, maps or None, None)
