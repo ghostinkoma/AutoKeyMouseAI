@@ -10,11 +10,16 @@ import time
 import _path  # noqa: F401
 
 from akm.config import ask_obs_password, load_config
+from akm.live_status import install_tee, status_rows, write_status
 from akm.mirror import Mirror
 from akm.screen import GameScreen
 
 
 def main() -> None:
+    from akm.config import PC_DIR
+
+    live_status = PC_DIR / "models" / "live_status.txt"  # 地図ビューアの「学習の状況」
+    tee = install_tee()  # 画面に出した行を、最近の出来事として取っておく
     import argparse
 
     ap = argparse.ArgumentParser()
@@ -104,7 +109,6 @@ def main() -> None:
     m.set_lines(base_lines)
     rec = None
     if args.recognize or args.learn:
-        from akm.config import PC_DIR
         from akm.edge.live import LiveRecognizer, overlay_lines
         from akm.edge.objects import ObjectDetector
 
@@ -345,19 +349,24 @@ def main() -> None:
                           f"  次の学習まで {max(0, cycle.every_frames - cycle.new_frames())} 枚 (済 {cycle.rounds} 回)")
             print(f"[mirror] 送信 {m.sent} 枚  失敗 {m.errors}  {m.fps:.1f}fps  形式 {m.fmt}{kinds}  {m.last_bytes} バイト/枚  "
                   f"(PC: 撮影 {m.t_capture:.0f}ms 圧縮 {m.t_encode:.0f}ms 送信 {m.t_post:.0f}ms)")
+            st = None
             try:
                 st = requests.get(status_url, timeout=2).json()
                 if "mirror" not in st:
                     print(f"         ESP32: ファームウェアが古いので計測値がありません (fw={st.get('fw', 'なし')})。"
                           "frame-stream-3 を書き込んでください")
-                    continue
                 e = st.get("mirror") or {}
-                print(f"         ESP32: {e.get('fps', 0)}fps 受信 {e.get('recv_ms', 0)}ms 展開 {e.get('decode_ms', 0)}ms "
-                      f"描画 {e.get('draw_ms', 0)}ms → CPU {e.get('cpu_pct', 0)}% (1 コア, {st.get('cpuMHz', '?')}MHz)  "
-                      f"空きメモリ {st.get('heap', 0) // 1024}KB (最大連続 {st.get('heapBlock', 0) // 1024}KB, "
-                      f"最小 {st.get('heapMin', 0) // 1024}KB)")
+                if e:
+                    print(f"         ESP32: {e.get('fps', 0)}fps 受信 {e.get('recv_ms', 0)}ms 展開 {e.get('decode_ms', 0)}ms "
+                          f"描画 {e.get('draw_ms', 0)}ms → CPU {e.get('cpu_pct', 0)}% (1 コア, {st.get('cpuMHz', '?')}MHz)  "
+                          f"空きメモリ {st.get('heap', 0) // 1024}KB (最大連続 {st.get('heapBlock', 0) // 1024}KB, "
+                          f"最小 {st.get('heapMin', 0) // 1024}KB)")
             except Exception:
                 pass
+            try:  # 地図ビューアの「学習の状況」へ (失敗しても送信・PT のお断りは続ける)
+                write_status(live_status, status_rows(m, rec, cycle, st, PC_DIR), tee.recent())
+            except Exception as e:
+                print(f"[status] 状況を書けません: {e}")
     except KeyboardInterrupt:
         if rec is not None:
             rec.stop()

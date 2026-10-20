@@ -2769,3 +2769,28 @@ def test_window_auto_labels_from_ocr_titles_and_pushes_model(monkeypatch):
     assert push_model("192.168.1.43", blob, log=lambda *a: None) and len(posted) == 1
     status.pop("win")  # 古いファームウェア
     assert not push_model("192.168.1.43", blob, log=lambda *a: None)
+
+
+def test_live_status_for_viewer(tmp_path):
+    import io
+    from types import SimpleNamespace as N
+
+    from akm.live_status import EventTee, status_rows, write_status
+
+    out = io.StringIO()
+    tee = EventTee(out)
+    print("[rare] party_invite: Cancel", file=tee)
+    print("[mirror] 送信 10 枚", file=tee)  # 5 秒ごとの集計は出来事に入れない
+    assert "party_invite" in out.getvalue() and [l[9:] for l in tee.recent()] == ["[rare] party_invite: Cancel"]
+    rec = N(last=N(loc=N(map="Icarus", x=51, y=70), last_loc=None, helper=True, windows=["mu_helper"],
+                   shown_target=None, target=None, ms=900),
+            rare=N(seen={"party_invite": 2}, declined={"party_invite": 2}), world=None)
+    cycle = N(busy=False, every_frames=60, new_frames=lambda: 12, rounds=1, history=["第 1 回 ok"])
+    esp = {"fw": "frame-stream-14", "mirror": {"fps": 5}, "win": {"on": True, "id": "ab", "windows": []}}
+    rows = dict(status_rows(N(fps=5.0, sent=3, errors=0, last_bytes=1, fmt="bad16"), rec, cycle, esp, tmp_path))
+    assert rows["現在地"] == "Icarus 51,70" and rows["MU Helper"].startswith("ON")
+    assert rows["PT 招待など"] == "party_invite 2 回 (断った 2)" and "48 枚" in rows["自動学習"]
+    p = tmp_path / "models" / "live_status.txt"
+    assert write_status(p, list(rows.items()), tee.recent())
+    lines = p.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("# ") and "現在地\tIcarus 51,70" in lines and lines[-2] == "#events"
