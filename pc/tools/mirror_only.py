@@ -307,6 +307,7 @@ def main() -> None:
     try:
         while True:
             time.sleep(5)
+            m.watchdog()  # 液晶への送信が止まっていたら、つなぎ直す
             kinds = (f" (bc {m.sent_kinds['bc']} / jpeg {m.sent_kinds['jpeg']}, 大きさ bc {m.cand_bytes['bc'] / 1024:.1f}KB"
                      f" : jpeg {m.cand_bytes['jpeg'] / 1024:.1f}KB)") if m.fmt == "bc" else ""
             if m.fmt == "bad16":

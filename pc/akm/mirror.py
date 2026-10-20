@@ -135,6 +135,34 @@ class Mirror:
             self._thread = threading.Thread(target=self._worker, daemon=True)
             self._thread.start()
 
+    def watchdog(self, stall_s: float = 20.0) -> None:
+        """液晶への送信が止まっていないか見張る (5 秒ごとくらいに呼ぶ)。
+        送信スレッドが止まっていれば起こし直し、長く送れていなければ接続を張り直して全体から送る。"""
+        if not self.enabled or self._stop.is_set():
+            return
+        now = time.monotonic()
+        if self._thread is not None and not self._thread.is_alive():
+            print("[mirror] 送信が止まっていたので、送信を再開します")
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
+        if getattr(self, "_wd_sent", None) != self.sent or self._paused:
+            self._wd_sent, self._wd_t = self.sent, now
+            return
+        if now - getattr(self, "_wd_t", now) >= stall_s:
+            print(f"[mirror] {stall_s:.0f} 秒間 液晶に送れていないので、つなぎ直します")
+            sock, self._sock = self._sock, None
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self._inflight.clear()
+            self._request_key()
+            fb = getattr(self, "_fallback_from", None)
+            if fb is not None:  # HTTP に切り替わっていたら、専用ポートをすぐ試す
+                self._fallback_from = (fb[0], fb[1], 0.0)
+            self._wd_t = now
+
     def _interval(self) -> float:
         return max(self.interval, 1.0 / self.slow_fps) if self.slow_fps > 0 else self.interval
 
@@ -351,85 +379,90 @@ class Mirror:
         except Exception as e:
             print(f"[mirror] ESP32 の状態を取得できません: {e}")
         while not self._stop.is_set():
-            if self._paused:
-                time.sleep(0.05)
-                continue
-            t0 = time.monotonic()
-            if self.grab is not None:
-                try:
-                    data = self._capture()
-                except Exception as e:
-                    self._warn(f"画面の取得: {e}")
-                    time.sleep(self.interval)
-                    continue
-            else:
-                with self._lock:
-                    data, self._pending = self._pending, None
-                if data is None:
+            try:
+                if self._paused:
                     time.sleep(0.05)
                     continue
-            fb = getattr(self, "_fallback_from", None)
-            if fb is not None and time.monotonic() - fb[2] >= 30:
-                # ESP32 が一時的に応答しなかっただけなら専用ポートに戻れる (遅い HTTP のままにしない)
-                self.transport, self.fmt = fb[0], fb[1]
-                self._fallback_from = None
-                self._tcp_fail = 0
-                print("[mirror] 専用ポートをもう一度試します")
-                continue
-            if self.transport in ("tcp", "auto") and self.fmt in ("jpeg", "bc", "bad16"):
+                t0 = time.monotonic()
+                if self.grab is not None:
+                    try:
+                        data = self._capture()
+                    except Exception as e:
+                        self._warn(f"画面の取得: {e}")
+                        time.sleep(self.interval)
+                        continue
+                else:
+                    with self._lock:
+                        data, self._pending = self._pending, None
+                    if data is None:
+                        time.sleep(0.05)
+                        continue
+                fb = getattr(self, "_fallback_from", None)
+                if fb is not None and time.monotonic() - fb[2] >= 30:
+                    # ESP32 が一時的に応答しなかっただけなら専用ポートに戻れる (遅い HTTP のままにしない)
+                    self.transport, self.fmt = fb[0], fb[1]
+                    self._fallback_from = None
+                    self._tcp_fail = 0
+                    print("[mirror] 専用ポートをもう一度試します")
+                    continue
+                if self.transport in ("tcp", "auto") and self.fmt in ("jpeg", "bc", "bad16"):
+                    try:
+                        tp = time.perf_counter()
+                        self._send_tcp(data)
+                        self.t_post = 0.8 * self.t_post + 0.2 * (time.perf_counter() - tp) * 1000
+                        self._ok(len(data))
+                        self._tcp_fail = 0
+                        if self.grab is not None:
+                            time.sleep(max(0.0, self._interval() - (time.monotonic() - t0)))
+                        continue
+                    except Exception as e:
+                        self.errors += 1
+                        self._tcp_fail += 1
+                        if self.transport == "auto" and self._tcp_fail >= 3:
+                            print(f"[mirror] 専用ポートに接続できないので、しばらく HTTP で送ります ({e})。"
+                                  "30 秒ごとに専用ポートをもう一度試します")
+                            self._fallback_from = (self.transport, self.fmt, time.monotonic())
+                            self.transport = "http"
+                            if self.fmt in ("bc", "bad16"):
+                                self.fmt = "jpeg"  # ブロック形式は専用ポートでしか送れない
+                        else:
+                            self._warn(f"専用ポート: {e}")
+                        time.sleep(0.5)
+                        continue
                 try:
                     tp = time.perf_counter()
-                    self._send_tcp(data)
+                    r = s.post(self.url, data=data, headers={"Content-Type": "application/octet-stream"}, timeout=5)
                     self.t_post = 0.8 * self.t_post + 0.2 * (time.perf_counter() - tp) * 1000
-                    self._ok(len(data))
-                    self._tcp_fail = 0
-                    if self.grab is not None:
-                        time.sleep(max(0.0, self._interval() - (time.monotonic() - t0)))
-                    continue
-                except Exception as e:
-                    self.errors += 1
-                    self._tcp_fail += 1
-                    if self.transport == "auto" and self._tcp_fail >= 3:
-                        print(f"[mirror] 専用ポートに接続できないので、しばらく HTTP で送ります ({e})。"
-                              "30 秒ごとに専用ポートをもう一度試します")
-                        self._fallback_from = (self.transport, self.fmt, time.monotonic())
-                        self.transport = "http"
-                        if self.fmt in ("bc", "bad16"):
-                            self.fmt = "jpeg"  # ブロック形式は専用ポートでしか送れない
+                    if r.status_code == 200:
+                        self.sent += 1
+                        self.errors = 0
+                        self._fps_n += 1
+                        dt = time.monotonic() - self._fps_t0
+                        if dt >= 5:
+                            self.fps = self._fps_n / dt
+                            self._fps_n = 0
+                            self._fps_t0 = time.monotonic()
+                        if not self._ok_once:
+                            self._ok_once = True
+                            print(f"[mirror] 液晶への表示に成功 ({self.fmt}, {len(data)} バイト)")
                     else:
-                        self._warn(f"専用ポート: {e}")
-                    time.sleep(0.5)
-                    continue
-            try:
-                tp = time.perf_counter()
-                r = s.post(self.url, data=data, headers={"Content-Type": "application/octet-stream"}, timeout=5)
-                self.t_post = 0.8 * self.t_post + 0.2 * (time.perf_counter() - tp) * 1000
-                if r.status_code == 200:
-                    self.sent += 1
-                    self.errors = 0
-                    self._fps_n += 1
-                    dt = time.monotonic() - self._fps_t0
-                    if dt >= 5:
-                        self.fps = self._fps_n / dt
-                        self._fps_n = 0
-                        self._fps_t0 = time.monotonic()
-                    if not self._ok_once:
-                        self._ok_once = True
-                        print(f"[mirror] 液晶への表示に成功 ({self.fmt}, {len(data)} バイト)")
-                else:
+                        self.errors += 1
+                        msg = f"HTTP {r.status_code} {r.text.strip()}"
+                        if self.fmt == "jpeg" and r.status_code == 400:
+                            self.jpeg_errors += 1
+                            if self.jpeg_errors >= 2:
+                                # 古いファームウェア等で JPEG を展開できない: 非圧縮に切り替える
+                                print(f"[mirror] ESP32 が JPEG を表示できないので raw (非圧縮) に切り替えます: {msg}")
+                                self.fmt = "raw"
+                        else:
+                            self._warn(msg)
+                except Exception as e:  # 通信エラーでボットは止めない
                     self.errors += 1
-                    msg = f"HTTP {r.status_code} {r.text.strip()}"
-                    if self.fmt == "jpeg" and r.status_code == 400:
-                        self.jpeg_errors += 1
-                        if self.jpeg_errors >= 2:
-                            # 古いファームウェア等で JPEG を展開できない: 非圧縮に切り替える
-                            print(f"[mirror] ESP32 が JPEG を表示できないので raw (非圧縮) に切り替えます: {msg}")
-                            self.fmt = "raw"
-                    else:
-                        self._warn(msg)
-            except Exception as e:  # 通信エラーでボットは止めない
+                    self._warn(str(e))
+                    s = requests.Session()  # 接続を張り直す
+                if self.grab is not None:
+                    time.sleep(max(0.0, self._interval() - (time.monotonic() - t0)))
+            except Exception as e:  # 送信スレッドが落ちて液晶が止まらないように、何があっても送り続ける
                 self.errors += 1
-                self._warn(str(e))
-                s = requests.Session()  # 接続を張り直す
-            if self.grab is not None:
-                time.sleep(max(0.0, self._interval() - (time.monotonic() - t0)))
+                self._warn(f"送信で予期しないエラー (続けます): {e!r}")
+                time.sleep(1.0)

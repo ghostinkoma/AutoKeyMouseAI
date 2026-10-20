@@ -2596,3 +2596,26 @@ def test_respond_restores_mouse_position():
     r._respond = lambda *a, **k: ["click"]
     assert r.respond("party_invite", [{"click": "@cancel"}], Detection("party_invite", "window", True, 1, 1, (0, 0, 1, 1)))
     assert sent[-1] == "a:1500,300" and g["fg"] == "notepad"
+
+
+def test_mirror_watchdog_reconnects_when_stalled():
+    from akm.mirror import Mirror
+
+    m = Mirror("127.0.0.1", 0.1, fmt="jpeg", grab=None)
+    m.enabled = True
+    m._thread = None
+    keys = []
+    m._request_key = lambda: keys.append(1)
+
+    class Sock:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    sock = Sock()
+    m._sock = sock
+    m.watchdog(stall_s=0)          # 1 回目: 基準を覚える
+    m.watchdog(stall_s=0)          # 送れていない → つなぎ直す
+    assert sock.closed and m._sock is None and keys
+    m._stop.set()
