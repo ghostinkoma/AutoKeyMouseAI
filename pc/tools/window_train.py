@@ -26,7 +26,7 @@ from akm.config import PC_DIR
 from akm.edge.mlp import QModel, train
 from akm.edge.winfeat import NONE, half_from_image, load_slots, save_slots
 from akm.edge.winmodel import (build, detect, export_header, label_names, model_id, pack_model, push_model,
-                               slots_from_labels, window_table)
+                               save_table_tsv, slots_from_labels, win_log, window_table)
 from window_tour import OUT, load_labels
 
 MODEL = PC_DIR / "models" / "edge_win.npz"
@@ -49,8 +49,8 @@ def is_test(e: dict, frac: float = 0.2) -> bool:
     return (zlib.crc32(e["file"].encode()) % 1000) < frac * 1000
 
 
-def report(q: QModel, slots, entries, thr: float, show_wrong: int = 10) -> float:
-    """画面ごとに、見えている窓を全部当て、余計な窓を言わなければ正解。"""
+def report(q: QModel, slots, entries, thr: float, show_wrong: int = 10, per_window: dict | None = None) -> float:
+    """画面ごとに、見えている窓を全部当て、余計な窓を言わなければ正解。per_window に {名前: (見つけた, 出た)}。"""
     ok = 0
     per = Counter()
     hit = Counter()
@@ -78,6 +78,8 @@ def report(q: QModel, slots, entries, thr: float, show_wrong: int = 10) -> float
         print(f"    {name:16s} 見つけた {hit[name]:4d}/{per[name]:<4d}  余計に言った {fp[name]}")
     for f, w, g in wrong[:show_wrong]:
         print(f"    × {f}  正解 {w or ['なし']}  判定 {g or ['なし']}")
+    if per_window is not None:
+        per_window.update({k: (hit[k], per[k]) for k in per})
     return acc
 
 
@@ -118,14 +120,16 @@ def cmd_train(args) -> None:
     k, _ = q.predict(X, F)
     print(f"[win] 学習した見本での正解率 {(k == Y).mean():.1%}")
     acc = None
+    scores: dict = {}
     if te and not args.all:
         print(f"[win] 学習に使っていない画面 {len(te)} 枚で評価:")
-        acc = report(q, slots, te, args.thr)
+        acc = report(q, slots, te, args.thr, per_window=scores)
         prev = float(SCORE.read_text().split()[0]) if SCORE.exists() else None
         # 窓の種類が増えたときは比べられないので採用する
         same = SLOTS.exists() and [s.names for s in load_slots(SLOTS)] == [s.names for s in slots]
         if args.keep_better and prev is not None and same and acc < prev - 0.02:
             print(f"[result] 窓の種類: 前の方が良いので採用しません (今回 {acc:.1%} < 前回 {prev:.1%})")
+            win_log(f"学習: 前の方が良いので採用しません (今回 {acc:.1%} < 前回 {prev:.1%})")
             return
         if acc < 0.9:
             print("[win] 正解率が 90% 未満です。window_tour.py で見本を増やしてから学習し直すのがおすすめ")
@@ -144,6 +148,11 @@ def cmd_train(args) -> None:
     save_slots(SLOTS, slots)
     table = window_table(entries, slots)
     TABLE.write_text(json.dumps(table, ensure_ascii=False, indent=1), encoding="utf-8")
+    save_table_tsv(TABLE.with_suffix(".tsv"), table, scores)
+    win_log(f"学習: 窓 {len(labels) - 1} 種 / 見本の画面 {len(entries)} 枚"
+            + (f" / 正解率 {acc:.1%} ({len(te)} 枚)" if acc is not None else "")
+            + " / " + ", ".join(f"{t['name']} {scores[t['name']][0]}/{scores[t['name']][1]}" if t["name"] in scores
+                                else f"{t['name']} (評価なし)" for t in table))
     blob = pack_model(q, slots, args.thr)
     BLOB.write_bytes(blob)
     if args.header:  # 書き込み時の初期モデル (普段は Wi-Fi で送るので書き換えない。git pull がぶつからないように)

@@ -89,6 +89,7 @@ def push_model(host: str, blob: bytes, timeout: float = 8.0, log=print) -> bool:
         log(f"[win] ESP32 がモデルを受け取りません: {r.text.strip()}")
         return False
     log(f"[win] ESP32 に窓の認識のモデルを送りました ({len(blob)} バイト, {model_id(blob)})")
+    win_log(f"ESP32 にモデルを送りました ({len(blob)} バイト, {model_id(blob)})")
     return True
 
 
@@ -159,6 +160,34 @@ def detect(q: QModel, slots: list[Slot], half: np.ndarray, thr: float = 0.6) -> 
         if name != NONE and name in s.names and pi >= thr:
             out.append((name, float(pi), s))
     return out
+
+
+def win_log(line: str, path: Path | None = None) -> None:
+    """窓の種類の学習の記録 (models/window_log.txt)。地図ビューアの「窓の種類の学習」に出る。"""
+    import time
+
+    if path is None:
+        from ..config import PC_DIR
+
+        path = PC_DIR / "models" / "window_log.txt"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
+    except OSError:
+        pass
+
+
+def save_table_tsv(path: Path, table: list[dict], scores: dict | None = None) -> None:
+    """窓の一覧を TSV で (地図ビューア用)。列: 名前, タイトル, 場所, 見本の数, 出どころ, 評価で見つけた/出た"""
+    scores = scores or {}
+    rows = ["name\ttitles\tslot\tcount\tsrc\ttest"]
+    for t in table:
+        hit, n = scores.get(t["name"], (0, 0))
+        src = " ".join(f"{k}{v}" for k, v in sorted(t.get("src", {}).items()))
+        rows.append("\t".join([t["name"], " / ".join(t.get("titles", [])), t.get("slot", ""), str(t.get("count", 0)),
+                               src, f"{hit}/{n}" if n else ""]))
+    Path(path).write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
 NAME_LEN = 24  # ESP32 に送る窓の名前の長さ (末尾の 0 を含む)

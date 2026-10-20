@@ -51,6 +51,7 @@ public final class MapViewer extends JFrame {
     private final SightingsPanel sightingsPanel;
     private final MapsPanel mapsPanel;
     private final SpawnLogPanel logPanel;
+    private final WindowsPanel windowsPanel;
     private final JTabbedPane tabs = new JTabbedPane();
     private final JComboBox<String> mapBox = new JComboBox<>();
     private final JCheckBox follow = new JCheckBox("現在地のマップを表示", true);
@@ -77,6 +78,7 @@ public final class MapViewer extends JFrame {
         sightingsPanel = new SightingsPanel(ctx);
         mapsPanel = new MapsPanel(ctx);
         logPanel = new SpawnLogPanel(ctx);
+        windowsPanel = new WindowsPanel(ctx);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
 
         JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -148,7 +150,10 @@ public final class MapViewer extends JFrame {
         tabs.addTab("出来事 (マップ移動・ワープ)", ep);
         JSplitPane sideSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, sp, tabs);
         sideSplit.setResizeWeight(0.4);
-        side.add(sideSplit, BorderLayout.CENTER);
+        // 窓の種類の学習 (学習できた窓のリスト + ログ) はタブにせず、いつも見えるように下に
+        JSplitPane winSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, sideSplit, windowsPanel);
+        winSplit.setResizeWeight(0.5);
+        side.add(winSplit, BorderLayout.CENTER);
         side.setPreferredSize(new Dimension(560, 600));
 
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, panel, side);
@@ -189,6 +194,7 @@ public final class MapViewer extends JFrame {
     }
 
     private void refresh() {
+        windowsPanel.refresh();  // DB が読めなくても窓の学習は見せる
         try {
             List<String> maps = db.maps();
             MapDb.Pos cur = db.latest();

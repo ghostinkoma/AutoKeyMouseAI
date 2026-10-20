@@ -175,6 +175,9 @@ def cmd_tour(args) -> None:
                           "windows": [{"name": name, "box": list(box)}]})
             n += 1
             print(f"[tour] {name} {n} 枚目を保存 (枠 {box})")
+            from akm.edge.winmodel import win_log
+
+            win_log(f"見本 (手で撮影): {name} {n} 枚目 枠 {box}")
             s = input("  同じ窓のまま歩く・中身を変えるなどして Enter でもう 1 枚 / n で次の窓: ").strip().lower()
             if s:
                 break
@@ -285,6 +288,11 @@ def cmd_auto(args) -> None:
         with open(scanned_file, "a", encoding="utf-8") as fh:
             fh.write("\n".join(scanned) + "\n")
     print(f"[auto] 追加: {dict(cnt) or 'なし'}")
+    from akm.edge.winmodel import win_log
+
+    if scanned:
+        win_log(f"見本: 画面 {len(scanned)} 枚を調べて " + (", ".join(f"{k} +{v}" for k, v in cnt.most_common())
+                                                         or "追加なし"))
     cmd_list(args)
 
 
