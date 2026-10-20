@@ -27,7 +27,8 @@ $activate = Join-Path $pc ".venv\Scripts\Activate.ps1"
 if (-not (Test-Path $activate)) { $activate = Join-Path $root ".venv\Scripts\Activate.ps1" }
 if (Test-Path $activate) { . $activate } else { Write-Host "[start] .venv not found. Using the current python." }
 
-$loopArgs = @("-OcrEvery", $OcrEvery)
-if ($NoDecline) { $loopArgs += "-NoDecline" }
+# hashtable splatting: passes -OcrEvery / -NoDecline by name (an array would be passed by position)
+$loopArgs = @{ OcrEvery = $OcrEvery }
+if ($NoDecline) { $loopArgs["NoDecline"] = $true }
 Write-Host ("[start] learning + map logging" + $(if ($NoDecline) { "" } else { " + party invite decline" }))
 & (Join-Path $pc "learn_loop.ps1") @loopArgs
