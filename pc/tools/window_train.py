@@ -163,7 +163,14 @@ def cmd_train(args) -> None:
     for t in table:
         print(f"    {t['name']:16s} {', '.join(t['titles'])[:30]:30s} {t['slot']:16s} 見本 {t['count']}  {t['src']}")
     if args.push:
-        push_model(args.push, blob)
+        host = args.push
+        if host == "auto":  # config.yaml の device.host (ESP32 の IP)
+            from akm.config import load_config
+
+            cfg = load_config("config.yaml") if (PC_DIR / "config.yaml").exists() else {}
+            host = (cfg.get("device") or {}).get("host") or ""
+        if host:
+            push_model(host, blob)
     if acc is not None:
         SCORE.write_text(f"{acc:.4f} {len(te)}\n")
     print(f"[win] 保存: {MODEL.name}, {BLOB.name} ({len(blob)} バイト, {model_id(blob)}), {TABLE.name}")
@@ -228,7 +235,7 @@ def main() -> None:
     ap.add_argument("--all", action="store_true", help="評価用に分けず全部で学習")
     ap.add_argument("--header", action="store_true",
                     help="firmware/AutoKeyMouse/edge_win_model.h (書き込み時の初期モデル) も書き換える")
-    ap.add_argument("--push", default="", help="学習したモデルを ESP32 (IP) に送る")
+    ap.add_argument("--push", default="", help="学習したモデルを ESP32 (IP。auto なら config.yaml の device.host) に送る")
     ap.add_argument("--keep-better", action="store_true", help="前回より正解率が下がったら保存しない")
     args = ap.parse_args()
     {"train": cmd_train, "eval": cmd_eval, "test": cmd_test}[args.cmd](args)
