@@ -2794,3 +2794,23 @@ def test_live_status_for_viewer(tmp_path):
     assert write_status(p, list(rows.items()), tee.recent())
     lines = p.read_text(encoding="utf-8").splitlines()
     assert lines[0].startswith("# ") and "現在地\tIcarus 51,70" in lines and lines[-2] == "#events"
+
+
+def test_object_detector_local_search_finds_moved_window_within_full_every():
+    from akm.edge.objects import ObjectDetector, load_objects
+
+    objs = {o.name: o for o in load_objects()}
+    o = objs["hunting_log"]
+    det = ObjectDetector([o])
+    det.full_every = 3
+    H = o.ref_h
+    frame = np.full((H, int(H * 16 / 10), 3), 60, np.uint8)
+    h, w = o.image.shape[:2]
+    frame[300:300 + h, 500:500 + w] = o.image  # 登録した場所とは違う所に出た
+    seen = [det.detect(frame)[0].present for _ in range(3)]
+    assert any(seen)  # 画面全体を探す番 (3 回に 1 回) で見つかる
+    first = seen.index(True)
+    assert all(det.detect(frame)[0].present for _ in range(4))  # その後は前の場所の周りだけで毎回見つかる
+    blank = np.full_like(frame, 60)
+    assert not det.detect(blank)[0].present  # 消えたら「無い」
+    assert first <= 2

@@ -7,7 +7,8 @@
 測るもの:
   1. 1 回の認識 (1 秒ごと) の内訳: 窓・アイコンの認識 / 相手の名前 (自分の OCR) / 現在地 (Windows の OCR)
      / 液晶用の縮小と圧縮
-  2. 窓・アイコンの候補探し (matchTemplate) を CPU と GPU (OpenCL) で比べる
+  2. 窓・アイコンの候補探し (matchTemplate) を CPU と GPU (OpenCL) で比べる。
+     前に見つけた場所の周りだけを探す工夫 (performance.full_search_every) でどれだけ速くなるか
   3. 学習 (numpy) の速さを、使うスレッドの数を変えて比べる
 最後に、config.yaml の performance.opencl を true にした方が良いかを出す。
 """
@@ -127,6 +128,29 @@ def opencl_report(imgs: list[np.ndarray], info: dict) -> tuple[float, float]:
     return cpu, gpu
 
 
+def fast_report(imgs: list[np.ndarray], every: int) -> tuple[float, float, int, int]:
+    """学習ループと同じ速くする工夫 (前の場所の周りだけ + 画面全体は every 回に 1 回) で測る。
+    同じ画面を 1 秒ごとに見るのと同じになるよう、1 枚を every 回続けて見せて最後の結果を比べる。"""
+    from akm.edge.objects import ObjectDetector
+
+    full = ObjectDetector.load()
+    fast = ObjectDetector.load()
+    fast.full_every = every
+    fast.detect(imgs[0])
+    t_full, t_fast, same = [], [], 0
+    for im in imgs:
+        t_full.append(timeit(lambda: full.detect(im)))
+        want = [d.name for d in full.detect(im) if d.present]
+        for _ in range(every):
+            t_fast.append(timeit(lambda: fast.detect(im)))
+        got = [d.name for d in fast.detect(im) if d.present]
+        same += want == got
+    a, b = float(np.median(t_full)), float(np.mean(t_fast))
+    print(f"\n窓・アイコンの認識 (学習ループの速くする工夫, 画面全体は {every} 回に 1 回):"
+          f" 毎回全体 {a:.0f} ms → {b:.0f} ms (平均)  {a / max(b, 1e-3):.1f} 倍  (結果が同じ {same}/{len(imgs)} 枚)")
+    return a, b, same, len(imgs)
+
+
 def train_report() -> None:
     """学習の行列の掛け算を、スレッドの数を変えて測る (自動学習は既定でコア数の半分)。"""
     try:
@@ -158,6 +182,10 @@ def main() -> None:
     print(f"画面 {len(imgs)} 枚 ({imgs[0].shape[1]}x{imgs[0].shape[0]}) で測ります")
     stage_report(imgs)
     cpu, gpu = opencl_report(imgs, info)
+    cfg = load_config("config.yaml") if (PC_DIR / "config.yaml").exists() else {}
+    every = int((cfg.get("performance") or {}).get("full_search_every", 3))
+    if every > 1:
+        fast_report(imgs, every)
     train_report()
     print("\nおすすめ:")
     if info["opencl"] and gpu and cpu / gpu >= 1.3:

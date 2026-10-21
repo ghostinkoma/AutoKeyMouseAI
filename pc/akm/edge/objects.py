@@ -142,6 +142,12 @@ class ObjectDetector:
         self.hi, self.lo, self.nn_min = hi, lo, nn_min
         self.big_area, self.big_ncc = 20000, 0.85  # 大きな窓 (ピクセル数) はこの一致度以上なら、ネットに関わらず「ある」
         self._cache: dict = {}
+        # 速くする工夫 (認識の 9 割がここ): まず「前に見つけた場所」か「登録した場所」の周りだけを探し、
+        # はっきり見つかれば (一致度 hi 以上) 画面全体は探さない。画面全体を探すのは full_every 回に 1 回
+        # (窓・アイコンごとに順番をずらす)。1 = 毎回 (道具で貯めた画面を調べるとき。前と同じ結果)
+        self.full_every = 1
+        self._hint: dict[str, tuple] = {}  # 名前 → (倍率, x, y, w, h) 前に見つけた場所
+        self._tick = 0
 
     @classmethod
     def load(cls, base: Path = DATA, model_path: Path = MODEL, opencl: bool = False) -> "ObjectDetector":
@@ -167,8 +173,52 @@ class ObjectDetector:
             self._cache[key] = out
         return self._cache[key]
 
-    def candidate(self, o: ObjectDef, gray: np.ndarray, small: np.ndarray) -> tuple[float, tuple[int, int, int, int]]:
-        best, box = -1.0, (0, 0, 0, 0)
+    def _local(self, o: ObjectDef, gray: np.ndarray) -> tuple[float, tuple[int, int, int, int], float]:
+        """前に見つけた場所 (無ければ登録した場所) の周りだけを等倍で探す。(一致度, 枠, 倍率)"""
+        H, W = gray.shape[:2]
+        hint = self._hint.get(o.name)
+        if hint is not None:
+            spots = [(hint[0], hint[1], hint[2])]
+        elif o.pos is not None:
+            k = H / o.ref_h
+            spots = [(None, int(o.pos[0] * k), int(o.pos[1] * k))]
+        else:
+            return -1.0, (0, 0, 0, 0), 0.0
+        best, box, best_f = -1.0, (0, 0, 0, 0), 0.0
+        for f0, px, py in spots:
+            for scale, _, tf in self._templates(o, H):
+                if f0 is not None and abs(scale - f0) > 1e-6:
+                    continue
+                th, tw = tf.shape
+                m = max(12, int(0.15 * max(tw, th)))
+                x0, y0 = max(0, px - m), max(0, py - m)
+                area = gray[y0:min(H, py + th + m), x0:min(W, px + tw + m)]
+                if area.shape[0] < th or area.shape[1] < tw:
+                    continue
+                _, s, _, (x, y) = cv2.minMaxLoc(cv2.matchTemplate(area, tf, cv2.TM_CCOEFF_NORMED))
+                if s > best:
+                    best, box, best_f = float(s), (int(x + x0), int(y + y0), tw, th), scale
+        return best, box, best_f
+
+    def candidate(self, o: ObjectDef, gray: np.ndarray, small: np.ndarray,
+                  full: bool = True) -> tuple[float, tuple[int, int, int, int]]:
+        ls, lbox, lf = self._local(o, gray)
+        if ls >= self.hi or not full:  # はっきり見つかった / 今回は画面全体を探さない番
+            if ls >= self.lo:
+                self._hint[o.name] = (lf, lbox[0], lbox[1], lbox[2], lbox[3])
+            return ls, lbox
+        best, box, best_f = self._full(o, gray, small)
+        if ls > best:
+            best, box, best_f = ls, lbox, lf
+        if best >= self.lo:
+            self._hint[o.name] = (best_f, box[0], box[1], box[2], box[3])
+        else:
+            self._hint.pop(o.name, None)
+        return best, box
+
+    def _full(self, o: ObjectDef, gray: np.ndarray, small: np.ndarray) -> tuple[float, tuple[int, int, int, int], float]:
+        """画面全体を探す (縮小画面で候補 → 周りを等倍で)。(一致度, 枠, 倍率)"""
+        best, box, best_f = -1.0, (0, 0, 0, 0), 0.0
         H, W = gray.shape[:2]
         for scale, ts, tf in self._templates(o, H):
             th, tw = tf.shape
@@ -194,8 +244,8 @@ class ObjectDetector:
                 _, s, _, (x, y) = cv2.minMaxLoc(cv2.matchTemplate(area, tf, cv2.TM_CCOEFF_NORMED))
                 x, y = x + x0, y + y0
             if s > best:
-                best, box = float(s), (int(x), int(y), tw, th)
-        return best, box
+                best, box, best_f = float(s), (int(x), int(y), tw, th), scale
+        return best, box, best_f
 
     def nn_prob(self, gray: np.ndarray, box, name: str) -> float:
         if self.model is None or name not in self.model.labels:
@@ -215,8 +265,11 @@ class ObjectDetector:
         small = cv2.resize(gray, None, fx=self.WORK, fy=self.WORK, interpolation=cv2.INTER_AREA)
         self._small_u = cv2.UMat(small) if self.opencl else None  # GPU へは 1 回だけ送る
         out = []
-        for o in self.objects:
-            ncc, box = self.candidate(o, gray, small)
+        self._tick += 1
+        n = max(1, int(self.full_every))
+        for i, o in enumerate(self.objects):
+            full = n == 1 or (self._tick + i) % n == 0  # 画面全体を探すのは n 回に 1 回 (窓・アイコンごとにずらす)
+            ncc, box = self.candidate(o, gray, small, full)
             nn = self.nn_prob(gray, box, o.name) if ncc >= self.lo else 0.0
             if self.model is None:
                 present = ncc >= self.hi

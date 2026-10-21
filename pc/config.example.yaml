@@ -6,6 +6,9 @@
 # 計算の分担。python tools\perf_check.py で、どこに CPU を使っているかと GPU (OpenCL) が速いかを測ってから
 performance:
   opencl: false   # true: 窓・アイコンの候補探しを GPU (OpenCL。GTX 660 など) で。測って速いときだけ
+  # 窓・アイコンの認識: 画面全体を探すのは 3 回 (3 秒) に 1 回。それ以外は前に見つけた場所・登録した場所の
+  # 周りだけ (登録した場所に出る PT 招待などはすぐ見つかる)。1 にすると毎回全体 (前の動き)
+  full_search_every: 3
   # 自動学習が使う CPU のスレッドは、既定でコア数の半分 (環境変数 AKM_TRAIN_THREADS で変更)
 
 device:

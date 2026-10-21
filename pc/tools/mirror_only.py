@@ -109,12 +109,15 @@ def main() -> None:
     m.set_lines(base_lines)
     # 計算の分担 (python tools\perf_check.py で測ってから): GPU (OpenCL) で窓・アイコンの候補探し
     opencl = bool((cfg.get("performance") or {}).get("opencl", False))
+    # 窓・アイコンの画面全体を探すのは何回に 1 回か (それ以外は前に見つけた場所・登録した場所の周りだけ)
+    full_every = int((cfg.get("performance") or {}).get("full_search_every", 3))
     rec = None
     if args.recognize or args.learn:
         from akm.edge.live import LiveRecognizer, overlay_lines
         from akm.edge.objects import ObjectDetector
 
         det = ObjectDetector.load(opencl=opencl)
+        det.full_every = full_every
         if opencl:
             import cv2
 
@@ -292,6 +295,7 @@ def main() -> None:
 
         def reload_models():
             rec.detector = ObjectDetector.load(opencl=opencl)  # 新しく登録した窓・アイコンも読み直す
+            rec.detector.full_every = full_every
             try:
                 rec.ocr = OcrReader.load()
                 if rec.harvester is not None:
