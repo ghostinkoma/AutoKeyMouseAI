@@ -1,5 +1,6 @@
 """実機なしで動く範囲のテスト: python -m pytest tests"""
 import sys
+import threading
 from pathlib import Path
 
 import cv2
@@ -2814,3 +2815,92 @@ def test_object_detector_local_search_finds_moved_window_within_full_every():
     blank = np.full_like(frame, 60)
     assert not det.detect(blank)[0].present  # 消えたら「無い」
     assert first <= 2
+
+
+def _home_world(tmp_path, hp=0.3, start=(60, 80)):
+    """偽物のゲーム: クリックした向き (画面は 45 度回っている) に最大 3 マス歩く。Home で MU Helper が切り替わる。"""
+    from types import SimpleNamespace as N
+
+    from akm.home_return import HomeReturn, save_props
+
+    w = N(x=float(start[0]), y=float(start[1]), helper=True, keys=[], t=0.0, fg="browser")
+    A = np.array([[0.02, 0.02], [-0.02, 0.02]])  # マス / ピクセル (右クリック → x+ y-、下 → x+ y+)
+
+    def run(script):
+        if script.startswith("click"):
+            _, ox, oy = script.split()
+            d = A @ np.array([float(ox) - 683, float(oy) - 300])
+            n = np.hypot(*d)
+            if n > 3:
+                d = d * 3 / n
+            w.x, w.y = w.x + d[0], w.y + d[1]
+        elif script.startswith("k:"):
+            w.keys.append(script[2:])
+            if script == "k:home":
+                w.helper = not w.helper
+        return "OK"
+
+    def sleep(s):
+        w.t += s
+
+    img = np.zeros((768, 1366, 3), np.uint8)
+    hr = HomeReturn(run, lambda: img, lambda im: N(map="Icarus", x=int(round(w.x)), y=int(round(w.y))),
+                    lambda im: hp, lambda: w.helper, lambda x, y: f"click {x} {y}", lambda im: (683, 300),
+                    activate=lambda: setattr(w, "fg", "game") or True, foreground=lambda: w.fg,
+                    restore=lambda h: setattr(w, "fg", h), lock=threading.Lock(),
+                    settings_path=tmp_path / "home_return.properties", state_path=tmp_path / "state.properties",
+                    calib_path=tmp_path / "nav.json", log=lambda *a: None, clock=lambda: w.t, sleep=sleep)
+    save_props(hr.settings_path, {"enabled": "true", "interval_s": "60", "potion_hp": "0.5"})
+    return w, hr
+
+
+def test_home_return_records_manual_start_and_walks_back(tmp_path):
+    from types import SimpleNamespace as N
+
+    w, hr = _home_world(tmp_path)
+    w.helper = False
+    hr.step(N(map="Icarus", x=50, y=72))      # 止まっている
+    w.helper = True
+    hr.step(N(map="Icarus", x=50, y=72))      # 手で開始 → ここが帰る場所
+    assert hr.home == ("Icarus", 50, 72) and hr.home_src == "helper"
+    hr.step(N(map="Icarus", x=60, y=80))
+    assert hr.cycles == 0                     # まだ時間ではない
+    w.x, w.y = 60.0, 80.0                     # 狩りで流された
+    w.t += 61
+    w.fg = "browser"
+    hr.step(N(map="Icarus", x=60, y=80))
+    assert hr.cycles == 1 and hr.last_result.startswith("着いた"), hr.last_result
+    assert abs(w.x - 50) <= 1.5 and abs(w.y - 72) <= 1.5  # 帰る場所に戻った
+    assert w.keys.count("home") == 2 and w.helper is True  # ② 切って ⑤ 入れた
+    assert "q" in w.keys                       # HP 30% < 50% なのでポーション
+    assert w.fg == "browser"                   # ⑥ 元の窓に戻した
+    assert (tmp_path / "nav.json").exists()    # 画面の向きを調べて保存
+    state = (tmp_path / "state.properties").read_text(encoding="utf-8")
+    assert "home=Icarus,50,72" in state and "cycles=1" in state
+    w.helper = False                           # 自分で押した切り替えは「手で開始」と間違えない
+    hr.step(N(map="Icarus", x=50, y=72))
+    assert hr.home == ("Icarus", 50, 72)
+
+
+def test_home_return_respects_settings_and_helper_off(tmp_path):
+    from types import SimpleNamespace as N
+
+    from akm.home_return import save_props
+
+    w, hr = _home_world(tmp_path, hp=0.9)
+    hr.home = ("Icarus", 50, 72)
+    w.helper = False                           # 手で止めているときは何もしない
+    hr.step(N(map="Icarus", x=60, y=80))
+    assert hr.cycles == 0                      # オンにしてから 1 回目は interval_s 後
+    w.t += 61
+    hr.step(N(map="Icarus", x=60, y=80))
+    assert hr.cycles == 1 and "動作中でない" in hr.last_result and w.keys == []
+    save_props(hr.settings_path, {"enabled": "true", "interval_s": "60", "home_override": "Icarus,55,75",
+                                  "override_seq": "1"})
+    hr.step(None)
+    assert hr.home == ("Icarus", 55, 75) and hr.home_src == "viewer"  # ビューアで指定した場所
+    save_props(hr.settings_path, {"enabled": "false"})
+    w.t += 1000
+    w.helper = True
+    hr.step(None)
+    assert hr.cycles == 1                      # オフなら帰還しない

@@ -53,6 +53,8 @@ public final class MapViewer extends JFrame {
     private final SpawnLogPanel logPanel;
     private final WindowsPanel windowsPanel;
     private final LiveStatusPanel livePanel;
+    private final HomeReturnPanel homePanel;
+    private javax.swing.JDialog homeDialog;
     private final JTabbedPane tabs = new JTabbedPane();
     private final JComboBox<String> mapBox = new JComboBox<>();
     private final JCheckBox follow = new JCheckBox("現在地のマップを表示", true);
@@ -81,6 +83,7 @@ public final class MapViewer extends JFrame {
         logPanel = new SpawnLogPanel(ctx);
         windowsPanel = new WindowsPanel(ctx);
         livePanel = new LiveStatusPanel(ctx);
+        homePanel = new HomeReturnPanel(ctx);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
 
         JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -117,6 +120,18 @@ public final class MapViewer extends JFrame {
             }
         });
         top.add(newMap);
+        // MU Helper の帰還の設定 (別の窓。状態は「学習の状況」の表にも出る)
+        JButton homeBtn = new JButton("MU Helper の帰還…");
+        homeBtn.addActionListener(e -> {
+            if (homeDialog == null) {
+                homeDialog = new javax.swing.JDialog(this, "MU Helper の帰還", false);
+                homeDialog.add(homePanel);
+                homeDialog.setSize(560, 640);
+                homeDialog.setLocationRelativeTo(this);
+            }
+            homeDialog.setVisible(true);
+        });
+        top.add(homeBtn);
         JButton open = new JButton("DB を開く…");
         open.addActionListener(e -> chooseDb());
         top.add(open);
@@ -186,7 +201,7 @@ public final class MapViewer extends JFrame {
         panel.onContext(this::contextMenu);
         panel.onClick(this::showMonstersAt);
 
-        setSize(1200, 860);
+        setSize(1300, 900);
         setLocationRelativeTo(null);
         new Timer(1000, e -> refresh()).start();
         SwingUtilities.invokeLater(this::refresh);
@@ -201,6 +216,7 @@ public final class MapViewer extends JFrame {
     private void refresh() {
         windowsPanel.refresh();  // DB が読めなくても窓の学習・学習の状況は見せる
         livePanel.refresh();
+        homePanel.refresh();
         try {
             List<String> maps = db.maps();
             MapDb.Pos cur = db.latest();

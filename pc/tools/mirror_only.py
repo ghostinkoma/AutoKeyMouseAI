@@ -15,6 +15,86 @@ from akm.mirror import Mirror
 from akm.screen import GameScreen
 
 
+def start_home_return(cfg, screen, rec, dev, grab_full, input_lock, m, pc_dir):
+    """MU Helper の帰還 (akm/home_return.py)。設定は地図ビューアで (models/home_return.properties)。"""
+    from akm.config import abs_map_from
+    from akm.device import open_device
+    from akm.home_return import HomeReturn
+    from akm.maploc import LocationReader, make_ocr
+    from akm.screen import bring_to_front, foreground_window
+    from akm.vision import bar_level
+
+    if dev is None:
+        dev = open_device(cfg, abs_map_from(cfg))
+    lcfg = cfg.get("maplog") or {}
+    try:
+        teacher = make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd"))
+    except Exception:
+        teacher = None
+    reader = LocationReader(lcfg, teacher) if teacher is not None else None
+    hud = (cfg.get("hud") or {}).get("hp") or {}
+    offset = (cfg.get("elf") or {}).get("character_offset", [0.0, -0.08])
+
+    def safe_run(script):
+        try:
+            return dev.run(script, timeout=10)
+        except Exception:
+            try:
+                dev.stop()
+                dev.run("ra", timeout=3)
+            except Exception:
+                pass
+            raise
+
+    def read_loc(img):
+        return reader.read_raw(img) if reader is not None else None
+
+    def read_hp(img):
+        if not hud.get("roi"):
+            return None
+        v = bar_level(img, hud["roi"], hud.get("color", "red"), hud.get("direction", "vertical"))
+        return v if v > 0 else None  # 赤が全く見えない = 読めない (窓で隠れているなど)
+
+    def click_at(x, y):
+        return f"{dev.s_move(*screen.to_screen(x, y))};w:30;c:L"
+
+    def char_pos(img):
+        h, w = img.shape[:2]
+        return w / 2 + offset[0] * h, h / 2 + offset[1] * h
+
+    def helper_now():
+        # 帰還の中では認識の結果を待たずに、今の画面で MU Helper の ■ / ▶ を見る
+        names = {d.name for d in rec.detector.detect(grab_full()) if d.present}
+        return True if "helper_running" in names else False if "helper_stopped" in names else None
+
+    hr = HomeReturn(safe_run, grab_full, read_loc, read_hp, lambda: rec.last.helper, click_at, char_pos,
+                    helper_now=helper_now,
+                    activate=getattr(screen, "activate", None), foreground=foreground_window, restore=bring_to_front,
+                    lock=input_lock, settings_path=pc_dir / "models" / "home_return.properties",
+                    state_path=pc_dir / "models" / "home_return_state.properties",
+                    calib_path=pc_dir / "models" / "home_nav.json")
+    orig_cycle = hr.cycle
+    keys_fps = float((cfg.get("rare_windows") or {}).get("mirror_fps_during_keys", 2))
+
+    def cycle_slow():
+        # 歩いている間は液晶への画面送信を減らして、キー・マウス (Bluetooth) に電波を空ける (PT のお断りと同じ)
+        if keys_fps > 0:
+            m.slow_down(keys_fps)
+        try:
+            return orig_cycle()
+        finally:
+            m.slow_down(0)
+
+    hr.cycle = cycle_slow
+    hr.reload_settings()
+    hr.start(lambda: rec.last.loc or rec.last.last_loc)
+    if reader is None:
+        print("[home] 現在地の OCR が使えないので、MU Helper の帰還はできません")
+    print("[home] MU Helper の帰還: 地図ビューアの「MU Helper の帰還」で設定 (今は "
+          + ("オン" if hr.settings.enabled else "オフ") + ")。MU Helper を手で開始した場所を帰る場所にします")
+    return hr
+
+
 def main() -> None:
     from akm.config import PC_DIR
 
@@ -52,6 +132,7 @@ def main() -> None:
     ap.add_argument("--rare", default=None,
                     help="めったに出ない窓の名前 (カンマ区切り)。見えた瞬間の画面を dataset/screens/rare に残す"
                          " (省略時は config の rare_windows.watch。無ければ party_invite,trade)")
+    ap.add_argument("--no-home", action="store_true", help="MU Helper の帰還 (地図ビューアで設定) を使わない")
     ap.add_argument("--decline", default=None,
                     help="見えたら断る窓の名前 (カンマ区切り。例 party_invite)。ゲームの窓が手前のときだけキーを送る"
                          " (押すキー・クリック位置は config の rare_windows.decline)")
@@ -89,6 +170,8 @@ def main() -> None:
     import threading
 
     shot_lock = threading.Lock()  # OBS への問い合わせはミラーと認識で同時にしない
+    input_lock = threading.Lock()  # キー・マウスの操作 (PT 招待のお断り / MU Helper の帰還) は 1 つずつ
+    dev = None
 
     def grab_preview():
         with shot_lock:
@@ -260,12 +343,13 @@ def main() -> None:
                         m.slow_down(keys_fps)
                     else:
                         m.paused = True
-                    time.sleep(float(rcfg.get("pause_before_keys_s", 0.6)))
-                    try:
-                        return orig_respond(*a, **k)
-                    finally:
-                        m.slow_down(0)
-                        m.paused = False
+                    with input_lock:  # MU Helper の帰還で歩いている間は、終わるのを待ってから断る
+                        time.sleep(float(rcfg.get("pause_before_keys_s", 0.6)))
+                        try:
+                            return orig_respond(*a, **k)
+                        finally:
+                            m.slow_down(0)
+                            m.paused = False
 
                 responder.respond = respond_paused
             rare = RareWatch(watch, PC_DIR / "dataset" / "screens" / "rare", decline, press=press, click=click,
@@ -289,6 +373,9 @@ def main() -> None:
                              learn_dir=(PC_DIR / "dataset" / "frames") if args.learn else None,
                              learn_every=args.learn_every, harvester=harvester, world=world, rare=rare)
         rec.start()
+    home = None
+    if rec is not None and args.recognize and not args.no_home:
+        home = start_home_return(cfg, screen, rec, dev, grab_full, input_lock, m, PC_DIR)
     cycle = None
     if args.auto_train:
         from akm.edge.cycle import LearnCycle
@@ -379,6 +466,8 @@ def main() -> None:
             except Exception as e:
                 print(f"[status] 状況を書けません: {e}")
     except KeyboardInterrupt:
+        if home is not None:
+            home.stop()
         if rec is not None:
             rec.stop()
         if cycle is not None:

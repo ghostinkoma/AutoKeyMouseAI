@@ -115,6 +115,16 @@ def status_rows(m=None, rec=None, cycle=None, esp: dict | None = None, pc_dir: P
         st = rec.world.stats
         rows.append(("DB 目撃", f"登録 {st['ok']} / 保留 {st['pending']} / 除外 {st['ng']}  位置 {st['loc_ok']}"))
     if pc_dir is not None:
+        hs = Path(pc_dir) / "models" / "home_return_state.properties"
+        if hs.exists():
+            from .home_return import load_props
+
+            st = load_props(hs)
+            on = load_props(Path(pc_dir) / "models" / "home_return.properties").get("enabled", "false") == "true"
+            home = st.get("home", "").replace(",", " ") or "未記録"
+            rows.append(("MU Helper の帰還", (f"{st.get('status', '?')}  次まで {st.get('next_in_s', '?')} 秒" if on
+                                            else "オフ") + f"  帰る場所 {home}  済 {st.get('cycles', '0')} 回"
+                         + (f"  前回: {st['last_result']}" if st.get("last_result") else "")))
         score = Path(pc_dir) / "models" / "edge_win_score.txt"
         table = Path(pc_dir) / "models" / "window_table.tsv"
         if table.exists():
