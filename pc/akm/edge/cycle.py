@@ -21,8 +21,24 @@ import time
 from pathlib import Path
 
 
+def train_threads() -> int:
+    """学習 (numpy / OpenCV) に使う CPU のスレッド数。全部使うとゲーム・認識・液晶への送信が遅れるので半分まで。
+    環境変数 AKM_TRAIN_THREADS で変えられる。"""
+    try:
+        return max(1, int(os.environ["AKM_TRAIN_THREADS"]))
+    except (KeyError, ValueError):
+        return max(1, (os.cpu_count() or 2) // 2)
+
+
 def run_low_priority(cmd: list[str], cwd: Path) -> tuple[int, str]:
     kw = {}
+    n = str(train_threads())
+    env = dict(os.environ)
+    for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+              "OPENCV_FOR_THREADS_NUM"):
+        env.setdefault(k, n)
+    env.setdefault("AKM_CV_THREADS", n)
+    kw["env"] = env
     if os.name == "nt":
         kw["creationflags"] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
     else:

@@ -107,12 +107,19 @@ def main() -> None:
     m.bc_max_ratio = args.max_ratio
     base_lines = [("MIRROR ONLY", (0, 200, 255))]
     m.set_lines(base_lines)
+    # 計算の分担 (python tools\perf_check.py で測ってから): GPU (OpenCL) で窓・アイコンの候補探し
+    opencl = bool((cfg.get("performance") or {}).get("opencl", False))
     rec = None
     if args.recognize or args.learn:
         from akm.edge.live import LiveRecognizer, overlay_lines
         from akm.edge.objects import ObjectDetector
 
-        det = ObjectDetector.load()
+        det = ObjectDetector.load(opencl=opencl)
+        if opencl:
+            import cv2
+
+            print("[perf] 窓・アイコンの候補探しを GPU (OpenCL) で: "
+                  + (cv2.ocl.Device.getDefault().name() if det.opencl else "使えないので CPU のまま"))
         ocr = None
         try:
             from akm.edge.ocr import OcrReader
@@ -284,7 +291,7 @@ def main() -> None:
         from akm.edge.cycle import LearnCycle
 
         def reload_models():
-            rec.detector = ObjectDetector.load()  # 新しく登録した窓・アイコンも読み直す
+            rec.detector = ObjectDetector.load(opencl=opencl)  # 新しく登録した窓・アイコンも読み直す
             try:
                 rec.ocr = OcrReader.load()
                 if rec.harvester is not None:

@@ -132,17 +132,21 @@ class ObjectDetector:
     WORK = 0.5                   # 候補探しは半分に縮小した画面で
 
     def __init__(self, objects: list[ObjectDef], model: QModel | None = None, hi: float = 0.8, lo: float = 0.55,
-                 nn_min: float = 0.6):
+                 nn_min: float = 0.6, opencl: bool = False):
         self.objects = objects
+        # 縮小画面での候補探し (画面全体の matchTemplate) を GPU (OpenCL) で。使えなければ CPU のまま
+        self.opencl = bool(opencl) and cv2.ocl.haveOpenCL()
+        if self.opencl:
+            cv2.ocl.setUseOpenCL(True)
         self.model = model
         self.hi, self.lo, self.nn_min = hi, lo, nn_min
         self.big_area, self.big_ncc = 20000, 0.85  # 大きな窓 (ピクセル数) はこの一致度以上なら、ネットに関わらず「ある」
         self._cache: dict = {}
 
     @classmethod
-    def load(cls, base: Path = DATA, model_path: Path = MODEL) -> "ObjectDetector":
+    def load(cls, base: Path = DATA, model_path: Path = MODEL, opencl: bool = False) -> "ObjectDetector":
         model = QModel.load(model_path) if Path(model_path).exists() else None
-        return cls(load_objects(base), model)
+        return cls(load_objects(base), model, opencl=opencl)
 
     def _templates(self, o: ObjectDef, screen_h: int):
         """倍率ごとに (倍率, 縮小画面用のテンプレート or None, 等倍のテンプレート)。"""
@@ -175,7 +179,12 @@ class ObjectDetector:
             else:
                 if ts.shape[0] > small.shape[0] or ts.shape[1] > small.shape[1]:
                     continue
-                _, _, _, (sx, sy) = cv2.minMaxLoc(cv2.matchTemplate(small, ts, cv2.TM_CCOEFF_NORMED))
+                if self.opencl:
+                    tu = self._cache.setdefault(("umat", id(ts)), (ts, cv2.UMat(ts)))[1]
+                    res = cv2.matchTemplate(self._small_u, tu, cv2.TM_CCOEFF_NORMED)
+                else:
+                    res = cv2.matchTemplate(small, ts, cv2.TM_CCOEFF_NORMED)
+                _, _, _, (sx, sy) = cv2.minMaxLoc(res)
                 # 縮小画面で見つけた場所の周りを等倍で探し直す (一致度を正確に)
                 m = int(2 / self.WORK) + 2
                 x0, y0 = max(0, int(sx / self.WORK) - m), max(0, int(sy / self.WORK) - m)
@@ -204,6 +213,7 @@ class ObjectDetector:
     def detect(self, img: np.ndarray) -> list[Detection]:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
         small = cv2.resize(gray, None, fx=self.WORK, fy=self.WORK, interpolation=cv2.INTER_AREA)
+        self._small_u = cv2.UMat(small) if self.opencl else None  # GPU へは 1 回だけ送る
         out = []
         for o in self.objects:
             ncc, box = self.candidate(o, gray, small)

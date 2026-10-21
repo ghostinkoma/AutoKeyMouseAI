@@ -3,6 +3,11 @@
 # ROI (領域) はすべてゲーム画面サイズに対する比率 [x, y, 幅, 高さ]。
 # tools/vision_preview.py で枠を表示しながら合わせる。
 
+# 計算の分担。python tools\perf_check.py で、どこに CPU を使っているかと GPU (OpenCL) が速いかを測ってから
+performance:
+  opencl: false   # true: 窓・アイコンの候補探しを GPU (OpenCL。GTX 660 など) で。測って速いときだけ
+  # 自動学習が使う CPU のスレッドは、既定でコア数の半分 (環境変数 AKM_TRAIN_THREADS で変更)
+
 device:
   transport: http          # http (Wi-Fi) | serial (COM ポート。USB が不安定な基板では http 推奨)
   port: COM18              # serial のとき
