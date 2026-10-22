@@ -2889,8 +2889,10 @@ def test_home_return_respects_settings_and_helper_off(tmp_path):
 
     w, hr = _home_world(tmp_path, hp=0.9)
     hr.home = ("Icarus", 50, 72)
-    w.helper = False                           # 手で止めているときは何もしない
     hr.step(N(map="Icarus", x=60, y=80))
+    w.helper = False                           # 手で止めた: 帰還も、常にオンに保つのもしない
+    hr.step(N(map="Icarus", x=60, y=80))
+    assert hr.manual_off
     assert hr.cycles == 0                      # オンにしてから 1 回目は interval_s 後
     w.t += 61
     hr.step(N(map="Icarus", x=60, y=80))
@@ -2904,3 +2906,45 @@ def test_home_return_respects_settings_and_helper_off(tmp_path):
     w.helper = True
     hr.step(None)
     assert hr.cycles == 1                      # オフなら帰還しない
+
+
+def test_home_return_ensures_helper_on_with_ai_check(tmp_path):
+    """Home が 1 回届かなくても、AI で停止中と確かめて押し直し、▶ ボタンのクリックも使って確実に入れる。"""
+    from types import SimpleNamespace as N
+
+    w, hr = _home_world(tmp_path, hp=0.9)
+    lost = {"n": 1}
+    orig = hr.run
+
+    def run(script):
+        if script == "k:home" and not w.helper and lost["n"] > 0:  # 入れる Home が届かない
+            lost["n"] -= 1
+            w.keys.append("home(lost)")
+            return "OK"
+        if script.startswith("click 20 40"):  # ▶ ボタン
+            w.helper = True
+            w.keys.append("play")
+            return "OK"
+        return orig(script)
+
+    hr.run = run
+    hr.helper_probe = lambda: {"state": w.helper, "p": 0.95, "click": None if w.helper else (20, 40)}
+    hr.home = ("Icarus", 50, 72)
+    hr.step(N(map="Icarus", x=60, y=80))
+    w.x, w.y = 60.0, 80.0
+    w.t += 61
+    hr.step(N(map="Icarus", x=60, y=80))
+    assert w.helper is True and "動作中を確認" in hr.last_result, (hr.last_result, w.keys)
+    assert "home(lost)" in w.keys  # 1 回目は届かなかったが、確かめて入れ直した
+
+    # 帰還の外でも: 手で止めていないのに停止中が続いたら入れる (常にオン)。町 (別のマップ) では入れない
+    w.helper = False
+    hr._prev_helper = False
+    hr.step(N(map="Lorencia", x=130, y=130))
+    w.t += 20
+    hr.step(N(map="Lorencia", x=130, y=130))
+    assert w.helper is False
+    hr.step(N(map="Icarus", x=50, y=72))
+    w.t += 11
+    hr.step(N(map="Icarus", x=50, y=72))
+    assert w.helper is True and hr.last_result == "MU Helper を入れ直した"

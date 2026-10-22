@@ -62,13 +62,35 @@ def start_home_return(cfg, screen, rec, dev, grab_full, input_lock, m, pc_dir):
         h, w = img.shape[:2]
         return w / 2 + offset[0] * h, h / 2 + offset[1] * h
 
-    def helper_now():
-        # 帰還の中では認識の結果を待たずに、今の画面で MU Helper の ■ / ▶ を見る
-        names = {d.name for d in rec.detector.detect(grab_full()) if d.present}
-        return True if "helper_running" in names else False if "helper_stopped" in names else None
+    # MU Helper の ■ (動作中) / ▶ (停止中) を見る専用の認識 (認識のスレッドと取り合わないように別に持つ)。
+    # AI = テンプレートの一致度 + 小さなネットの確率 (akm/edge/objects.py)。両方そろったものだけ「ある」
+    from akm.edge.objects import ObjectDetector, load_objects
+    from akm.edge.objects import MODEL as OBJ_MODEL
+
+    helper_objs = [o for o in load_objects() if o.name in ("helper_running", "helper_stopped")]
+    hdet_box = {"det": None, "mtime": None}
+
+    def helper_det():
+        mt = OBJ_MODEL.stat().st_mtime if OBJ_MODEL.exists() else 0
+        if hdet_box["det"] is None or mt != hdet_box["mtime"]:  # 学習でモデルが新しくなったら読み直す
+            d = ObjectDetector.load()
+            d.objects = [o for o in d.objects if o.name in ("helper_running", "helper_stopped")] or helper_objs
+            hdet_box["det"], hdet_box["mtime"] = d, mt
+        return hdet_box["det"]
+
+    def helper_probe():
+        dets = {d.name: d for d in helper_det().detect(grab_full())}
+        run, stop = dets.get("helper_running"), dets.get("helper_stopped")
+        conf = lambda d: d.nn if d.nn >= 0 else d.ncc  # noqa: E731
+        if run is not None and run.present and not (stop is not None and stop.present):
+            return {"state": True, "p": conf(run), "click": None}
+        if stop is not None and stop.present and not (run is not None and run.present):
+            x, y, w, h = stop.box
+            return {"state": False, "p": conf(stop), "click": (x + w / 2, y + h / 2)}
+        return {"state": None, "p": 0.0, "click": None}
 
     hr = HomeReturn(safe_run, grab_full, read_loc, read_hp, lambda: rec.last.helper, click_at, char_pos,
-                    helper_now=helper_now,
+                    helper_probe=helper_probe,
                     activate=getattr(screen, "activate", None), foreground=foreground_window, restore=bring_to_front,
                     lock=input_lock, settings_path=pc_dir / "models" / "home_return.properties",
                     state_path=pc_dir / "models" / "home_return_state.properties",

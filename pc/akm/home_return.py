@@ -33,6 +33,8 @@ DEFAULTS = {
     "potion_every_ms": "400",  # ポーションを続けて押す間隔
     "helper_key": "home",      # MU Helper のオン/オフ
     "restore_focus": "true",   # ⑥ 元の窓を手前に戻す
+    "keep_on": "true",         # MU Helper を常にオンに保つ (帰る場所のマップで、手で止めていないのに止まっていたら入れる)
+    "keep_on_s": "10",         # はっきり停止中がこの秒数続いたら入れる
     "home_override": "",       # ビューアで帰る場所を指定 "マップ,x,y" (空 = MU Helper を手で始めた場所)
     "override_seq": "0",       # ビューアが指定し直すたびに増やす
 }
@@ -79,6 +81,8 @@ class Settings:
     potion_every_ms: int = 400
     helper_key: str = "home"
     restore_focus: bool = True
+    keep_on: bool = True
+    keep_on_s: float = 10.0
     home_override: str = ""
     override_seq: int = 0
 
@@ -102,6 +106,7 @@ class Settings:
                    potion_every_ms=max(50, f("potion_every_ms", int, d.potion_every_ms)),
                    helper_key=(p.get("helper_key") or d.helper_key).strip().lower(),
                    restore_focus=b(p.get("restore_focus", "true")),
+                   keep_on=b(p.get("keep_on", "true")), keep_on_s=max(3.0, f("keep_on_s", float, d.keep_on_s)),
                    home_override=(p.get("home_override") or "").strip(),
                    override_seq=f("override_seq", int, 0))
 
@@ -162,6 +167,8 @@ class HomeReturn:
     foreground()/restore(hwnd) : 今手前にある窓 / その窓を手前に戻す
     lock               : キー操作の順番待ち (PT 招待のお断りと同時に押さないように)
     helper_now()       : 今の画面を撮って MU Helper を確かめる (帰還の中で使う。無ければ helper_state)
+    helper_probe()     : 今の画面を AI (窓・アイコンの認識 = 一致度 + ネット) で見た MU Helper の状態
+                         {"state": True / False / None, "p": 確からしさ, "click": ▶ ボタンの座標 or None}
     """
     run: callable
     grab: callable
@@ -175,6 +182,7 @@ class HomeReturn:
     restore: callable = None
     lock: object = None
     helper_now: callable = None
+    helper_probe: callable = None
     settings_path: Path | None = None
     state_path: Path | None = None
     calib_path: Path | None = None
@@ -189,7 +197,10 @@ class HomeReturn:
     last_result: str = ""
     _next: float = 0.0
     _prev_helper: bool | None = None
-    _own_until: float = 0.0            # 自分で Home を押した直後 (この間の「開始」は手動ではない)
+    _own_until: float = 0.0            # 自分で Home を押した直後 (この間の「開始」「停止」は手動ではない)
+    manual_off: bool = False           # 手で止めた (常にオンに保つのをやめる。手で開始したら戻す)
+    helper_seen: str = ""              # 最後に AI で確かめた MU Helper の状態 (ビューア用)
+    _off_since: float | None = None
     _seq: int = -1
     _settings_mtime: float = -1.0
     _last_potion: float = -1e9
@@ -242,6 +253,8 @@ class HomeReturn:
             "cycles": str(self.cycles),
             "last_result": self.last_result,
             "calibrated": "yes" if self.calib.ok() else "no",
+            "helper": self.helper_seen,
+            "manual_off": "yes" if self.manual_off else "no",
         }
         save_props(self.state_path, d, "MU Helper の帰還の状態 (学習ループが書く。地図ビューアが読む)")
 
@@ -257,6 +270,11 @@ class HomeReturn:
                 self._next = now + self.settings.interval_s
             else:
                 self.log("[home] MU Helper が手で開始されましたが、現在地が読めないので帰る場所は前のまま")
+        if cur is True and self._prev_helper is False and now >= self._own_until:
+            self.manual_off = False
+        if cur is False and self._prev_helper is True and now >= self._own_until:
+            self.manual_off = True  # 手で止めた: 入れ直さない (手で開始するまで)
+            self.log("[home] MU Helper が手で止められました (手で開始するまで、自動では入れません)")
         if cur is not None:
             self._prev_helper = cur
 
@@ -380,6 +398,70 @@ class HomeReturn:
     def _helper(self):
         return (self.helper_now or self.helper_state)()
 
+    def _probe(self) -> dict:
+        if self.helper_probe is not None:
+            return self.helper_probe()
+        return {"state": self._helper(), "p": 1.0, "click": None}
+
+    def confirm(self, frames: int = 3, gap_ms: int = 250) -> tuple[bool | None, float, tuple | None]:
+        """AI で何枚か見て多数決。(状態, 確からしさの平均, ▶ ボタンの座標)。半分を超えて同じでなければ None。"""
+        votes, ps, click = [], [], None
+        for i in range(frames):
+            r = self._probe()
+            votes.append(r.get("state"))
+            if r.get("state") is not None:
+                ps.append(float(r.get("p", 0)))
+            click = r.get("click") or click
+            if i + 1 < frames:
+                self._wait(gap_ms)
+        for st in (True, False):
+            if votes.count(st) * 2 > frames:
+                self.helper_seen = f"{'動作中' if st else '停止中'} ({sum(ps) / max(1, len(ps)):.2f})"
+                return st, sum(ps) / max(1, len(ps)), click
+        self.helper_seen = "分からない"
+        return None, 0.0, click
+
+    def ensure_off(self) -> bool:
+        """② Home で切って、本当に止まったか確かめる (止まらなければもう 1 回)。"""
+        for attempt in range(2):
+            self._toggle_helper()
+            self._wait(800)
+            st, p, _ = self.confirm(2)
+            if st is False:
+                return True
+            if st is None:
+                return False  # 分からないまま押すと入れてしまうので、これ以上押さない
+            self.log(f"[home] MU Helper が止まらないので、もう一度 Home ({attempt + 1})")
+        return False
+
+    def ensure_on(self, tries: int = 4) -> bool:
+        """⑤ MU Helper を確実に入れる: AI で何枚か見て多数決 → 停止中なら Home (2 回目からは ▶ ボタンのクリックと
+        交互) → 1.5 秒待って確かめる、を動作中と確かめられるまで。分からないとき (窓で隠れているなど) は押さない
+        (Home は切り替えなので、動いているのに押すと止めてしまう)。"""
+        for attempt in range(tries):
+            st, p, click = self.confirm(3)
+            if st is True:
+                if attempt:
+                    self.log(f"[home] MU Helper が動作中になったのを確かめました (AI {p:.2f})")
+                return True
+            if st is None:
+                self.log("[home] MU Helper の状態が分からない (パネルが隠れている?)。押さずに待ちます")
+                self._wait(1000)
+                continue
+            if attempt % 2 == 1 and click is not None:
+                self.log(f"[home] MU Helper が停止中 (AI {p:.2f})。▶ ボタンをクリック ({attempt + 1} 回目)")
+                self._own_until = self.clock() + 4.0
+                self.run(self.click_at(*click))
+            else:
+                self.log(f"[home] MU Helper が停止中 (AI {p:.2f})。{self.settings.helper_key} を押します ({attempt + 1} 回目)")
+                self._toggle_helper()
+            self._wait(1500)
+        st, p, _ = self.confirm(3)
+        if st is True:
+            return True
+        self.log("[home] MU Helper を入れられませんでした (少しあとで、もう一度確かめて入れます)")
+        return False
+
     def cycle(self) -> str:
         """①〜⑥ を 1 回。戻り値は結果の文。"""
         s = self.settings
@@ -397,15 +479,15 @@ class HomeReturn:
         try:
             self.status = "帰還中"
             self.write_state(here)
-            self._toggle_helper()                 # ② MU Helper を切る
+            off = self.ensure_off()               # ② MU Helper を切る (止まったか確かめる)
             self._wait(s.off_wait_ms)             # ③ (ポーションを見ながら)
-            result = self.walk_home()             # ④ (ポーションを見ながら)
-            self._toggle_helper()                 # ⑤ MU Helper を入れる
-            self._wait(1500)
-            if self._helper() is False:          # はっきり停止中ならもう一度
-                self._toggle_helper()
-                self._wait(1500)
-                result += " / MU Helper を押し直した"
+            result = self.walk_home() if off else "MU Helper が止まらないので歩かない"  # ④
+            # ⑤ MU Helper を入れる: AI で動作中と確かめられるまで (押す前にも確かめるので、②が効いて
+            #    いなかったときに押して止めてしまうことは無い)
+            if self.ensure_on():
+                result += " / MU Helper 動作中を確認"
+            else:
+                result += " / MU Helper を入れられない (あとで再確認)"
         finally:
             self.status = "待機中"
             if prev and self.restore is not None:  # ⑥
@@ -415,10 +497,50 @@ class HomeReturn:
                     pass
         return result
 
+    def keep_on(self, here=None) -> None:
+        """常にオンに保つ: 帰る場所のマップにいて、手で止めていないのに「はっきり停止中」が keep_on_s 続いたら入れる。"""
+        s = self.settings
+        if not s.keep_on or self.home is None or self.manual_off:
+            self._off_since = None
+            return
+        if here is not None and here.map != self.home[0]:  # 町などでは入れない
+            self._off_since = None
+            return
+        cur = self.helper_state()
+        now = self.clock()
+        if cur is not False:
+            self._off_since = None
+            return
+        if self._off_since is None:
+            self._off_since = now
+            return
+        if now - self._off_since < s.keep_on_s:
+            return
+        lock = self.lock
+        if lock is not None and not lock.acquire(timeout=5):
+            return
+        try:
+            prev = self.foreground() if (self.foreground and s.restore_focus) else None
+            if self.activate is not None and not self.activate():
+                return
+            self.log(f"[home] MU Helper が {now - self._off_since:.0f} 秒止まっているので入れます")
+            ok = self.ensure_on()
+            self.last_result = "MU Helper を入れ直した" if ok else "MU Helper を入れられない"
+            if prev and self.restore is not None:
+                try:
+                    self.restore(prev)
+                except Exception:
+                    pass
+        finally:
+            self._off_since = None
+            if lock is not None:
+                lock.release()
+
     def step(self, here=None) -> None:
         """見張りの 1 回 (学習ループから 0.5 秒ごとに)。"""
         self.reload_settings()
         self.watch(here)
+        self.keep_on(here)
         if self.due():
             lock = self.lock
             if lock is not None and not lock.acquire(timeout=5):

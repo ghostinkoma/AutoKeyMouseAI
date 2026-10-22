@@ -44,6 +44,8 @@ public final class HomeReturnPanel extends JPanel {
     private final JSpinner potionEvery = spinner(400, 50, 5000, 50);
     private final JTextField helperKey = new JTextField("home", 6);
     private final JCheckBox restore = new JCheckBox("終わったら元の窓に戻す", true);
+    private final JCheckBox keepOn = new JCheckBox("MU Helper を常にオンに保つ (AI で確かめて入れる)", true);
+    private final JSpinner keepOnS = spinner(10, 3, 600, 1);
     private final JTextField homeMap = new JTextField(8);
     private final JSpinner homeX = spinner(0, 0, 255, 1);
     private final JSpinner homeY = spinner(0, 0, 255, 1);
@@ -69,6 +71,8 @@ public final class HomeReturnPanel extends JPanel {
         addRow(form, row, "ポーション間隔 (ms)", potionEvery);
         addRow(form, row, "Helper のキー", helperKey);
         addRow(form, row, "", restore);
+        addRow(form, row, "", keepOn);
+        addRow(form, row, "止まっていたら入れるまで (秒)", keepOnS);
 
         JPanel homeRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
         homeRow.add(new JLabel("マップ"));
@@ -171,6 +175,8 @@ public final class HomeReturnPanel extends JPanel {
         potionEvery.setValue(num(p, "potion_every_ms", 400));
         helperKey.setText(p.getOrDefault("helper_key", "home"));
         restore.setSelected(!"false".equalsIgnoreCase(p.getOrDefault("restore_focus", "true")));
+        keepOn.setSelected(!"false".equalsIgnoreCase(p.getOrDefault("keep_on", "true")));
+        keepOnS.setValue(num(p, "keep_on_s", 10));
         overrideSeq = num(p, "override_seq", 0);
         String[] h = p.getOrDefault("home_override", "").split(",");
         if (h.length == 3) {
@@ -218,6 +224,8 @@ public final class HomeReturnPanel extends JPanel {
         p.put("potion_every_ms", String.valueOf(potionEvery.getValue()));
         p.put("helper_key", helperKey.getText().strip().toLowerCase());
         p.put("restore_focus", String.valueOf(restore.isSelected()));
+        p.put("keep_on", String.valueOf(keepOn.isSelected()));
+        p.put("keep_on_s", String.valueOf(keepOnS.getValue()));
         p.put("home_override", home.isEmpty() ? "" : home + "," + homeX.getValue() + "," + homeY.getValue());
         p.put("override_seq", String.valueOf(overrideSeq));
         StringBuilder sb = new StringBuilder("# MU Helper の帰還の設定 (地図ビューアが書く。学習ループが読む)\n");
@@ -266,6 +274,9 @@ public final class HomeReturnPanel extends JPanel {
         if (!s.getOrDefault("here", "").isEmpty()) sb.append("  現在地 ").append(s.get("here").replace(",", " "));
         sb.append('\n');
         if ("no".equals(s.get("calibrated"))) sb.append("画面の向き: 最初の帰還のときに自動で調べます\n");
+        if (!s.getOrDefault("helper", "").isEmpty()) sb.append("MU Helper (AI で確認): ").append(s.get("helper"));
+        if ("yes".equals(s.get("manual_off"))) sb.append("  手で止めたので自動では入れません (手で開始すると戻ります)");
+        if (!s.getOrDefault("helper", "").isEmpty() || "yes".equals(s.get("manual_off"))) sb.append('\n');
         sb.append("前回の帰還: ").append(s.getOrDefault("last_result", "").isEmpty() ? "-" : s.get("last_result"));
         state.setText(sb.toString());
     }
