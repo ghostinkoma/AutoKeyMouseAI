@@ -1,7 +1,7 @@
 """MU Helper の帰還: 狩場から流されないよう、MU Helper を手動で始めた場所へ定期的に歩いて戻る。
 
   記録: MU Helper が手で開始された (停止中 → 動作中。自分で押したときは除く) ときの現在地を「帰る場所」に
-  繰り返し (interval_s ごと。MU Helper が動作中のときだけ):
+  繰り返し (interval_min 分ごと、既定 30 分・最大 240 分。MU Helper が動作中のときだけ):
     ① ゲームを手前に出す (別の仮想デスクトップにあっても。今手前にある窓は覚えておく)
     ② MU Helper を切る (Home)
     ③ off_wait_ms (100ms) 待つ
@@ -23,7 +23,7 @@ from pathlib import Path
 
 DEFAULTS = {
     "enabled": "false",        # 帰還する
-    "interval_s": "120",       # 何秒ごとに帰還するか
+    "interval_min": "30",      # 何分ごとに帰還するか (1〜240)
     "min_distance": "0",       # 帰る場所からこのマス数以内なら、その回は何もしない (0 = 毎回)
     "off_wait_ms": "100",      # ③ MU Helper を切ってから歩き出すまで
     "arrive_tiles": "1",       # 帰る場所からこのマス数以内に着いたら終わり
@@ -71,7 +71,7 @@ def save_props(path: Path, d: dict, header: str = "") -> None:
 @dataclass
 class Settings:
     enabled: bool = False
-    interval_s: float = 120.0
+    interval_s: float = 1800.0     # 設定は分 (interval_min)。中では秒
     min_distance: float = 0.0
     off_wait_ms: int = 100
     arrive_tiles: float = 1.0
@@ -96,7 +96,12 @@ class Settings:
 
         b = lambda v: str(v).strip().lower() in ("1", "true", "yes", "on")  # noqa: E731
         d = cls()
-        return cls(enabled=b(p.get("enabled", "false")), interval_s=max(10.0, f("interval_s", float, d.interval_s)),
+        if str(p.get("interval_min", "")).strip():
+            minutes = f("interval_min", float, 30.0)
+        else:  # 前の版の設定 (秒)
+            minutes = f("interval_s", float, d.interval_s) / 60
+        interval = min(240.0, max(1.0, minutes)) * 60
+        return cls(enabled=b(p.get("enabled", "false")), interval_s=interval,
                    min_distance=f("min_distance", float, d.min_distance),
                    off_wait_ms=max(0, f("off_wait_ms", int, d.off_wait_ms)),
                    arrive_tiles=max(0.5, f("arrive_tiles", float, d.arrive_tiles)),
@@ -104,7 +109,7 @@ class Settings:
                    potion_key=(p.get("potion_key") or d.potion_key).strip().lower(),
                    potion_hp=f("potion_hp", float, d.potion_hp),
                    potion_every_ms=max(50, f("potion_every_ms", int, d.potion_every_ms)),
-                   helper_key=(p.get("helper_key") or d.helper_key).strip().lower(),
+                   helper_key="home",  # MU Helper の切り替えはショートカットキーの Home だけ
                    restore_focus=b(p.get("restore_focus", "true")),
                    keep_on=b(p.get("keep_on", "true")), keep_on_s=max(3.0, f("keep_on_s", float, d.keep_on_s)),
                    home_override=(p.get("home_override") or "").strip(),
@@ -236,7 +241,7 @@ class HomeReturn:
                 self.log(f"[home] 帰る場所をビューアの指定に: {h[0]} ({h[1]}, {h[2]})")
         if self.settings.enabled != old.enabled or self.settings.interval_s != old.interval_s:
             self._next = self.clock() + self.settings.interval_s
-            self.log(f"[home] 帰還 {'オン' if self.settings.enabled else 'オフ'} ({self.settings.interval_s:.0f} 秒ごと)")
+            self.log(f"[home] 帰還 {'オン' if self.settings.enabled else 'オフ'} ({self.settings.interval_s / 60:.0f} 分ごと)")
         self.write_state()
 
     def write_state(self, here=None) -> None:
@@ -435,11 +440,11 @@ class HomeReturn:
         return False
 
     def ensure_on(self, tries: int = 4) -> bool:
-        """⑤ MU Helper を確実に入れる: AI で何枚か見て多数決 → 停止中なら Home (2 回目からは ▶ ボタンのクリックと
-        交互) → 1.5 秒待って確かめる、を動作中と確かめられるまで。分からないとき (窓で隠れているなど) は押さない
-        (Home は切り替えなので、動いているのに押すと止めてしまう)。"""
+        """⑤ MU Helper を確実に入れる: AI で何枚か見て多数決 → 停止中ならショートカットキー (Home) →
+        1.5 秒待って確かめる、を動作中と確かめられるまで。分からないとき (窓で隠れているなど) は押さない
+        (Home は切り替えなので、動いているのに押すと止めてしまう)。切り替えは Home だけ (クリックはしない)。"""
         for attempt in range(tries):
-            st, p, click = self.confirm(3)
+            st, p, _ = self.confirm(3)
             if st is True:
                 if attempt:
                     self.log(f"[home] MU Helper が動作中になったのを確かめました (AI {p:.2f})")
@@ -448,13 +453,8 @@ class HomeReturn:
                 self.log("[home] MU Helper の状態が分からない (パネルが隠れている?)。押さずに待ちます")
                 self._wait(1000)
                 continue
-            if attempt % 2 == 1 and click is not None:
-                self.log(f"[home] MU Helper が停止中 (AI {p:.2f})。▶ ボタンをクリック ({attempt + 1} 回目)")
-                self._own_until = self.clock() + 4.0
-                self.run(self.click_at(*click))
-            else:
-                self.log(f"[home] MU Helper が停止中 (AI {p:.2f})。{self.settings.helper_key} を押します ({attempt + 1} 回目)")
-                self._toggle_helper()
+            self.log(f"[home] MU Helper が停止中 (AI {p:.2f})。{self.settings.helper_key} を押します ({attempt + 1} 回目)")
+            self._toggle_helper()
             self._wait(1500)
         st, p, _ = self.confirm(3)
         if st is True:

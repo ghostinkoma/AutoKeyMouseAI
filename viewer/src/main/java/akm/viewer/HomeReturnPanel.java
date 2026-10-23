@@ -34,7 +34,7 @@ import javax.swing.SpinnerNumberModel;
 public final class HomeReturnPanel extends JPanel {
     private final SightingsPanel.MapViewerContext ctx;
     private final JCheckBox enabled = new JCheckBox("帰還する");
-    private final JSpinner interval = spinner(120, 10, 3600, 10);
+    private final JSpinner interval = spinner(30, 1, 240, 5);  // 分 (MU Helper を切って戻る周期)
     private final JSpinner minDist = spinner(0, 0, 50, 1);
     private final JSpinner offWait = spinner(100, 0, 3000, 50);
     private final JSpinner arrive = spinner(1, 1, 10, 1);
@@ -61,7 +61,7 @@ public final class HomeReturnPanel extends JPanel {
         JPanel form = new JPanel(new GridBagLayout());
         int[] row = {0};
         addRow(form, row, "", enabled);
-        addRow(form, row, "間隔 (秒)", interval);
+        addRow(form, row, "間隔 (分, 1〜240)", interval);
         addRow(form, row, "近ければ何もしない (マス)", minDist);
         addRow(form, row, "切ってから待つ (ms)", offWait);
         addRow(form, row, "着いた距離 (マス)", arrive);
@@ -69,7 +69,8 @@ public final class HomeReturnPanel extends JPanel {
         addRow(form, row, "ポーションのキー", potionKey);
         addRow(form, row, "ポーション HP (%)", potionHp);
         addRow(form, row, "ポーション間隔 (ms)", potionEvery);
-        addRow(form, row, "Helper のキー", helperKey);
+        helperKey.setEditable(false);  // MU Helper の切り替えはショートカットキーの Home だけ
+        addRow(form, row, "Helper の切り替え", helperKey);
         addRow(form, row, "", restore);
         addRow(form, row, "", keepOn);
         addRow(form, row, "止まっていたら入れるまで (秒)", keepOnS);
@@ -159,7 +160,9 @@ public final class HomeReturnPanel extends JPanel {
     private void load() {
         Map<String, String> p = readProps(dir().resolve("home_return.properties"));
         enabled.setSelected("true".equalsIgnoreCase(p.getOrDefault("enabled", "false")));
-        interval.setValue(num(p, "interval_s", 120));
+        int minutes = p.containsKey("interval_min") ? num(p, "interval_min", 30)
+                : (p.containsKey("interval_s") ? num(p, "interval_s", 1800) / 60 : 30);  // 前の版は秒
+        interval.setValue(Math.max(1, Math.min(240, minutes)));
         minDist.setValue(num(p, "min_distance", 0));
         offWait.setValue(num(p, "off_wait_ms", 100));
         arrive.setValue(Math.max(1, num(p, "arrive_tiles", 1)));
@@ -173,7 +176,7 @@ public final class HomeReturnPanel extends JPanel {
         }
         potionHp.setValue((int) Math.round(hp * 100));
         potionEvery.setValue(num(p, "potion_every_ms", 400));
-        helperKey.setText(p.getOrDefault("helper_key", "home"));
+        helperKey.setText("home");
         restore.setSelected(!"false".equalsIgnoreCase(p.getOrDefault("restore_focus", "true")));
         keepOn.setSelected(!"false".equalsIgnoreCase(p.getOrDefault("keep_on", "true")));
         keepOnS.setValue(num(p, "keep_on_s", 10));
@@ -214,7 +217,7 @@ public final class HomeReturnPanel extends JPanel {
         }
         Map<String, String> p = new LinkedHashMap<>();
         p.put("enabled", String.valueOf(enabled.isSelected()));
-        p.put("interval_s", String.valueOf(interval.getValue()));
+        p.put("interval_min", String.valueOf(interval.getValue()));
         p.put("min_distance", String.valueOf(minDist.getValue()));
         p.put("off_wait_ms", String.valueOf(offWait.getValue()));
         p.put("arrive_tiles", String.valueOf(arrive.getValue()));
@@ -222,7 +225,7 @@ public final class HomeReturnPanel extends JPanel {
         p.put("potion_key", potionKey.getText().strip().toLowerCase());
         p.put("potion_hp", String.valueOf(((Integer) potionHp.getValue()) / 100.0));
         p.put("potion_every_ms", String.valueOf(potionEvery.getValue()));
-        p.put("helper_key", helperKey.getText().strip().toLowerCase());
+        p.put("helper_key", "home");
         p.put("restore_focus", String.valueOf(restore.isSelected()));
         p.put("keep_on", String.valueOf(keepOn.isSelected()));
         p.put("keep_on_s", String.valueOf(keepOnS.getValue()));

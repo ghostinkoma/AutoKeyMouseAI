@@ -2850,7 +2850,7 @@ def _home_world(tmp_path, hp=0.3, start=(60, 80)):
                     restore=lambda h: setattr(w, "fg", h), lock=threading.Lock(),
                     settings_path=tmp_path / "home_return.properties", state_path=tmp_path / "state.properties",
                     calib_path=tmp_path / "nav.json", log=lambda *a: None, clock=lambda: w.t, sleep=sleep)
-    save_props(hr.settings_path, {"enabled": "true", "interval_s": "60", "potion_hp": "0.5"})
+    save_props(hr.settings_path, {"enabled": "true", "interval_min": "1", "potion_hp": "0.5"})
     return w, hr
 
 
@@ -2897,7 +2897,7 @@ def test_home_return_respects_settings_and_helper_off(tmp_path):
     w.t += 61
     hr.step(N(map="Icarus", x=60, y=80))
     assert hr.cycles == 1 and "動作中でない" in hr.last_result and w.keys == []
-    save_props(hr.settings_path, {"enabled": "true", "interval_s": "60", "home_override": "Icarus,55,75",
+    save_props(hr.settings_path, {"enabled": "true", "interval_min": "1", "home_override": "Icarus,55,75",
                                   "override_seq": "1"})
     hr.step(None)
     assert hr.home == ("Icarus", 55, 75) and hr.home_src == "viewer"  # ビューアで指定した場所
@@ -2909,7 +2909,7 @@ def test_home_return_respects_settings_and_helper_off(tmp_path):
 
 
 def test_home_return_ensures_helper_on_with_ai_check(tmp_path):
-    """Home が 1 回届かなくても、AI で停止中と確かめて押し直し、▶ ボタンのクリックも使って確実に入れる。"""
+    """Home が 1 回届かなくても、AI で停止中と確かめて Home を押し直し、確実に入れる (クリックはしない)。"""
     from types import SimpleNamespace as N
 
     w, hr = _home_world(tmp_path, hp=0.9)
@@ -2921,10 +2921,8 @@ def test_home_return_ensures_helper_on_with_ai_check(tmp_path):
             lost["n"] -= 1
             w.keys.append("home(lost)")
             return "OK"
-        if script.startswith("click 20 40"):  # ▶ ボタン
-            w.helper = True
-            w.keys.append("play")
-            return "OK"
+        if script.startswith("click 20 40"):  # ▶ ボタンはクリックしない
+            raise AssertionError("MU Helper の切り替えは Home だけ")
         return orig(script)
 
     hr.run = run
@@ -2935,7 +2933,7 @@ def test_home_return_ensures_helper_on_with_ai_check(tmp_path):
     w.t += 61
     hr.step(N(map="Icarus", x=60, y=80))
     assert w.helper is True and "動作中を確認" in hr.last_result, (hr.last_result, w.keys)
-    assert "home(lost)" in w.keys  # 1 回目は届かなかったが、確かめて入れ直した
+    assert "home(lost)" in w.keys  # 1 回目は届かなかったが、確かめて Home で入れ直した
 
     # 帰還の外でも: 手で止めていないのに停止中が続いたら入れる (常にオン)。町 (別のマップ) では入れない
     w.helper = False
@@ -2948,3 +2946,13 @@ def test_home_return_ensures_helper_on_with_ai_check(tmp_path):
     w.t += 11
     hr.step(N(map="Icarus", x=50, y=72))
     assert w.helper is True and hr.last_result == "MU Helper を入れ直した"
+
+
+def test_home_return_interval_in_minutes():
+    from akm.home_return import Settings
+
+    assert Settings.from_props({}).interval_s == 1800             # 既定 30 分
+    assert Settings.from_props({"interval_min": "45"}).interval_s == 45 * 60
+    assert Settings.from_props({"interval_min": "999"}).interval_s == 240 * 60  # 最大 240 分
+    assert Settings.from_props({"interval_min": "0"}).interval_s == 60          # 最小 1 分
+    assert Settings.from_props({"interval_s": "300"}).interval_s == 300          # 前の版の設定 (秒)
