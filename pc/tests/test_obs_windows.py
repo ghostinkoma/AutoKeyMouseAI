@@ -85,3 +85,15 @@ def test_connect_hint_for_refused():
     m = connect_hint(ConnectionRefusedError("[WinError 10061] 対象のコンピューターによって接続を拒否されました。"),
                      "localhost", 4455)
     assert "WebSocket サーバーを有効にする" in m and "localhost:4455" in m
+
+
+def test_obs_command_passes_port_and_password_and_runs_in_obs_folder():
+    from pathlib import Path
+
+    from akm.obs_windows import obs_command
+
+    args, cwd = obs_command({"port": 4455, "password": "pw", "path": r"C:\\OBS\\bin\\64bit\\obs64.exe"})
+    assert "--websocket_port=4455" in args and "--websocket_password=pw" in args and "--minimize-to-tray" in args
+    assert cwd == Path(args[0]).parent
+    args, _ = obs_command({})
+    assert not any(a.startswith("--websocket_password") for a in args)

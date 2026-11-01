@@ -113,6 +113,8 @@ obs:
   # 仲介アプリ (gate_app.py) が使う設定: キャラクターごとにゲームキャプチャ "AKM <名前>" を作り、シーン "AKM Capture" に置く
   exe: Main.exe            # ゲームの実行ファイル名 (OBS の撮影先の指定に使う)
   switch_scene: true       # OBS の番組を "AKM Capture" に切り替える (ゲームキャプチャは表示中のときだけ撮るため)
+  autostart: true          # OBS が動いていなければ仲介アプリが起動する (トレイに最小化。ポート・パスワードは上のものを渡す)
+  path: null               # obs64.exe の場所 (null = C:\Program Files\obs-studio\bin\64bit\obs64.exe)
 
 # 割り込んでくるダイアログ (パーティ申請など) を自動で断る。
 # ダイアログが出ている状態で tools/grab_templates.py を実行し、

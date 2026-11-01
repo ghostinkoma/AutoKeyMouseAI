@@ -11,13 +11,19 @@ DLL を自分で入れたり OBS 内部のやり取りを真似たりはせず�
     変わったら OBS の設定を今のタイトルに書き換える (「タイトルが一致するウィンドウだけ」にして取り違えない)
   * 画像は GetSourceScreenshot で受け取る
 
-準備: OBS 28 以降・ツール → WebSocket サーバー設定 で有効化・pip install obsws-python。
-Main.exe は管理者権限で動いているので、OBS も管理者として実行する (しないとゲームに入れない)。
+準備: OBS 28 以降・ツール → WebSocket サーバー設定 で有効化 (1 回だけ。OBS が覚える)・pip install obsws-python。
+Main.exe は管理者権限で動いているので、OBS も管理者として動かす (しないとゲームに入れない)。
+OBS が動いていなければ自動で起動する (obs.autostart)。管理者で起動したこのアプリから起動すれば OBS も管理者になる。
 """
 from __future__ import annotations
 
 import base64
 import logging
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -51,6 +57,31 @@ def connect_hint(e: Exception, host: str, port: int) -> str:
     return f"OBS ({where}) につながりません: {t}"
 
 
+DEFAULT_OBS_EXE = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
+
+
+def obs_running() -> bool:
+    """OBS (obs64.exe) が動いているか。Windows 以外では常に True (起動しない)"""
+    if sys.platform != "win32":
+        return True
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq obs64.exe", "/NH"], capture_output=True, text=True,
+                             timeout=5, creationflags=0x08000000).stdout  # CREATE_NO_WINDOW
+    except Exception:
+        return True  # 分からないときは起動しない
+    return "obs64.exe" in out.lower()
+
+
+def obs_command(cfg: dict) -> tuple[list[str], Path]:
+    """OBS を起動するコマンドと作業フォルダ (OBS は自分のフォルダで起動しないと言語ファイルが見つからない)。
+    WebSocket のポート・パスワードは config.yaml の obs: のものを渡し、OBS 側の設定と食い違わないようにする。"""
+    exe = Path(cfg.get("path") or DEFAULT_OBS_EXE)
+    args = [str(exe), "--minimize-to-tray", "--disable-shutdown-check", f"--websocket_port={int(cfg.get('port', 4455))}"]
+    if cfg.get("password"):
+        args.append(f"--websocket_password={cfg['password']}")
+    return args, exe.parent
+
+
 def source_name(character: str) -> str:
     return SOURCE_PREFIX + character
 
@@ -62,6 +93,8 @@ class ObsWindows:
         self.log = log
         self.exe = str(cfg.get("exe", "Main.exe"))
         self.switch_scene = bool(cfg.get("switch_scene", True))
+        self.autostart = bool(cfg.get("autostart", True))
+        self._launched_at = 0.0
         self._client = None
         self._known: dict[str, str] = {}   # ソース名 → 設定済みのウィンドウ指定
         self._scene_ready = False
@@ -75,13 +108,35 @@ class ObsWindows:
                 raise RuntimeError("obsws-python が入っていません (pip install obsws-python)") from e
             logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
             host, port = self.cfg.get("host", "localhost"), int(self.cfg.get("port", 4455))
+            self._maybe_launch(host)
             try:
                 self._client = obs.ReqClient(host=host, port=port, password=self.cfg.get("password") or "", timeout=3)
             except Exception as e:
+                if time.monotonic() - self._launched_at < 60:  # 起動したばかり: 立ち上がるのを待っている
+                    raise RuntimeError("OBS を起動しています… (立ち上がると自動でつながります)") from e
                 raise RuntimeError(connect_hint(e, host, port)) from e
             self._known.clear()
             self._scene_ready = False
         return self._client
+
+    def _maybe_launch(self, host: str) -> None:
+        """OBS が動いていなければ起動する (このパソコンの OBS のときだけ。1 分に 1 回まで)"""
+        if not self.autostart or host not in ("localhost", "127.0.0.1", "::1"):
+            return
+        if time.monotonic() - self._launched_at < 60 or obs_running():
+            return
+        args, cwd = obs_command(self.cfg)
+        if not Path(args[0]).exists():
+            self.log("WARN", f"OBS が見つかりません: {args[0]} (config.yaml の obs.path に obs64.exe の場所を書いてください)")
+            self._launched_at = time.monotonic()
+            return
+        try:
+            flags = 0x00000008 | 0x00000200 if os.name == "nt" else 0  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            subprocess.Popen(args, cwd=str(cwd), creationflags=flags, close_fds=True)
+            self.log("INFO", "OBS を起動しました (トレイに最小化)。立ち上がると自動でつながります")
+        except Exception as e:
+            self.log("ERR", f"OBS を起動できません: {e}")
+        self._launched_at = time.monotonic()
 
     def reset(self) -> None:
         """接続が切れたとき: 次の呼び出しでつなぎ直す"""
