@@ -130,7 +130,7 @@ if ($hits -eq 0) { Log ''; Log "(ウィンドウは見つかりませんでし�
 Log ''
 Log "=== ウィンドウ以外で '$Pattern' を含むプロセス ==="
 $others = $procs.Values | Where-Object {
-    -not $hitPids.Contains([int]$_.ProcessId) -and
+    -not $hitPids.Contains([int]$_.ProcessId) -and [int]$_.ProcessId -ne $PID -and
     ($_.Name -match $rx -or $_.ExecutablePath -match $rx -or $_.CommandLine -match $rx)
 }
 if ($others) {
