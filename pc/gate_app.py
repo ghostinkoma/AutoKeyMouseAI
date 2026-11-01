@@ -192,6 +192,7 @@ class GateApp:
         self.com = tk.StringVar(value="COM18")
         self.host = tk.StringVar(value="")
         self.auto_scroll = tk.BooleanVar(value=True)
+        self.auto_send = tk.BooleanVar(value=True)  # 送信先を選んだら ESP32 へ送り始める
         self.show_trail = tk.BooleanVar(value=True)
         self.show_spots = tk.BooleanVar(value=True)
         self.map_view = 96         # マップに出す広さ (マス)。ホイールで変える
@@ -199,6 +200,7 @@ class GateApp:
         self.capture_mode = tk.StringVar(value=self.cfg_capture_default())
         self.host.set(str((self.cfg.get("device") or {}).get("host") or ""))
         self.sender = None         # ESP32 への送信 (akm.mirror.Mirror)
+        self.auto_send.set(bool((self.cfg.get("gate") or {}).get("auto_send", True)))
         self.live = None           # 本物の画面 (LiveFeed)
         self.maps = None           # マップの記録 (MapSource)
         self.snap = None           # 最後に受け取った画面 (Snapshot)
@@ -223,6 +225,7 @@ class GateApp:
         self.log("INFO", "起動しました。ゲートと ESP32 との接続はまだモックです (ESP32 には何も送りません)")
         self.log("INFO", "MURex のウィンドウを監視します (クラス名 '%s')" % GAME_CLASS
                  if IS_WINDOWS else "Windows 以外なのでダミーのウィンドウ・画面・マップを表示します")
+        root.report_callback_exception = self._tk_error  # ボタンなどの中のエラーもログに出す
         self._start_live()
         self.refresh_windows()
         self._tick_fast()
@@ -310,6 +313,7 @@ class GateApp:
         ttk.Label(g, text="fps").grid(row=0, column=0, sticky="w")
         ttk.Spinbox(g, from_=1, to=60, textvariable=self.fps, width=5).grid(row=0, column=1)
         rb.button(g, "送信開始", row=1, column=0, command=self.start_sending)
+        ttk.Checkbutton(g, text="選んだら自動で送信", variable=self.auto_send).grid(row=2, column=0, columnspan=2, sticky="w")
         rb.button(g, "送信停止", row=1, column=1, command=self.stop_sending)
         g = rb.group(t, "切り出し")
         rb.button(g, "画面全体")
@@ -477,6 +481,19 @@ class GateApp:
         """撮影方式の既定: config.yaml の gate.capture (obs / window)。無ければ OBS"""
         return str((self.cfg.get("gate") or {}).get("capture", "obs"))
 
+    def _tk_error(self, exc, val, tb):
+        import traceback
+
+        where = traceback.extract_tb(tb)[-1] if tb else None
+        self.log("ERR", f"{exc.__name__}: {val}" + (f" ({where.name} {where.lineno} 行目)" if where else ""))
+        traceback.print_exception(exc, val, tb)
+
+    def _mirror_print(self, *args, **kw):
+        """akm/mirror.py の print をログ欄に出す (送信の様子・失敗の理由)"""
+        msg = " ".join(str(a) for a in args)
+        print(msg, **kw)
+        self.log_threadsafe("ERR" if "失敗" in msg or "できません" in msg else "INFO", msg)
+
     # ---- ESP32 への送信 (液晶ミラー。akm/mirror.py の TCP 5005 + BadCodec 16bit をそのまま使う) ----------
     def start_sending(self):
         if self.live is None:
@@ -487,8 +504,11 @@ class GateApp:
             self.log("WARN", "ESP32 の IP を「デバイス」タブの Wi-Fi に入れてください (シリアルの status / 液晶に出ます)")
             return
         self.stop_sending()
+        import akm.mirror as mirror_mod
         from akm.bad16 import parse_color
         from akm.mirror import Mirror
+
+        mirror_mod.print = self._mirror_print  # 送信の様子をログ欄へ
 
         mcfg = self.cfg.get("mirror") or {}
         fmt = self.mirror_fmt.get()
@@ -561,6 +581,8 @@ class GateApp:
                 self.disarm()
             self.target_name = w.name
             self.log("INFO", f"送信先を {w.name} (PID {w.pid}, hwnd {w.hwnd:#010x}) にしました")
+            if self.auto_send.get() and self.sender is None and self.host.get().strip():
+                self.root.after(500, self.start_sending)
             if self.live is not None:
                 self.live.set_target(w.hwnd, w.name, w.title)
                 self.snap = None

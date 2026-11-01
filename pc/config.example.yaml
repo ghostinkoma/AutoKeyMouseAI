@@ -332,3 +332,4 @@ town_move:
 # 仲介アプリ (gate_app.py)
 gate:
   capture: obs             # 画面の撮り方: obs (OBS のゲームキャプチャ。obs: の host/port/password を使う) / window (ウィンドウから直接)
+  auto_send: true          # 送信先を選んだら ESP32 (device.host) の液晶へ送り始める (ミラーのタブの「送信開始」と同じ)
