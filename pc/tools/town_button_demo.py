@@ -27,7 +27,7 @@ def main():
     root = tk.Tk()
     root.title("帰還ボタンの確認")
     root.geometry("460x360")
-    out = tk.StringVar(value="▼ で行き先を選び、ボタンを押してください")
+    out = tk.StringVar(value="")
 
     def run(town):
         mark = "" if town.verified else "  (MURex で未確認の名前)"
