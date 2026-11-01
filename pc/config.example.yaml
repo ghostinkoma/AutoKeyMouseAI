@@ -312,3 +312,14 @@ elf:
     hp_zero_s: 3.0
     # 街で復活したあとに実行するスクリプト (ESP32 のマクロ書式)
     script: "w:10000;k:enter;w:300;t:/move lorencia;k:enter;w:5000"
+
+# 帰還 (街へ移動): チャット欄に /move <名前> を打つ (akm/town_move.py)。ボタンの ▼ で行き先を選ぶ
+town_move:
+  default: lorencia        # 最初に選ばれている行き先 (lorencia / noria / devias / elbeland / losttower / tarkan /
+                           #   aida / kanturu_ruins / kanturu_relics / raklion / crywolf)
+  open_chat_wait_ms: 300   # Enter でチャット欄が開くのを待つ時間
+  verify_s: 6              # 送ってから、現在地のマップ名が変わるのを待つ時間
+  # /move の名前がサーバーで違うときだけ書く (ゲームで /move を打って確かめた名前)。例:
+  #   kanturu_relics: kanturu3
+  #   losttower: losttower1
+  commands: {}
