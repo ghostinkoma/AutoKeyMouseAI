@@ -190,13 +190,15 @@ class GateApp:
         self.threshold = tk.IntVar(value=100)
         self.fps = tk.IntVar(value=15)
         self.com = tk.StringVar(value="COM18")
-        self.host = tk.StringVar(value="192.168.1.43")
+        self.host = tk.StringVar(value="")
         self.auto_scroll = tk.BooleanVar(value=True)
         self.show_trail = tk.BooleanVar(value=True)
         self.show_spots = tk.BooleanVar(value=True)
         self.map_view = 96         # マップに出す広さ (マス)。ホイールで変える
         self.cfg = load_cfg()
         self.capture_mode = tk.StringVar(value=self.cfg_capture_default())
+        self.host.set(str((self.cfg.get("device") or {}).get("host") or ""))
+        self.sender = None         # ESP32 への送信 (akm.mirror.Mirror)
         self.live = None           # 本物の画面 (LiveFeed)
         self.maps = None           # マップの記録 (MapSource)
         self.snap = None           # 最後に受け取った画面 (Snapshot)
@@ -306,9 +308,9 @@ class GateApp:
         ttk.Label(g, textvariable=self.threshold).grid(row=1, column=1)
         g = rb.group(t, "送信")
         ttk.Label(g, text="fps").grid(row=0, column=0, sticky="w")
-        ttk.Spinbox(g, from_=1, to=30, textvariable=self.fps, width=5).grid(row=0, column=1)
-        rb.button(g, "送信開始", row=1, column=0)
-        rb.button(g, "送信停止", row=1, column=1)
+        ttk.Spinbox(g, from_=1, to=60, textvariable=self.fps, width=5).grid(row=0, column=1)
+        rb.button(g, "送信開始", row=1, column=0, command=self.start_sending)
+        rb.button(g, "送信停止", row=1, column=1, command=self.stop_sending)
         g = rb.group(t, "切り出し")
         rb.button(g, "画面全体")
         rb.button(g, "範囲を\n指定...")
@@ -475,6 +477,55 @@ class GateApp:
         """撮影方式の既定: config.yaml の gate.capture (obs / window)。無ければ OBS"""
         return str((self.cfg.get("gate") or {}).get("capture", "obs"))
 
+    # ---- ESP32 への送信 (液晶ミラー。akm/mirror.py の TCP 5005 + BadCodec 16bit をそのまま使う) ----------
+    def start_sending(self):
+        if self.live is None:
+            self.log("WARN", "画面を撮れていないので送れません")
+            return
+        host = self.host.get().strip()
+        if not host:
+            self.log("WARN", "ESP32 の IP を「デバイス」タブの Wi-Fi に入れてください (シリアルの status / 液晶に出ます)")
+            return
+        self.stop_sending()
+        from akm.bad16 import parse_color
+        from akm.mirror import Mirror
+
+        mcfg = self.cfg.get("mirror") or {}
+        fmt = self.mirror_fmt.get()
+        # 1bit: 送信画面と同じ白黒の絵を、各色 1 ビット (3 面) の BadCodec 16bit で送る
+        kind, bits = ("jpeg", (3, 4, 3)) if fmt == "JPEG" else \
+            ("bad16", (1, 1, 1) if fmt.startswith("BadCodec 1bit") else parse_color(mcfg.get("color", "343")))
+        self.sender = Mirror(host, 1.0 / max(1, int(self.fps.get())), fmt=kind, quality=int(mcfg.get("quality", 70)),
+                             grab=self._sender_grab, transport=mcfg.get("transport", "auto"),
+                             port=int(mcfg.get("port", 5005)), b16_bits=bits,
+                             b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))
+        self.sender.set_lines([])  # 液晶にはゲームの画面だけを出す
+        self.sender_fmt = fmt
+        self.log("INFO", f"ESP32 ({host}) への送信を始めました: {fmt} → {kind} {''.join(map(str, bits))}")
+
+    def stop_sending(self):
+        if self.sender is not None:
+            self.sender.stop(timeout=2)
+            self.sender = None
+            self.log("INFO", "ESP32 への送信を止めました")
+
+    def _sender_grab(self):
+        """送信スレッドから呼ばれる: 送信画面と同じ 240x135 の絵 (形式に合わせて加工済み)"""
+        snap = self.live.latest() if self.live is not None else None
+        if snap is None or snap.preview is None:
+            raise RuntimeError(snap.error if snap is not None and snap.error else "no frame")
+        return snap.preview
+
+    def sender_status(self):
+        m = self.sender
+        if m is None:
+            return ("送信停止中", "#888888")
+        if m.sent == 0:
+            return ("接続中…" if m.errors == 0 else f"送れません ({m.errors})", "#e09000" if m.errors == 0 else "#d32f2f")
+        if getattr(self, "sender_fmt", "") != self.mirror_fmt.get():
+            self.start_sending()  # 形式を変えたら送り直す
+        return (f"{m.fps:4.1f} fps {m.last_bytes / 1024:.1f}KB", "#2e7d32" if m.errors == 0 else "#e09000")
+
     def log_threadsafe(self, level: str, msg: str):
         self.root.after(0, self.log, level, msg)
 
@@ -570,9 +621,9 @@ class GateApp:
             "target": (self.target_name or "(未選択)", None),
             "gate": (gate, color),
             "fg": (fg_w.name if fg_w else "MURex 以外", None),
-            "esp": (f"{self.com.get()} (モック)", "#888888"),
+            "esp": self.sender_status(),
             "ble": ("(モック)", "#888888"),
-            "wifi": (self.host.get(), None),
+            "wifi": (self.host.get() or "(未設定)", None),
         })
         for k, (text, c) in vals.items():
             self.status_vals[k].configure(text=text, foreground=c or "")
@@ -607,8 +658,10 @@ class GateApp:
             self.live.threshold = int(self.threshold.get())
             self.live.fps_target = float(self.fps.get())
             self.live.mode = self.capture_mode.get()
+            if self.sender is not None:
+                self.sender.interval = 1.0 / max(1, int(self.fps.get()))
             self.show_live()
-            self.root.after(30, self._tick_frame)
+            self.root.after(15, self._tick_frame)  # 60 fps まで表示できるように
             return
         self.render_frame()
         self.frames += 1
@@ -800,6 +853,8 @@ def main():
     root.mainloop()
     if app.live is not None:
         app.live.stop()
+    if app.sender is not None:
+        app.sender.stop(timeout=2)
 
 
 if __name__ == "__main__":
