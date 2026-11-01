@@ -41,6 +41,7 @@ class Snapshot:
     fps: float = 0.0
     error: str = ""
     trail: list = field(default_factory=list)  # このウィンドウで読めた現在地の履歴 [(map, x, y)]
+    timing: dict = field(default_factory=dict)  # 1 枚にかかった時間 (ms): grab 撮影 / make 縮小・形式 / analyze 解析
 
 
 def to_send_format(small: np.ndarray, fmt: str, threshold: int) -> tuple[np.ndarray, int]:
@@ -59,6 +60,9 @@ def to_send_format(small: np.ndarray, fmt: str, threshold: int) -> tuple[np.ndar
     return (cv2.imdecode(buf, cv2.IMREAD_COLOR) if ok else small), (len(buf) if ok else 0)
 
 
+PREVIEW_GRAB_W = 480  # OBS から毎回もらう大きさ (横)。送る 240x135 の 2 倍あれば縮小で十分きれい
+
+
 class LiveFeed:
     def __init__(self, cfg: dict, log=print):
         self.cfg = cfg or {}
@@ -70,7 +74,7 @@ class LiveFeed:
         self.hud = self.cfg.get("hud") or {}
         self.fmt = "BadCodec 1bit"
         self.threshold = 60
-        self.fps_target = 5.0
+        self.fps_target = 15.0
         self.mode = "obs"          # "obs" / "window"
         self.hwnd = 0
         self.name = ""             # キャラクター名 (OBS のソース名に使う)
@@ -84,9 +88,17 @@ class LiveFeed:
         self._loc_every = float((self.cfg.get("maplog") or {}).get("interval_s", 0.5))
         self._loc_at = 0.0
         self._trail: list[tuple[str, int, int]] = []
+        self._loc = None                 # 解析スレッドの結果
+        self._hp = self._mp = None
+        self._analyze_ms = 0.0
+        self._last_full = None           # ウィンドウから直接撮ったときの原寸 (解析に使う)
+        self._last_full_ts = 0.0
+        self._full_size = (0, 0)         # OBS の原寸 (縮めて頼むときの縦横比)
         self._setup_ocr()
         self._thread = threading.Thread(target=self._run, name="gate-live", daemon=True)
         self._thread.start()
+        self._analyzer = threading.Thread(target=self._analyze_run, name="gate-analyze", daemon=True)
+        self._analyzer.start()
 
     def _setup_ocr(self):
         try:
@@ -106,6 +118,10 @@ class LiveFeed:
                 self.hwnd = hwnd
                 self.name = name
                 self._trail = []
+                self._loc = None
+                self._hp = self._mp = None
+                self._last_full = None
+                self._full_size = (0, 0)
                 if self._reader is not None:
                     self._reader.current = None  # 別のキャラクターの現在地を引き継がない
                     self._reader._pending = None
@@ -118,7 +134,7 @@ class LiveFeed:
     def stop(self) -> None:
         self._stop.set()
 
-    # ---- 撮影スレッド -------------------------------------------------------------
+    # ---- 撮影スレッド (速さ優先: 撮る → 240x135 に縮める → 送る形式にする だけ) ----------------
     def _run(self):
         last = time.monotonic()
         fps = 0.0
@@ -130,49 +146,80 @@ class LiveFeed:
                 continue
             snap = Snapshot(hwnd=hwnd, ts=time.time())
             try:
-                if IS_WINDOWS and not user32.IsWindow(hwnd):
-                    raise RuntimeError("ウィンドウが閉じられました")
-                if IS_WINDOWS and user32.IsIconic(hwnd):
-                    raise RuntimeError("ウィンドウが最小化されています")
-                img, snap.method = self._grab(hwnd)
-                snap.size = (img.shape[1], img.shape[0])
-                if self._reader is not None and t0 - self._loc_at >= self._loc_every:
-                    self._loc_at = t0
-                    loc = self._reader.read(img)
-                    if loc is not None and (not self._trail or self._trail[-1] != (loc.map, loc.x, loc.y)):
-                        self._trail.append((loc.map, loc.x, loc.y))
-                        self._trail = self._trail[-500:]
-                    with self._lock:
-                        prev = self._snap.loc
-                    snap.loc = loc or prev
-                else:
-                    with self._lock:
-                        snap.loc = self._snap.loc
-                for key in ("hp", "mp"):
-                    h = self.hud.get(key)
-                    if h and h.get("roi"):
-                        from .vision import bar_level
-
-                        setattr(snap, key, bar_level(img, h["roi"], h.get("color", "red" if key == "hp" else "blue"),
-                                                     h.get("direction", "vertical")))
+                self._check_window(hwnd)
+                img, snap.method = self._grab(hwnd, full=False)
+                t1 = time.monotonic()
                 small = compose(img, [])
                 snap.preview, _ = to_send_format(small, self.fmt, self.threshold)
+                t2 = time.monotonic()
+                snap.size = self._full_size if self.mode == "obs" and self._full_size[0] else (img.shape[1], img.shape[0])
+                snap.timing = {"grab": (t1 - t0) * 1000, "make": (t2 - t1) * 1000}
                 now = time.monotonic()
                 fps = 0.8 * fps + 0.2 * (1.0 / max(1e-3, now - last))
                 last = now
                 snap.fps = fps
             except Exception as e:
                 snap.error = str(e)
-            snap.trail = list(self._trail)
             with self._lock:
+                snap.loc, snap.hp, snap.mp = self._loc, self._hp, self._mp
+                snap.trail = list(self._trail)
+                snap.timing["analyze"] = self._analyze_ms
                 if hwnd == self.hwnd:
                     self._snap = snap
             wait = 1.0 / max(0.5, self.fps_target) - (time.monotonic() - t0)
             if wait > 0:
                 self._stop.wait(wait)
 
+    # ---- 解析スレッド (遅くてよい: 原寸で現在地の OCR と HP/MP。撮影を待たせない) ---------------
+    def _analyze_run(self):
+        done_ts = 0.0
+        while not self._stop.is_set():
+            self._stop.wait(self._loc_every)
+            hwnd = self.hwnd
+            if not hwnd:
+                continue
+            try:
+                t0 = time.monotonic()
+                if self.mode == "obs":  # OBS からは小さく受け取っているので、原寸をもう 1 枚もらう
+                    self._check_window(hwnd)
+                    img, _ = self._grab(hwnd, full=True)
+                else:  # ウィンドウから直接: 撮影スレッドが撮った原寸をそのまま使う
+                    with self._lock:
+                        img, ts = self._last_full, self._last_full_ts
+                    if img is None or ts == done_ts:
+                        continue
+                    done_ts = ts
+                loc = self._reader.read(img) if self._reader is not None else None
+                hp = mp = None
+                from .vision import bar_level
 
-    def _grab(self, hwnd: int) -> tuple[np.ndarray, str]:
+                for key in ("hp", "mp"):
+                    h = self.hud.get(key)
+                    if h and h.get("roi"):
+                        v = bar_level(img, h["roi"], h.get("color", "red" if key == "hp" else "blue"),
+                                      h.get("direction", "vertical"))
+                        hp, mp = (v, mp) if key == "hp" else (hp, v)
+                with self._lock:
+                    if hwnd != self.hwnd:
+                        continue  # 解析中に送信先が変わった
+                    if loc is not None:
+                        self._loc = loc
+                        if not self._trail or self._trail[-1] != (loc.map, loc.x, loc.y):
+                            self._trail.append((loc.map, loc.x, loc.y))
+                            self._trail = self._trail[-500:]
+                    self._hp, self._mp = hp, mp
+                    self._analyze_ms = (time.monotonic() - t0) * 1000
+            except Exception:
+                pass  # 撮れないときの理由は撮影スレッドが画面に出す
+
+    def _check_window(self, hwnd: int) -> None:
+        if IS_WINDOWS and not user32.IsWindow(hwnd):
+            raise RuntimeError("ウィンドウが閉じられました")
+        if IS_WINDOWS and user32.IsIconic(hwnd):
+            raise RuntimeError("ウィンドウが最小化されています")
+
+    def _grab(self, hwnd: int, full: bool) -> tuple[np.ndarray, str]:
+        """full=False なら小さくてよい (OBS には縮めて送ってもらう。転送と JPEG の展開が 1/8 になる)"""
         if self.mode == "obs":
             from .obs_windows import ObsWindows
 
@@ -180,7 +227,12 @@ class LiveFeed:
                 self._obs = ObsWindows(self.cfg.get("obs"), log=self.log)
             try:
                 src = self._obs.ensure(self.name, self.title)
-                img = self._obs.grab(src)
+                fw, fh = self._full_size
+                if full or not fw:  # 原寸 (初回は縦横比を知るためにも)
+                    img = self._obs.grab(src)
+                    self._full_size = (img.shape[1], img.shape[0])
+                else:
+                    img = self._obs.grab(src, PREVIEW_GRAB_W, max(8, round(PREVIEW_GRAB_W * fh / fw)), 85)
             except Exception as e:
                 self._obs.reset()
                 msg = str(e)
@@ -199,14 +251,16 @@ class LiveFeed:
         self.screen.hwnd = hwnd
         self.screen.rect = client_rect(hwnd)
         img = self.screen._grab_wgc(hwnd) if IS_WINDOWS else None
-        if img is not None:
-            return img, "wgc"
-        img = capture_window(hwnd)
-        if img is not None and float(img.max()) > 8:
-            return img, "printwindow"
-        raise RuntimeError("ウィンドウから撮れません (真っ黒)。Main.exe は管理者で動いているので、"
-                           "このアプリも管理者の PowerShell から起動するか、撮影方式を OBS にしてください")
-
+        method = "wgc"
+        if img is None:
+            img = capture_window(hwnd)
+            method = "printwindow"
+            if img is None or float(img.max()) <= 8:
+                raise RuntimeError("ウィンドウから撮れません (真っ黒)。Main.exe は管理者で動いているので、"
+                                   "このアプリも管理者の PowerShell から起動するか、撮影方式を OBS にしてください")
+        with self._lock:  # 解析スレッドが原寸を使う
+            self._last_full, self._last_full_ts = img, time.monotonic()
+        return img, method
 
 class MapSource:
     """マップの記録を読むだけ (書くのは tools/map_logger.py)。ファイルが無ければ何も出さない。"""

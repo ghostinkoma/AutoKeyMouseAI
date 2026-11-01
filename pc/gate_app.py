@@ -188,7 +188,7 @@ class GateApp:
         self.auto_refresh = tk.BooleanVar(value=True)
         self.mirror_fmt = tk.StringVar(value="BadCodec 16bit")  # 既定はカラー (ゲームの画面がそのまま見える)
         self.threshold = tk.IntVar(value=100)
-        self.fps = tk.IntVar(value=5)
+        self.fps = tk.IntVar(value=15)
         self.com = tk.StringVar(value="COM18")
         self.host = tk.StringVar(value="192.168.1.43")
         self.auto_scroll = tk.BooleanVar(value=True)
@@ -434,7 +434,7 @@ class GateApp:
         bar.pack(fill=tk.X)
         ttk.Button(bar, text="クリア", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
         ttk.Checkbutton(bar, text="自動スクロール", variable=self.auto_scroll).pack(side=tk.LEFT, padx=8)
-        self.log_text = scrolledtext.ScrolledText(box, height=9, font=self.mono, bg="#1e1e1e", fg="#d4d4d4",
+        self.log_text = scrolledtext.ScrolledText(box, height=6, font=self.mono, bg="#1e1e1e", fg="#d4d4d4",
                                                   insertbackground="white")
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
         for tag, color in (("INFO", "#9cdcfe"), ("WARN", "#dcdcaa"), ("ERR", "#f48771"), ("GATE", "#b5cea8"),
@@ -608,7 +608,7 @@ class GateApp:
             self.live.fps_target = float(self.fps.get())
             self.live.mode = self.capture_mode.get()
             self.show_live()
-            self.root.after(50, self._tick_frame)
+            self.root.after(30, self._tick_frame)
             return
         self.render_frame()
         self.frames += 1
@@ -734,7 +734,10 @@ class GateApp:
         fmt = self.mirror_fmt.get()
         raw = {"BadCodec 1bit": SEND_W * SEND_H // 8, "BadCodec 16bit": SEND_W * SEND_H * 2}.get(fmt)
         size = f"圧縮前 {raw / 1024:.1f} KB" if raw else "JPEG"
-        self.preview_info.configure(text=f"{fmt:<15} {size}   しきい値 {self.threshold.get()}   {snap.fps:4.1f} fps")
+        tm = snap.timing or {}
+        ms = " / ".join(f"{label} {tm[k]:.0f}" for k, label in (("grab", "撮影"), ("make", "縮小"), ("analyze", "解析"))
+                        if k in tm)
+        self.preview_info.configure(text=f"{fmt} {size}  {snap.fps:4.1f} fps  ({ms} ms)")
         self.preview_src.configure(
             text=f"撮影元: {t.name} (hwnd {t.hwnd:#010x})  {snap.size[0]}x{snap.size[1]}  方式 {snap.method or '-'}")
         new_loc = snap.loc

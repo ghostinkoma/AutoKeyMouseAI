@@ -22,6 +22,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -95,6 +96,7 @@ class ObsWindows:
         self.switch_scene = bool(cfg.get("switch_scene", True))
         self.autostart = bool(cfg.get("autostart", True))
         self._launched_at = 0.0
+        self._lock = threading.RLock()  # 撮影と解析の 2 つのスレッドから使う (WebSocket は 1 本なので順番に)
         self._client = None
         self._known: dict[str, str] = {}   # ソース名 → 設定済みのウィンドウ指定
         self._scene_ready = False
@@ -140,7 +142,8 @@ class ObsWindows:
 
     def reset(self) -> None:
         """接続が切れたとき: 次の呼び出しでつなぎ直す"""
-        self._client = None
+        with self._lock:
+            self._client = None
 
     # ---- ソースの用意 -------------------------------------------------------------
     def _ensure_scene(self, c) -> None:
@@ -160,6 +163,10 @@ class ObsWindows:
 
     def ensure(self, character: str, title: str) -> str:
         """このキャラクターのゲームキャプチャを用意し、撮影先を今のタイトルに合わせる。ソース名を返す。"""
+        with self._lock:
+            return self._ensure(character, title)
+
+    def _ensure(self, character: str, title: str) -> str:
         src = source_name(character)
         want = obs_window_string(title, GAME_CLASS, self.exe)
         if self._known.get(src) == want:
@@ -180,7 +187,8 @@ class ObsWindows:
 
     # ---- 画像 -------------------------------------------------------------------
     def grab(self, src: str, width: int | None = None, height: int | None = None, quality: int = 90) -> np.ndarray:
-        r = self.client().get_source_screenshot(src, "jpg", width, height, quality)
+        with self._lock:
+            r = self.client().get_source_screenshot(src, "jpg", width, height, quality)
         data = r.image_data
         data = data.split(",", 1)[1] if data.startswith("data:") else data
         img = cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR)
