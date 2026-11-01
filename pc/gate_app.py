@@ -391,6 +391,10 @@ class GateApp:
         self.preview_info.pack(anchor="w", pady=(4, 0))
         self.preview_src = ttk.Label(right, text="", foreground="#555")
         self.preview_src.pack(anchor="w")
+        # ESP32 が測った 1 枚あたりの時間 (/status の mirror)。受信待ち / 展開 / 液晶への描画 (SPI)
+        self.esp_info = ttk.Label(right, text="", font=self.mono)
+        self.esp_info.pack(anchor="w")
+        self.esp_stats = None
         self.frame_img = tk.PhotoImage(width=SEND_W, height=SEND_H)
         self.preview_img = None
         pw.add(right, weight=0)
@@ -521,7 +525,34 @@ class GateApp:
                              b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))
         self.sender.set_lines([])  # 液晶にはゲームの画面だけを出す
         self.sender_fmt = fmt
+        self._start_esp_poll(host)
         self.log("INFO", f"ESP32 ({host}) への送信を始めました: {fmt} → {kind} {''.join(map(str, bits))}")
+
+    def _start_esp_poll(self, host: str):
+        """2 秒ごとに ESP32 の /status を読み、液晶側の内訳を esp_stats に置く (別スレッド)"""
+        import threading
+
+        def run(sender):
+            import requests
+
+            while self.sender is sender:
+                try:
+                    self.esp_stats = requests.get(f"http://{host}/status", timeout=2).json().get("mirror")
+                except Exception:
+                    self.esp_stats = None
+                time.sleep(2)
+
+        threading.Thread(target=run, args=(self.sender,), daemon=True).start()
+
+    def show_esp_stats(self):
+        st = self.esp_stats if self.sender is not None else None
+        if not st:
+            self.esp_info.configure(text="")
+            return
+        self.esp_info.configure(
+            text=f"ESP32 {st.get('fps', 0):.1f}fps 受信待ち {st.get('recv_ms', 0):.0f}/展開 "
+                 f"{st.get('decode_ms', 0):.0f}/描画(SPI) {st.get('draw_ms', 0):.0f}ms "
+                 f"CPU{st.get('cpu_pct', 0):.0f}% {st.get('kbps', 0) / 8:.0f}KB/s")
 
     def stop_sending(self):
         if self.sender is not None:
@@ -649,6 +680,7 @@ class GateApp:
         })
         for k, (text, c) in vals.items():
             self.status_vals[k].configure(text=text, foreground=c or "")
+        self.show_esp_stats()
         self._draw_bar(self.hp_bar, "HP", hp, "#c62828")
         self._draw_bar(self.mp_bar, "MP", mp, "#1565c0")
         self.root.after(200, self._tick_fast)
