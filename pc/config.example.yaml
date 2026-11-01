@@ -333,3 +333,5 @@ town_move:
 gate:
   capture: obs             # 画面の撮り方: obs (OBS のゲームキャプチャ。obs: の host/port/password を使う) / window (ウィンドウから直接)
   auto_send: true          # 送信先を選んだら ESP32 (device.host) の液晶へ送り始める (ミラーのタブの「送信開始」と同じ)
+  route: wifi              # ESP32 へ送る経路: wifi (device.host の TCP 5005) / serial (有線。device.port の COM。frame-stream-15 以降)
+  serial_baud: 2000000     # 有線の速さ (bps)。CH9102 なら 3000000 / 4000000 も試せる

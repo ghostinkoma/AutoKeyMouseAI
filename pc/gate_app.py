@@ -193,6 +193,8 @@ class GateApp:
         self.host = tk.StringVar(value="")
         self.auto_scroll = tk.BooleanVar(value=True)
         self.auto_send = tk.BooleanVar(value=True)  # 送信先を選んだら ESP32 へ送り始める
+        self.route = tk.StringVar(value="wifi")      # ESP32 へ送る経路: wifi / serial (有線)
+        self.serial_baud = tk.StringVar(value="2000000")
         self.show_trail = tk.BooleanVar(value=True)
         self.show_spots = tk.BooleanVar(value=True)
         self.map_view = 96         # マップに出す広さ (マス)。ホイールで変える
@@ -201,6 +203,10 @@ class GateApp:
         self.host.set(str((self.cfg.get("device") or {}).get("host") or ""))
         self.sender = None         # ESP32 への送信 (akm.mirror.Mirror)
         self.auto_send.set(bool((self.cfg.get("gate") or {}).get("auto_send", True)))
+        gcfg = self.cfg.get("gate") or {}
+        self.route.set(str(gcfg.get("route", "wifi")))
+        self.serial_baud.set(str(gcfg.get("serial_baud", 2000000)))
+        self.com.set(str((self.cfg.get("device") or {}).get("port") or "COM18"))
         self.live = None           # 本物の画面 (LiveFeed)
         self.maps = None           # マップの記録 (MapSource)
         self.snap = None           # 最後に受け取った画面 (Snapshot)
@@ -309,6 +315,10 @@ class GateApp:
         ttk.Label(g, text="しきい値").grid(row=0, column=0, sticky="w")
         ttk.Scale(g, from_=0, to=255, variable=self.threshold, length=140).grid(row=1, column=0)
         ttk.Label(g, textvariable=self.threshold).grid(row=1, column=1)
+        g = rb.group(t, "送信経路")
+        for i, (v, text) in enumerate((("wifi", "Wi-Fi"), ("serial", "有線 (COM)"))):
+            ttk.Radiobutton(g, text=text, value=v, variable=self.route,
+                            command=self._route_changed).grid(row=i, column=0, sticky="w")
         g = rb.group(t, "送信")
         ttk.Label(g, text="fps").grid(row=0, column=0, sticky="w")
         ttk.Spinbox(g, from_=1, to=60, textvariable=self.fps, width=5).grid(row=0, column=1)
@@ -324,8 +334,9 @@ class GateApp:
         g = rb.group(t, "シリアル")
         ttk.Label(g, text="ポート").grid(row=0, column=0, sticky="w")
         ttk.Combobox(g, textvariable=self.com, values=["COM18", "COM14"], width=8).grid(row=0, column=1)
-        rb.button(g, "接続", row=1, column=0)
-        rb.button(g, "切断", row=1, column=1)
+        ttk.Label(g, text="有線の速さ").grid(row=1, column=0, sticky="w")
+        ttk.Combobox(g, textvariable=self.serial_baud, values=["921600", "2000000", "3000000", "4000000"],
+                     width=8).grid(row=1, column=1)
         g = rb.group(t, "Wi-Fi")
         ttk.Label(g, text="IP").grid(row=0, column=0, sticky="w")
         ttk.Entry(g, textvariable=self.host, width=14).grid(row=0, column=1)
@@ -504,7 +515,8 @@ class GateApp:
             self.log("WARN", "画面を撮れていないので送れません")
             return
         host = self.host.get().strip()
-        if not host:
+        wired = self.route.get() == "serial"
+        if not host and not wired:
             self.log("WARN", "ESP32 の IP を「デバイス」タブの Wi-Fi に入れてください (シリアルの status / 液晶に出ます)")
             return
         self.stop_sending()
@@ -519,14 +531,36 @@ class GateApp:
         # 1bit: 送信画面と同じ白黒の絵を、各色 1 ビット (3 面) の BadCodec 16bit で送る
         kind, bits = ("jpeg", (3, 4, 3)) if fmt == "JPEG" else \
             ("bad16", (1, 1, 1) if fmt.startswith("BadCodec 1bit") else parse_color(mcfg.get("color", "343")))
-        self.sender = Mirror(host, 1.0 / max(1, int(self.fps.get())), fmt=kind, quality=int(mcfg.get("quality", 70)),
-                             grab=self._sender_grab, transport=mcfg.get("transport", "auto"),
+        link, where = None, host
+        if wired:  # 有線: COM で送る (akm/serial_link.py。ファームウェア frame-stream-15 以降)
+            from akm.serial_link import SerialFrameLink
+
+            port, baud = self.com.get().strip(), int(self.serial_baud.get())
+
+            def make_link():
+                return SerialFrameLink(port, baud, log=self._mirror_print)
+
+            link = make_link
+
+            where = f"{port} {baud:,}bps"
+        self.sender = Mirror(host or "serial", 1.0 / max(1, int(self.fps.get())), fmt=kind,
+                             quality=int(mcfg.get("quality", 70)), grab=self._sender_grab,
+                             transport="tcp" if wired else mcfg.get("transport", "auto"),
                              port=int(mcfg.get("port", 5005)), b16_bits=bits,
+                             # 有線は 1 枚ずつ返事を待つ (ESP32 の受信バッファ 8KB を溢れさせない)
+                             pipeline=1 if wired else 2, link_factory=link,
                              b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))
         self.sender.set_lines([])  # 液晶にはゲームの画面だけを出す
         self.sender_fmt = fmt
-        self._start_esp_poll(host)
-        self.log("INFO", f"ESP32 ({host}) への送信を始めました: {fmt} → {kind} {''.join(map(str, bits))}")
+        self.sender_route = self.route.get()
+        if host:
+            self._start_esp_poll(host)  # 有線のときも、内訳は Wi-Fi の /status から読む
+        self.log("INFO", f"ESP32 ({where}) への送信を始めました: {fmt} → {kind} {''.join(map(str, bits))}")
+
+    def _route_changed(self):
+        self.log("INFO", f"送信経路: {'有線 (' + self.com.get() + ')' if self.route.get() == 'serial' else 'Wi-Fi'}")
+        if self.sender is not None:
+            self.start_sending()  # 送っている途中なら経路を切り替えて送り直す
 
     def _start_esp_poll(self, host: str):
         """2 秒ごとに ESP32 の /status を読み、液晶側の内訳を esp_stats に置く (別スレッド)"""

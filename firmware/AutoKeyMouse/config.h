@@ -6,7 +6,7 @@
 // ---- デバイス名 -----------------------------------------------------------
 #define DEVICE_NAME      "AutoKeyMouse"     // BLE 表示名 / mDNS 名 (autokeymouse.local)
 // ファームウェアの版 (/status と起動ログに出る。PC 側で書き込み済みか確認する)
-#define FW_VERSION "frame-stream-14"
+#define FW_VERSION "frame-stream-15"
 #define BLE_MANUFACTURER "ghostinkoma"
 
 // ---- Wi-Fi SoftAP ---------------------------------------------------------
@@ -63,3 +63,5 @@
 #define SYNC_RUN_TIMEOUT_MS    30000        // /run の最大待ち時間
 
 #define SERIAL_BAUD 115200
+// シリアルの受信バッファ。有線ミラー (stream 2000000) では 1ms に 200 バイト届くので広めにする
+#define SERIAL_RX_BUF 8192

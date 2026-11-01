@@ -10,6 +10,7 @@
 //       wifi           対話形式で Wi-Fi (SSID / パスワード) を設定して接続
 //       wifi clear     Wi-Fi 設定を消す (SoftAP のみになる)
 //       ble clear      BLE のペアリング情報を消す
+//       stream <baud>  液晶ミラーを有線で受け取る (serial_stream.h。PC の akm/serial_link.py が使う)
 //       help
 #include <WiFi.h>
 
@@ -21,6 +22,7 @@
 #include "frame_stream.h"
 #include "macro.h"
 #include "net.h"
+#include "serial_stream.h"
 
 // loop() で Web サーバと液晶 (JPEG 展開) を動かすのでスタックを広めに取る
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
@@ -180,6 +182,7 @@ void printHelp() {
   Serial.println("  stop              stop the running macro");
   Serial.println("  tft test          fill the display red/green/blue");
   Serial.println("  ble clear         forget BLE pairings (then remove the device in Windows and pair again)");
+  Serial.println("  stream <baud>     receive the mirror over this serial line (used by the PC app)");
 }
 
 void led(uint8_t r, uint8_t g, uint8_t b) {
@@ -267,7 +270,12 @@ void serialRxTask(void*) {
         }
         String trimmed = line;
         trimmed.trim();
-        if (echo == Echo::Off && trimmed == "stop") {
+        if (echo == Echo::Off && trimmed.startsWith("stream")) {
+          // 液晶ミラーを有線で受け取る (この行の後は高速のバイナリになるので、受信タスクのここで処理する)
+          long baud = trimmed.length() > 7 ? trimmed.substring(7).toInt() : 2000000;
+          if (baud < 115200 || baud > 5000000) baud = 2000000;
+          serial_stream::run((uint32_t)baud);
+        } else if (echo == Echo::Off && trimmed == "stop") {
           macro::stop();
           // OK/ERR は実行中の run の応答と区別できないので別の語で返す
           Serial.println("STOPPED");
@@ -311,6 +319,7 @@ void serialCmdTask(void*) {
 }  // namespace
 
 void setup() {
+  Serial.setRxBufferSize(SERIAL_RX_BUF);  // 有線ミラー (stream) の受信用に広げる。begin より前に呼ぶ
   Serial.begin(SERIAL_BAUD);
   delay(200);
   Serial.println("\n[AKM] AutoKeyMouse boot");

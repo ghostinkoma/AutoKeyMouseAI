@@ -68,7 +68,7 @@ class Mirror:
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
                  fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005,
                  pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5),
-                 b16_gray: bool = False):
+                 b16_gray: bool = False, link_factory=None):
         self.enabled = enabled and bool(host)
         self.url = None
         if self.enabled:
@@ -88,6 +88,8 @@ class Mirror:
 
             self.hostname = urlparse(host if host.startswith("http") else f"http://{host}").hostname or host
         self._sock = None
+        # TCP の代わりの通信路 (sendall / recv / close を持つもの) を作る関数。例: akm.serial_link.SerialFrameLink
+        self.link_factory = link_factory
         self._tcp_fail = 0
         # fmt="bc": BlockDiff (変わった 8x8 ブロックだけ送る)。画面全体が変わって大きくなるフレームは JPEG で送る
         self._bc = None
@@ -287,6 +289,8 @@ class Mirror:
         import socket
         import struct
 
+        if self._sock is None and self.link_factory is not None:
+            self._sock = self.link_factory()
         if self._sock is None:
             self._sock = socket.create_connection((self.hostname, self.port), timeout=3)
             self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -353,6 +357,8 @@ class Mirror:
 
         s = requests.Session()
         try:  # ESP32 のファームウェアが画面の受け取りを直した版か確認する
+            if self.link_factory is not None:
+                raise LookupError("skip")  # 有線: Wi-Fi の Web には聞かない
             fw = s.get(self.url.replace("/frame", "/status"), timeout=5).json().get("fw")
             if fw:
                 print(f"[mirror] ESP32 ファームウェア: {fw}")
@@ -376,6 +382,8 @@ class Mirror:
                           f"frame-stream-{need} 以降が必要です。ファームウェアを書き込み直してください")
             else:
                 print("[mirror] ESP32 のファームウェアが古いです。画面が映らない場合は書き込み直してください (README 参照)")
+        except LookupError:
+            pass
         except Exception as e:
             print(f"[mirror] ESP32 の状態を取得できません: {e}")
         while not self._stop.is_set():
