@@ -192,9 +192,20 @@ class LiveFeed:
             if float(img.max()) < 8:
                 raise RuntimeError("OBS の画像が真っ黒です (ゲームに入れていない。OBS を管理者として実行していますか)")
             return img, f"obs ({src})"
-        self.screen.hwnd = hwnd  # 選んだウィンドウだけを撮る (タイトルで探し直さない)
-        img = self.screen.grab()
-        return img, self.screen._method
+        # 選んだウィンドウだけを撮る (タイトルで探し直さない)。画面から撮る方式には戻さない:
+        # ほかのウィンドウ (このアプリなど) が重なっていると、それが写ってしまうため
+        from .screen import capture_window, client_rect
+
+        self.screen.hwnd = hwnd
+        self.screen.rect = client_rect(hwnd)
+        img = self.screen._grab_wgc(hwnd) if IS_WINDOWS else None
+        if img is not None:
+            return img, "wgc"
+        img = capture_window(hwnd)
+        if img is not None and float(img.max()) > 8:
+            return img, "printwindow"
+        raise RuntimeError("ウィンドウから撮れません (真っ黒)。Main.exe は管理者で動いているので、"
+                           "このアプリも管理者の PowerShell から起動するか、撮影方式を OBS にしてください")
 
 
 class MapSource:

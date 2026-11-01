@@ -269,14 +269,21 @@ class WgcCapture:
         self._frame: np.ndarray | None = None
         self._t = 0.0
         self.closed = False
-        kw = dict(cursor_capture=False, window_hwnd=hwnd, minimum_update_interval=50)
-        try:
-            self.control = self._start(WindowsCapture(draw_border=False, **kw))
-        except Exception as e:
-            # 枠の非表示は Windows 11 のみ対応 (Windows 10 では開始時に例外になる): 枠ありでやり直す
-            if "border" not in str(e).lower():
-                raise
-            self.control = self._start(WindowsCapture(**kw))
+        # 枠の非表示 (draw_border=False) と撮影間隔の指定 (minimum_update_interval) は Windows 11 のみ対応。
+        # Windows 10 では開始時に例外になるので、言われたものを外してやり直す
+        kw = dict(cursor_capture=False, window_hwnd=hwnd, minimum_update_interval=50, draw_border=False)
+        for _ in range(3):
+            try:
+                self.control = self._start(WindowsCapture(**kw))
+                break
+            except Exception as e:
+                msg = str(e).lower()
+                if "interval" in msg and "minimum_update_interval" in kw:
+                    kw.pop("minimum_update_interval")
+                elif "border" in msg and "draw_border" in kw:
+                    kw.pop("draw_border")
+                else:
+                    raise
 
     def _start(self, cap):
         @cap.event
