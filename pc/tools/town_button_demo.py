@@ -34,7 +34,7 @@ def main():
         out.set(f"{town.ja} へ帰還\n送るマクロ: {move_script(town, tcfg.get('open_chat_wait_ms', 300))}{mark}")
 
     items = [(t.label, t) for t in towns]
-    sb = SplitButton(root, "帰還: ", items, on_click=run, selected=towns.index(first),
+    sb = SplitButton(root, "帰還", items, on_click=run, selected=towns.index(first),
                      on_select=lambda t: out.set(f"行き先を {t.label} ({t.ja}) にしました"))
     sb.pack(anchor="nw", padx=12, pady=12)
     ttk.Label(root, textvariable=out, wraplength=420, justify=tk.LEFT).pack(anchor="nw", padx=12)

@@ -1,11 +1,12 @@
-"""ボタンの右に ▼ だけを付けた「分割ボタン」(tkinter)。
+"""ラベル + ボタン + ▼ の「分割ボタン」(tkinter)。
 
-    [ 帰還: Lorencia ][▼]
-    ┌──────────────────┐   ▼ を押すと、ボタンのすぐ下に選択肢の一覧を開く
-    │ Lorencia         │   選ぶとボタンの表示がその名前に変わる (この時点では実行しない)
-    │ Noria            │   本体のボタンを押すと、選んでいるもので on_click(値) を呼ぶ
-    │ ...              │   Esc / 一覧の外をクリック / ▼ をもう一度押す で閉じる
-    └──────────────────┘
+    帰還 [ Lorencia ][▼]
+         ┌────────────────┐   ▼ を押すと、ボタンのすぐ下に選択肢の一覧を開く
+         │ Lorencia       │   選ぶとボタンの表示がその名前に変わる (この時点では実行しない)
+         │ Noria          │   ボタンを押すと、選んでいるもので on_click(値) を呼ぶ
+         │ ...            │   Esc / 一覧の外をクリック / ▼ をもう一度押す で閉じる
+         └────────────────┘
+ボタンの幅はいちばん長い選択肢に合わせて固定する (選ぶたびに幅が変わらないように)。
 """
 from __future__ import annotations
 
@@ -14,11 +15,10 @@ from tkinter import ttk
 
 
 class SplitButton(ttk.Frame):
-    def __init__(self, master, prefix: str, items: list[tuple[str, object]], on_click=None, on_select=None,
+    def __init__(self, master, label: str, items: list[tuple[str, object]], on_click=None, on_select=None,
                  selected: int = 0, rows: int = 12, **kw):
-        """items: [(表示名, 値), ...]。prefix はボタンの表示の頭 (例 "帰還: ")。"""
+        """label: ボタンの左に出す文字 (例 "帰還"。空なら出さない)。items: [(表示名, 値), ...]"""
         super().__init__(master, **kw)
-        self.prefix = prefix
         self.items = list(items)
         self.on_click = on_click
         self.on_select = on_select
@@ -27,7 +27,10 @@ class SplitButton(ttk.Frame):
         self.popup: tk.Toplevel | None = None
         self.listbox: tk.Listbox | None = None
 
-        self.main = ttk.Button(self, command=self._click)
+        if label:
+            ttk.Label(self, text=label).pack(side=tk.LEFT, padx=(0, 6))
+        width = max((len(t) for t, _ in self.items), default=8) + 2
+        self.main = ttk.Button(self, command=self._click, width=width)
         self.main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.arrow = ttk.Button(self, text="▼", width=2, command=self.toggle)
         self.arrow.pack(side=tk.LEFT, fill=tk.Y)
@@ -50,7 +53,7 @@ class SplitButton(ttk.Frame):
                 self.on_select(self.value)
 
     def _caption(self) -> None:
-        self.main.configure(text=f"{self.prefix}{self.text}")
+        self.main.configure(text=self.text)
 
     def _click(self) -> None:
         self.close()
@@ -71,7 +74,9 @@ class SplitButton(ttk.Frame):
         top.overrideredirect(True)  # 枠もタイトルも無い、ボタンに付いた一覧にする
         top.transient(self.winfo_toplevel())
         self.update_idletasks()
-        x, y = self.winfo_rootx(), self.winfo_rooty() + self.winfo_height()
+        # ラベルではなくボタンの左下から開き、幅はボタン + ▼ に合わせる
+        x, y = self.main.winfo_rootx(), self.main.winfo_rooty() + self.main.winfo_height()
+        span = self.arrow.winfo_rootx() + self.arrow.winfo_width() - x
         frame = ttk.Frame(top, borderwidth=1, relief=tk.SOLID)
         frame.pack(fill=tk.BOTH, expand=True)
         lb = self.listbox = tk.Listbox(frame, height=min(self.rows, len(self.items)), activestyle="dotbox",
@@ -88,7 +93,7 @@ class SplitButton(ttk.Frame):
         lb.activate(self.index)
         lb.see(self.index)
         top.update_idletasks()
-        top.geometry(f"{max(self.winfo_width(), top.winfo_reqwidth())}x{top.winfo_reqheight()}+{x}+{y}")
+        top.geometry(f"{max(span, top.winfo_reqwidth())}x{top.winfo_reqheight()}+{x}+{y}")
         lb.bind("<ButtonRelease-1>", self._pick)
         lb.bind("<Return>", self._pick)
         lb.bind("<Escape>", lambda e: self.close())
