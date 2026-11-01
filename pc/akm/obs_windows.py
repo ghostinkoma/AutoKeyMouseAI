@@ -1,0 +1,120 @@
+"""OBS のゲームキャプチャで、MURex のウィンドウをキャラクターごとに撮る (obs-websocket 経由)。
+
+OBS のゲームキャプチャは、OBS の DLL (graphics-hook) をゲームに入れて描画そのものを受け取る。
+そのため別の仮想デスクトップにあっても・他のウィンドウが重なっていても撮れ、Windows 10 の黄色い枠も出ない。
+DLL を自分で入れたり OBS 内部のやり取りを真似たりはせず、注入・受け取りは OBS 本体に任せ、
+こちらは WebSocket でソースを作る・撮影先を合わせる・画像をもらうだけにする (OBS の版が変わっても壊れにくい)。
+
+  * シーン "AKM Capture" を作り、キャラクターごとにゲームキャプチャ "AKM <名前>" を置く
+    (ゲームキャプチャは OBS で「表示中」のときだけ撮るので、このシーンを OBS の番組 (プログラム) にする)
+  * 撮影先はウィンドウのタイトルで決まる。MURex のタイトルはレベルなどで変わるので、
+    変わったら OBS の設定を今のタイトルに書き換える (「タイトルが一致するウィンドウだけ」にして取り違えない)
+  * 画像は GetSourceScreenshot で受け取る
+
+準備: OBS 28 以降・ツール → WebSocket サーバー設定 で有効化・pip install obsws-python。
+Main.exe は管理者権限で動いているので、OBS も管理者として実行する (しないとゲームに入れない)。
+"""
+from __future__ import annotations
+
+import base64
+import logging
+
+import cv2
+import numpy as np
+
+SCENE = "AKM Capture"
+SOURCE_PREFIX = "AKM "
+GAME_CLASS = "MURex Client"
+PRIORITY_TITLE = 1  # OBS: ウィンドウのタイトルが一致するものだけ (0 = 同じクラス、2 = 同じ実行ファイルも可)
+
+
+def obs_window_string(title: str, cls: str = GAME_CLASS, exe: str = "Main.exe") -> str:
+    """OBS のウィンドウ指定 "タイトル:クラス:実行ファイル" (# と : は #22 / #3A に置き換える)。"""
+    def enc(s: str) -> str:
+        return s.replace("#", "#22").replace(":", "#3A")
+
+    return f"{enc(title)}:{enc(cls)}:{enc(exe)}"
+
+
+def source_name(character: str) -> str:
+    return SOURCE_PREFIX + character
+
+
+class ObsWindows:
+    def __init__(self, cfg: dict | None, log=print):
+        cfg = cfg or {}
+        self.cfg = cfg
+        self.log = log
+        self.exe = str(cfg.get("exe", "Main.exe"))
+        self.switch_scene = bool(cfg.get("switch_scene", True))
+        self._client = None
+        self._known: dict[str, str] = {}   # ソース名 → 設定済みのウィンドウ指定
+        self._scene_ready = False
+
+    # ---- 接続 -----------------------------------------------------------------
+    def client(self):
+        if self._client is None:
+            try:
+                import obsws_python as obs
+            except ImportError as e:
+                raise RuntimeError("obsws-python が入っていません (pip install obsws-python)") from e
+            logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
+            try:
+                self._client = obs.ReqClient(host=self.cfg.get("host", "localhost"),
+                                             port=int(self.cfg.get("port", 4455)),
+                                             password=self.cfg.get("password") or "", timeout=3)
+            except Exception as e:
+                raise RuntimeError(f"OBS につながりません ({e})。OBS を起動し、WebSocket サーバーを有効にしてください") from e
+            self._known.clear()
+            self._scene_ready = False
+        return self._client
+
+    def reset(self) -> None:
+        """接続が切れたとき: 次の呼び出しでつなぎ直す"""
+        self._client = None
+
+    # ---- ソースの用意 -------------------------------------------------------------
+    def _ensure_scene(self, c) -> None:
+        if self._scene_ready:
+            return
+        scenes = [s.get("sceneName") for s in c.get_scene_list().scenes]
+        if SCENE not in scenes:
+            c.create_scene(SCENE)
+            self.log("INFO", f"OBS にシーン '{SCENE}' を作りました")
+        if self.switch_scene:
+            cur = c.get_current_program_scene()
+            name = getattr(cur, "current_program_scene_name", None) or getattr(cur, "scene_name", None)
+            if name != SCENE:
+                c.set_current_program_scene(SCENE)
+                self.log("INFO", f"OBS の番組を '{SCENE}' に切り替えました (ゲームキャプチャは表示中のときだけ撮るため)")
+        self._scene_ready = True
+
+    def ensure(self, character: str, title: str) -> str:
+        """このキャラクターのゲームキャプチャを用意し、撮影先を今のタイトルに合わせる。ソース名を返す。"""
+        src = source_name(character)
+        want = obs_window_string(title, GAME_CLASS, self.exe)
+        if self._known.get(src) == want:
+            return src
+        c = self.client()
+        self._ensure_scene(c)
+        settings = {"capture_mode": "window", "window": want, "priority": PRIORITY_TITLE, "capture_cursor": False}
+        names = {i.get("inputName") for i in c.get_input_list(None).inputs}
+        if src in names:
+            c.set_input_settings(src, settings, True)
+            if src in self._known:
+                self.log("INFO", f"OBS '{src}' の撮影先を今のタイトルに合わせました")
+        else:
+            c.create_input(SCENE, src, "game_capture", settings, True)
+            self.log("INFO", f"OBS にゲームキャプチャ '{src}' を作りました")
+        self._known[src] = want
+        return src
+
+    # ---- 画像 -------------------------------------------------------------------
+    def grab(self, src: str, width: int | None = None, height: int | None = None, quality: int = 90) -> np.ndarray:
+        r = self.client().get_source_screenshot(src, "jpg", width, height, quality)
+        data = r.image_data
+        data = data.split(",", 1)[1] if data.startswith("data:") else data
+        img = cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise RuntimeError("OBS の画像を展開できません")
+        return img

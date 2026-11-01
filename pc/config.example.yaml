@@ -110,6 +110,9 @@ obs:
   # 液晶やボットの画面に余白が出る場合、OBS の画像から切り出す範囲 [x, y, 幅, 高さ] (ピクセル) を指定する。
   # 起動時に出る "[screen] OBS の画像 WxH / ゲーム画面 WxH" を見て決める。null なら自動
   crop: null
+  # 仲介アプリ (gate_app.py) が使う設定: キャラクターごとにゲームキャプチャ "AKM <名前>" を作り、シーン "AKM Capture" に置く
+  exe: Main.exe            # ゲームの実行ファイル名 (OBS の撮影先の指定に使う)
+  switch_scene: true       # OBS の番組を "AKM Capture" に切り替える (ゲームキャプチャは表示中のときだけ撮るため)
 
 # 割り込んでくるダイアログ (パーティ申請など) を自動で断る。
 # ダイアログが出ている状態で tools/grab_templates.py を実行し、
@@ -323,3 +326,7 @@ town_move:
   #   kanturu_relics: kanturu3
   #   losttower: losttower1
   commands: {}
+
+# 仲介アプリ (gate_app.py)
+gate:
+  capture: obs             # 画面の撮り方: obs (OBS のゲームキャプチャ。obs: の host/port/password を使う) / window (ウィンドウから直接)

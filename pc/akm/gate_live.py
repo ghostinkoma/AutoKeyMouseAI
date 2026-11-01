@@ -1,6 +1,8 @@
 """仲介アプリ (gate_app.py) の「本物」の部分: 選んだウィンドウの画面と、マップの記録。
 
-LiveFeed  : 別スレッドで、選んだ MURex のウィンドウ (hwnd) を撮り続ける。
+LiveFeed  : 別スレッドで、選んだ MURex のウィンドウを撮り続ける。撮り方は 2 つ:
+              obs    = OBS のゲームキャプチャ (akm/obs_windows.py。仮想デスクトップ・重なりに強く、枠も出ない)
+              window = ウィンドウから直接 (Windows Graphics Capture → PrintWindow。OBS が要らない)
             ESP32 に送る大きさ (240x135) の画像・現在地 (OCR)・HP/MP を作って、最新の 1 つだけを持つ。
 MapSource : マップの記録 (SQLite, 既定 data/mu_map.db。tools/map_logger.py が書く) を読むだけで開く。
 
@@ -69,7 +71,12 @@ class LiveFeed:
         self.fmt = "BadCodec 1bit"
         self.threshold = 60
         self.fps_target = 5.0
+        self.mode = "obs"          # "obs" / "window"
         self.hwnd = 0
+        self.name = ""             # キャラクター名 (OBS のソース名に使う)
+        self.title = ""            # 今のウィンドウのタイトル (OBS の撮影先に使う)
+        self._obs = None
+        self._obs_err = ""
         self._snap = Snapshot()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -92,10 +99,12 @@ class LiveFeed:
             self.log("WARN", f"現在地の読み取り (OCR) は使えません: {e}")
 
     # ---- 操作 (UI のスレッドから) -------------------------------------------------
-    def set_target(self, hwnd: int) -> None:
+    def set_target(self, hwnd: int, name: str = "", title: str = "") -> None:
         with self._lock:
-            if hwnd != self.hwnd:
+            self.title = title or self.title
+            if hwnd != self.hwnd or (name and name != self.name):
                 self.hwnd = hwnd
+                self.name = name
                 self._trail = []
                 if self._reader is not None:
                     self._reader.current = None  # 別のキャラクターの現在地を引き継がない
@@ -125,10 +134,8 @@ class LiveFeed:
                     raise RuntimeError("ウィンドウが閉じられました")
                 if IS_WINDOWS and user32.IsIconic(hwnd):
                     raise RuntimeError("ウィンドウが最小化されています")
-                self.screen.hwnd = hwnd  # 選んだウィンドウだけを撮る (タイトルで探し直さない)
-                img = self.screen.grab()
+                img, snap.method = self._grab(hwnd)
                 snap.size = (img.shape[1], img.shape[0])
-                snap.method = self.screen._method
                 if self._reader is not None and t0 - self._loc_at >= self._loc_every:
                     self._loc_at = t0
                     loc = self._reader.read(img)
@@ -163,6 +170,31 @@ class LiveFeed:
             wait = 1.0 / max(0.5, self.fps_target) - (time.monotonic() - t0)
             if wait > 0:
                 self._stop.wait(wait)
+
+
+    def _grab(self, hwnd: int) -> tuple[np.ndarray, str]:
+        if self.mode == "obs":
+            from .obs_windows import ObsWindows
+
+            if self._obs is None:
+                self._obs = ObsWindows(self.cfg.get("obs"), log=self.log)
+            try:
+                src = self._obs.ensure(self.name, self.title)
+                img = self._obs.grab(src)
+            except Exception as e:
+                self._obs.reset()
+                msg = str(e)
+                if msg != self._obs_err:  # 同じ失敗を何度もログに出さない
+                    self._obs_err = msg
+                    self.log("ERR", f"OBS から撮れません: {msg}")
+                raise RuntimeError(f"OBS: {msg}") from e
+            self._obs_err = ""
+            if float(img.max()) < 8:
+                raise RuntimeError("OBS の画像が真っ黒です (ゲームに入れていない。OBS を管理者として実行していますか)")
+            return img, f"obs ({src})"
+        self.screen.hwnd = hwnd  # 選んだウィンドウだけを撮る (タイトルで探し直さない)
+        img = self.screen.grab()
+        return img, self.screen._method
 
 
 class MapSource:

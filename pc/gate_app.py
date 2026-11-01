@@ -196,6 +196,7 @@ class GateApp:
         self.show_spots = tk.BooleanVar(value=True)
         self.map_view = 96         # マップに出す広さ (マス)。ホイールで変える
         self.cfg = load_cfg()
+        self.capture_mode = tk.StringVar(value=self.cfg_capture_default())
         self.live = None           # 本物の画面 (LiveFeed)
         self.maps = None           # マップの記録 (MapSource)
         self.snap = None           # 最後に受け取った画面 (Snapshot)
@@ -291,6 +292,10 @@ class GateApp:
 
         # ミラー: ESP32 へ送る画面
         t = rb.tab("ミラー")
+        g = rb.group(t, "撮影方式")
+        for i, (v, text) in enumerate((("obs", "OBS (ゲームキャプチャ)"), ("window", "ウィンドウから直接"))):
+            ttk.Radiobutton(g, text=text, value=v, variable=self.capture_mode,
+                            command=lambda t=text: self.log("INFO", f"撮影方式: {t}")).grid(row=i, column=0, sticky="w")
         g = rb.group(t, "形式")
         for i, f in enumerate(("BadCodec 1bit", "BadCodec 16bit", "JPEG")):
             ttk.Radiobutton(g, text=f, value=f, variable=self.mirror_fmt,
@@ -466,6 +471,10 @@ class GateApp:
         self.maps = MapSource(db)
         self.log("INFO", f"マップの記録: {db}" + ("" if db.exists() else " (まだありません。tools\\map_logger.py で記録できます)"))
 
+    def cfg_capture_default(self) -> str:
+        """撮影方式の既定: config.yaml の gate.capture (obs / window)。無ければ OBS"""
+        return str((self.cfg.get("gate") or {}).get("capture", "obs"))
+
     def log_threadsafe(self, level: str, msg: str):
         self.root.after(0, self.log, level, msg)
 
@@ -481,8 +490,9 @@ class GateApp:
                 sel = i
         if sel is not None:
             self.win_list.selection_set(sel)
-            if self.live is not None:
-                self.live.set_target(self.windows[sel].hwnd)  # 再起動して hwnd が変わっても同じ名前を撮る
+            if self.live is not None:  # 再起動して hwnd が変わっても同じ名前を撮る。タイトルの変化も OBS に伝える
+                w = self.windows[sel]
+                self.live.set_target(w.hwnd, w.name, w.title)
         elif self.target_name and self.armed.get():
             self.log("WARN", f"送信先 {self.target_name} のウィンドウが見つかりません。停止します")
             self.disarm()
@@ -501,7 +511,7 @@ class GateApp:
             self.target_name = w.name
             self.log("INFO", f"送信先を {w.name} (PID {w.pid}, hwnd {w.hwnd:#010x}) にしました")
             if self.live is not None:
-                self.live.set_target(w.hwnd)
+                self.live.set_target(w.hwnd, w.name, w.title)
                 self.snap = None
                 self.draw_map()
 
@@ -596,6 +606,7 @@ class GateApp:
             self.live.fmt = self.mirror_fmt.get()
             self.live.threshold = int(self.threshold.get())
             self.live.fps_target = float(self.fps.get())
+            self.live.mode = self.capture_mode.get()
             self.show_live()
             self.root.after(50, self._tick_frame)
             return
