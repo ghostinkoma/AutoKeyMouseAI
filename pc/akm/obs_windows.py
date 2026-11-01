@@ -36,6 +36,21 @@ def obs_window_string(title: str, cls: str = GAME_CLASS, exe: str = "Main.exe") 
     return f"{enc(title)}:{enc(cls)}:{enc(exe)}"
 
 
+def connect_hint(e: Exception, host: str, port: int) -> str:
+    """OBS につながらないときの、原因ごとの案内"""
+    t = str(e)
+    where = f"{host}:{port}"
+    if "10061" in t or "refused" in t.lower() or "拒否" in t:
+        return (f"OBS の WebSocket ({where}) が待ち受けていません。OBS (28 以降) を起動し、"
+                f"ツール → WebSocket サーバー設定 で「WebSocket サーバーを有効にする」に印を付け、"
+                f"サーバーポートを {port} にしてください (config.yaml の obs.port と合わせる)")
+    if "auth" in t.lower() or "identify" in t.lower() or "4009" in t:
+        return f"OBS の WebSocket ({where}) のパスワードが違います。config.yaml の obs.password を合わせてください"
+    if "timed out" in t.lower() or "timeout" in t.lower():
+        return f"OBS の WebSocket ({where}) から返事がありません。host / port を確認してください"
+    return f"OBS ({where}) につながりません: {t}"
+
+
 def source_name(character: str) -> str:
     return SOURCE_PREFIX + character
 
@@ -59,12 +74,11 @@ class ObsWindows:
             except ImportError as e:
                 raise RuntimeError("obsws-python が入っていません (pip install obsws-python)") from e
             logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
+            host, port = self.cfg.get("host", "localhost"), int(self.cfg.get("port", 4455))
             try:
-                self._client = obs.ReqClient(host=self.cfg.get("host", "localhost"),
-                                             port=int(self.cfg.get("port", 4455)),
-                                             password=self.cfg.get("password") or "", timeout=3)
+                self._client = obs.ReqClient(host=host, port=port, password=self.cfg.get("password") or "", timeout=3)
             except Exception as e:
-                raise RuntimeError(f"OBS につながりません ({e})。OBS を起動し、WebSocket サーバーを有効にしてください") from e
+                raise RuntimeError(connect_hint(e, host, port)) from e
             self._known.clear()
             self._scene_ready = False
         return self._client

@@ -77,3 +77,11 @@ def test_no_scene_switch_when_disabled(monkeypatch):
     install(monkeypatch, fake)
     ObsWindows({"switch_scene": False}, log=lambda *a: None).ensure("Iovis", "t")
     assert fake.program == "Scene"
+
+
+def test_connect_hint_for_refused():
+    from akm.obs_windows import connect_hint
+
+    m = connect_hint(ConnectionRefusedError("[WinError 10061] 対象のコンピューターによって接続を拒否されました。"),
+                     "localhost", 4455)
+    assert "WebSocket サーバーを有効にする" in m and "localhost:4455" in m

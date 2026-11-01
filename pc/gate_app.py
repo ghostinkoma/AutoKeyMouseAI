@@ -713,7 +713,8 @@ class GateApp:
             self.preview_src.configure(text="撮影元: -")
             return
         if snap.error or snap.preview is None:
-            c.create_text(SEND_W, SEND_H, text=snap.error or "撮影を待っています…", fill="#ffcc00", font=self.mono)
+            c.create_text(SEND_W, SEND_H, text=snap.error or "撮影を待っています…", fill="#ffcc00", font=self.mono,
+                          width=SEND_W * PREVIEW_ZOOM - 20, justify=tk.CENTER)  # 長い文は折り返す
         else:
             ok, png = cv2.imencode(".png", snap.preview)
             if ok:
