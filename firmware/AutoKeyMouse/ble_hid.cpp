@@ -96,6 +96,7 @@ volatile bool     gSecured = false;
 // 接続間隔の要求 (1.25ms 単位)。setConnInterval で変えられる。実際の値はホスト (Windows) が決める
 uint16_t gItvlMin = BLE_CONN_INTERVAL_MIN, gItvlMax = BLE_CONN_INTERVAL_MAX;
 volatile uint16_t gItvlNow = 0;  // 今の接続の実際の間隔 (1.25ms 単位。0 = 未接続)
+volatile bool gOff = false;      // shutdown() で BLE を止めた (再起動まで戻らない)
 
 uint8_t gMods    = 0;
 uint8_t gKeys[6] = {0};
@@ -197,7 +198,20 @@ void begin(const char* deviceName, const char* manufacturer) {
 
 bool connected() { return gPeers > 0 && gSecured; }
 
+void shutdown() {
+  if (gOff) return;
+  gOff = true;
+  gPeers = 0;  // 以後キー・マウスは送らない (connected() が false)
+  gSecured = false;
+  gItvlNow = 0;
+  NimBLEDevice::deinit(true);  // BLE を止めてメモリも返す
+  Serial.printf("[BLE] stopped (until restart). free heap %u\n", (unsigned)ESP.getFreeHeap());
+}
+
+bool isOff() { return gOff; }
+
 void setConnInterval(uint16_t minMs, uint16_t maxMs) {
+  if (gOff) return;
   // 1.25ms 単位に直す (BLE の規格は 7.5ms〜4s)
   uint16_t lo = (uint16_t)constrain(minMs * 4 / 5, 6, 3200), hi = (uint16_t)constrain(maxMs * 4 / 5, lo, 3200);
   gItvlMin = lo;
@@ -213,6 +227,7 @@ void setConnInterval(uint16_t minMs, uint16_t maxMs) {
 float connIntervalMs() { return gItvlNow * 1.25f; }
 
 void clearBonds() {
+  if (gOff) return;
   NimBLEDevice::deleteAllBonds();
   Serial.println("[BLE] all bonds deleted. Remove AutoKeyMouse in Windows too, then pair again.");
 }
@@ -220,9 +235,10 @@ uint32_t connectedPeers() { return gPeers; }
 uint32_t sendRetries() { return gRetries; }
 uint32_t droppedReports() { return gDropped; }
 
-bool advertising() { return NimBLEDevice::getAdvertising()->isAdvertising(); }
+bool advertising() { return !gOff && NimBLEDevice::getAdvertising()->isAdvertising(); }
 
 void loop() {
+  if (gOff) return;
   static uint32_t last = 0;
   if (millis() - last < 30000) return;
   last = millis();

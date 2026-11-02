@@ -231,7 +231,10 @@ void handleStop() {
 const char* gPrefer = "balance";
 void handleRadio() {
   String msg;
-  if (gServer.hasArg("ble")) {
+  if (gServer.hasArg("ble") && gServer.arg("ble") == "off") {
+    hid::shutdown();
+    msg += "ble off (until restart). ";
+  } else if (gServer.hasArg("ble")) {
     String v = gServer.arg("ble");
     int comma = v.indexOf(',');
     long lo = v.toInt(), hi = comma > 0 ? v.substring(comma + 1).toInt() : lo;
@@ -250,7 +253,14 @@ void handleRadio() {
     gPrefer = v == ESP_COEX_PREFER_WIFI ? "wifi" : v == ESP_COEX_PREFER_BT ? "bt" : "balance";
     msg += String("prefer ") + gPrefer + (e == ESP_OK ? "" : " (failed)") + ". ";
   }
-  sendText(200, msg + "now: ble " + String(hid::connIntervalMs(), 2) + "ms, prefer " + gPrefer);
+  if (gServer.hasArg("sleep")) {
+    // Wi-Fi の省電力 (モデムスリープ)。BLE と併用中は切れない (ESP-IDF の決まり)。BLE を止めてから
+    bool on = gServer.arg("sleep") != "0";
+    bool ok = WiFi.setSleep(on);
+    msg += String("wifi sleep ") + (on ? "on" : "off") + (ok ? "" : " (failed: stop BLE first with ble=off)") + ". ";
+  }
+  sendText(200, msg + "now: ble " + (hid::isOff() ? String("off") : String(hid::connIntervalMs(), 2) + "ms") +
+                    ", prefer " + gPrefer + ", wifi sleep " + (WiFi.getSleep() ? "on" : "off"));
 }
 
 void handleStatus() {
@@ -273,7 +283,9 @@ void handleStatus() {
   j += ",\"heapBlock\":" + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   j += ",\"cpuMHz\":" + String(getCpuFrequencyMhz());
   j += ",\"mirror\":" + display::frameStatsJson();
-  j += ",\"radio\":{\"ble_ms\":" + String(hid::connIntervalMs(), 2) + ",\"prefer\":\"" + gPrefer + "\"}";
+  j += ",\"radio\":{\"ble_ms\":" + String(hid::connIntervalMs(), 2) + ",\"ble_off\":" +
+       String(hid::isOff() ? "true" : "false") + ",\"prefer\":\"" + gPrefer + "\",\"wifi_sleep\":" +
+       String(WiFi.getSleep() ? "true" : "false") + "}";
   j += ",\"win\":" + edge_win::json();
   j += "}";
   sendJson(j);
