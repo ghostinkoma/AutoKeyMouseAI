@@ -325,7 +325,6 @@ void serialCmdTask(void*) {
 }  // namespace
 
 void setup() {
-  Serial.setRxBufferSize(SERIAL_RX_BUF);  // 有線ミラー (stream) の受信用に広げる。begin より前に呼ぶ
   Serial.begin(SERIAL_BAUD);
   delay(200);
   Serial.println("\n[AKM] AutoKeyMouse boot");

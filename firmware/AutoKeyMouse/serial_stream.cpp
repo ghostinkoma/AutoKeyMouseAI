@@ -1,6 +1,7 @@
 #include "serial_stream.h"
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 
 #include "config.h"
 #include "display.h"
@@ -43,7 +44,7 @@ struct Reader {
   size_t pos, n;    // buf の中の読み位置 / 入っている量
   uint8_t buf[1024];
 };
-Reader gRd;  // タスクのスタックを使わないように 1 つだけ置く
+Reader* gRd = nullptr;  // 有線で受け取っている間だけ確保する (Wi-Fi のときはメモリを使わない)
 
 bool readFn(void* ctx, uint8_t* dst, size_t want) {
   Reader* r = (Reader*)ctx;
@@ -89,7 +90,7 @@ void ack(char c) {
 
 // 1 枚分 (長さ len) を受け取って描き、返事をする
 void handleFrame(uint32_t len) {
-  Reader& rd = gRd;
+  Reader& rd = *gRd;
   rd.left = len;
   rd.waitUs = 0;
   rd.pos = rd.n = 0;
@@ -149,11 +150,27 @@ void handleFrame(uint32_t len) {
 
 }  // namespace
 
+// 受信バッファを広げて速さを変える / 元に戻す。広いバッファ (SERIAL_RX_BUF) は有線で受け取っている間だけ
+// 確保する。常に確保すると、その分 Wi-Fi の受信に使える空きメモリが減り、Wi-Fi のミラーが途中で詰まる
+void reopen(uint32_t baud, size_t rxBuf) {
+  Serial.flush();
+  Serial.end();
+  Serial.setRxBufferSize(rxBuf);
+  Serial.begin(baud);
+}
+
 void run(uint32_t baud) {
+  gRd = (Reader*)malloc(sizeof(Reader));
+  if (!gRd || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < SERIAL_RX_BUF + 4096) {
+    free(gRd);
+    gRd = nullptr;
+    Serial.println("ERR stream: not enough memory");
+    return;
+  }
   Serial.printf("OK STREAM %lu\n", (unsigned long)baud);
   Serial.flush();
   delay(30);  // PC が速さを切り替えるのを待つ
-  Serial.updateBaudRate(baud);
+  reopen(baud, SERIAL_RX_BUF);
   display::requestKeyframe();
   uint32_t last = millis(), frames = 0;
   uint32_t sync = 0;  // 直近 4 バイト ("AKMF" を探す)
@@ -176,9 +193,10 @@ void run(uint32_t baud) {
     ++frames;
     last = millis();
   }
-  Serial.flush();
   delay(20);
-  Serial.updateBaudRate(SERIAL_BAUD);
+  reopen(SERIAL_BAUD, SERIAL_RX_DEFAULT);
+  free(gRd);
+  gRd = nullptr;
   delay(20);
   Serial.printf("\n[STREAM] serial stream end (%lu frames). back to %d bps\n", (unsigned long)frames, SERIAL_BAUD);
 }
