@@ -313,22 +313,9 @@ class KeyWatch:
         user32.UnhookWindowsHookEx(hook)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--exe", help="sakura.exe の場所")
-    ap.add_argument("--delay", type=float, default=10, help="1 つの操作ごとの間隔 ms (ESP32 の既定 10)")
-    ap.add_argument("--latency", type=float, default=0, help="届くまでの遅れ ms")
-    ap.add_argument("--jitter", type=float, default=0, help="遅れのばらつき ms")
-    ap.add_argument("--interval", type=float, default=0, help="送信間隔の区切り ms (BLE の接続間隔の模擬)")
-    ap.add_argument("--layout", choices=["jp", "us"], help="キー配列 (省略 = この PC のキーボードから判断)")
-    a = ap.parse_args()
-    if not IS_WINDOWS:
-        raise SystemExit("Windows で動かしてください")
-    print(f"0) この試験は{'管理者として' if is_admin() else '管理者でなく'}動いています")
-
-    from akm.virtual_hid import VirtualHid
-
-    exe = find_exe(a.exe)
+def open_sakura(exe_arg: str | None):
+    """サクラエディタを新しい (無題の) ウィンドウで起動し、手前に出して IME を OFF にする。ウィンドウを返す (だめなら None)"""
+    exe = find_exe(exe_arg)
     before = sakura_windows()
     print(f"1) サクラエディタを起動します: {exe}")
     subprocess.Popen([exe])
@@ -344,7 +331,7 @@ def main():
     print(f"   ウィンドウ {hwnd:#x} '{title}'")
     time.sleep(1.0)  # 立ち上がりきるのを待つ (エラーのメッセージボックスが出るならこの間に出る)
     if check_dialogs("起動したとき"):
-        return 1
+        return None
 
     print("2) 手前に出して IME を OFF にします")
     if not bring_to_front(hwnd, 1.0):
@@ -357,6 +344,28 @@ def main():
     if ime_open(hwnd):
         set_ime(hwnd, False)
     print(f"   IME: {'ON のまま (英字がかなになるかもしれません)' if ime_open(hwnd) else 'OFF'}")
+
+    return hwnd
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--exe", help="sakura.exe の場所")
+    ap.add_argument("--delay", type=float, default=10, help="1 つの操作ごとの間隔 ms (ESP32 の既定 10)")
+    ap.add_argument("--latency", type=float, default=0, help="届くまでの遅れ ms")
+    ap.add_argument("--jitter", type=float, default=0, help="遅れのばらつき ms")
+    ap.add_argument("--interval", type=float, default=0, help="送信間隔の区切り ms (BLE の接続間隔の模擬)")
+    ap.add_argument("--layout", choices=["jp", "us"], help="キー配列 (省略 = この PC のキーボードから判断)")
+    a = ap.parse_args()
+    if not IS_WINDOWS:
+        raise SystemExit("Windows で動かしてください")
+    print(f"0) この試験は{'管理者として' if is_admin() else '管理者でなく'}動いています")
+
+    from akm.virtual_hid import VirtualHid
+
+    hwnd = open_sakura(a.exe)
+    if not hwnd:
+        return 1
 
     layout = a.layout or keyboard_layout()
     hid = VirtualHid(event_delay_ms=a.delay, latency_ms=a.latency, jitter_ms=a.jitter,
