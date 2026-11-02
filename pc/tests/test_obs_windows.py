@@ -97,3 +97,21 @@ def test_obs_command_passes_port_and_password_and_runs_in_obs_folder():
     assert cwd == Path(args[0]).parent
     args, _ = obs_command({})
     assert not any(a.startswith("--websocket_password") for a in args)
+
+
+def test_color_formats_preview_matches_bits():
+    import numpy as np
+
+    from akm.bad16 import replicate565, to565
+    from akm.gate_live import color_bits, from565, to_send_format
+
+    assert color_bits("BadCodec 565") == (5, 6, 5) and color_bits("BadCodec 343") == (3, 4, 3)
+    assert color_bits("BadCodec 1bit") == (1, 1, 1) and color_bits("BadCodec 16bit") == (5, 6, 5)
+    assert color_bits("JPEG") is None
+    rng = np.random.default_rng(0)
+    img = rng.integers(0, 256, (135, 240, 3), dtype=np.uint8)
+    full, n565 = to_send_format(img, "BadCodec 565", 100)
+    assert n565 == 240 * 135 * 2 and (from565(to565(full)) == full).all()  # 565 は 565 で表せる色だけ
+    q, n343 = to_send_format(img, "BadCodec 343", 100)
+    assert n343 == 240 * 135 * 10 // 8
+    assert (to565(q) == replicate565(to565(img), (3, 4, 3))).all()  # ESP32 の表示 (下位ビットは繰り返し) と同じ

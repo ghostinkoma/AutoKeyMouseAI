@@ -47,11 +47,17 @@ TITLE_RE = re.compile(
 try:
     import cv2
 
-    from akm.gate_live import LiveFeed, MapSource
+    from akm.gate_live import FORMATS, LiveFeed, MapSource, color_bits
     LIVE_ERROR = ""
 except Exception as _e:  # noqa: BLE001
     cv2 = LiveFeed = MapSource = None
     LIVE_ERROR = f"{type(_e).__name__}: {_e}"
+    FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit", "JPEG")
+
+    def color_bits(fmt):
+        tail = fmt.split()[-1]
+        return None if not fmt.startswith("BadCodec") else (1, 1, 1) if tail == "1bit" else \
+            tuple(int(c) for c in tail) if tail.isdigit() and len(tail) == 3 else (5, 6, 5)
 
 
 def load_cfg() -> dict:
@@ -186,7 +192,7 @@ class GateApp:
         self.armed = tk.BooleanVar(value=False)
         self.bring_front = tk.BooleanVar(value=False)
         self.auto_refresh = tk.BooleanVar(value=True)
-        self.mirror_fmt = tk.StringVar(value="BadCodec 16bit")  # 既定はカラー (ゲームの画面がそのまま見える)
+        self.mirror_fmt = tk.StringVar(value="BadCodec 343")  # 既定はカラー。config の mirror.color で変わる
         self.threshold = tk.IntVar(value=100)
         self.fps = tk.IntVar(value=15)
         self.com = tk.StringVar(value="COM18")
@@ -200,6 +206,9 @@ class GateApp:
         self.map_view = 96         # マップに出す広さ (マス)。ホイールで変える
         self.cfg = load_cfg()
         self.capture_mode = tk.StringVar(value=self.cfg_capture_default())
+        mc = str((self.cfg.get("mirror") or {}).get("color", "343"))
+        if f"BadCodec {mc}" in FORMATS:
+            self.mirror_fmt.set(f"BadCodec {mc}")
         self.host.set(str((self.cfg.get("device") or {}).get("host") or ""))
         self.sender = None         # ESP32 への送信 (akm.mirror.Mirror)
         self.auto_send.set(bool((self.cfg.get("gate") or {}).get("auto_send", True)))
@@ -308,9 +317,13 @@ class GateApp:
             ttk.Radiobutton(g, text=text, value=v, variable=self.capture_mode,
                             command=lambda t=text: self.log("INFO", f"撮影方式: {t}")).grid(row=i, column=0, sticky="w")
         g = rb.group(t, "形式")
-        for i, f in enumerate(("BadCodec 1bit", "BadCodec 16bit", "JPEG")):
-            ttk.Radiobutton(g, text=f, value=f, variable=self.mirror_fmt,
-                            command=lambda f=f: self.log("INFO", f"送信形式: {f}")).grid(row=i, column=0, sticky="w")
+        # BadCodec のカラーは R G B のビット数。565 = RGB565 そのまま (可逆・一番きれい・1 枚が一番大きい)
+        labels = {"BadCodec 565": "RGB565 (可逆)", "BadCodec 343": "343 (10 ビット)", "BadCodec 332": "332 (8 ビット)",
+                  "BadCodec 1bit": "白黒 (1 ビット)", "JPEG": "JPEG"}
+        for i, f in enumerate(FORMATS):
+            ttk.Radiobutton(g, text=labels[f], value=f, variable=self.mirror_fmt,
+                            command=lambda f=f: self.log("INFO", f"送信形式: {labels[f]}")).grid(
+                row=i % 3, column=i // 3, sticky="w")
         g = rb.group(t, "2値化")
         ttk.Label(g, text="しきい値").grid(row=0, column=0, sticky="w")
         ttk.Scale(g, from_=0, to=255, variable=self.threshold, length=140).grid(row=1, column=0)
@@ -521,16 +534,15 @@ class GateApp:
             return
         self.stop_sending()
         import akm.mirror as mirror_mod
-        from akm.bad16 import parse_color
         from akm.mirror import Mirror
 
         mirror_mod.print = self._mirror_print  # 送信の様子をログ欄へ
 
         mcfg = self.cfg.get("mirror") or {}
         fmt = self.mirror_fmt.get()
-        # 1bit: 送信画面と同じ白黒の絵を、各色 1 ビット (3 面) の BadCodec 16bit で送る
-        kind, bits = ("jpeg", (3, 4, 3)) if fmt == "JPEG" else \
-            ("bad16", (1, 1, 1) if fmt.startswith("BadCodec 1bit") else parse_color(mcfg.get("color", "343")))
+        # BadCodec: 選んだ色のビット数で送る (1bit は送信画面と同じ白黒の絵を各色 1 ビット = 3 面で)
+        bits = color_bits(fmt)
+        kind, bits = ("jpeg", (3, 4, 3)) if bits is None else ("bad16", bits)
         link, where = None, host
         if wired:  # 有線: COM で送る (akm/serial_link.py。ファームウェア frame-stream-15 以降)
             from akm.serial_link import SerialFrameLink
@@ -878,7 +890,8 @@ class GateApp:
             if not self.armed.get():
                 c.create_text(SEND_W, SEND_H * PREVIEW_ZOOM - 14, text="ゲート停止中", fill="#ffcc00", font=self.mono)
         fmt = self.mirror_fmt.get()
-        raw = {"BadCodec 1bit": SEND_W * SEND_H // 8, "BadCodec 16bit": SEND_W * SEND_H * 2}.get(fmt)
+        cb = color_bits(fmt)
+        raw = None if cb is None else (SEND_W * SEND_H // 8 if cb == (1, 1, 1) else SEND_W * SEND_H * sum(cb) // 8)
         size = f"圧縮前 {raw / 1024:.1f} KB" if raw else "JPEG"
         tm = snap.timing or {}
         ms = " / ".join(f"{label} {tm[k]:.0f}" for k, label in (("grab", "撮影"), ("make", "縮小"), ("analyze", "解析"))

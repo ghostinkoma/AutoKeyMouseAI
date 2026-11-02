@@ -44,18 +44,50 @@ class Snapshot:
     timing: dict = field(default_factory=dict)  # 1 枚にかかった時間 (ms): grab 撮影 / make 縮小・形式 / analyze 解析
 
 
+# 送る形式 (仲介アプリのミラーのタブ)。BadCodec のカラーは R G B のビット数 (565 = RGB565 そのまま・可逆)
+FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit", "JPEG")
+
+
+def color_bits(fmt: str) -> tuple[int, int, int] | None:
+    """'BadCodec 343' → (3, 4, 3)。1bit は (1, 1, 1)。BadCodec 以外は None。古い名前 'BadCodec 16bit' は 565"""
+    if not fmt.startswith("BadCodec"):
+        return None
+    tail = fmt.split()[-1]
+    if tail == "1bit":
+        return (1, 1, 1)
+    if tail == "16bit":
+        return (5, 6, 5)
+    from .bad16 import parse_color
+
+    return parse_color(tail)
+
+
+def from565(img565: np.ndarray) -> np.ndarray:
+    """RGB565 → BGR888 (液晶と同じく上位ビットを下位に繰り返して 8 ビットに広げる)"""
+    r = (img565 >> 11) & 31
+    g = (img565 >> 5) & 63
+    b = img565 & 31
+    out = np.empty(img565.shape + (3,), np.uint8)
+    out[..., 0] = ((b << 3) | (b >> 2)).astype(np.uint8)
+    out[..., 1] = ((g << 2) | (g >> 4)).astype(np.uint8)
+    out[..., 2] = ((r << 3) | (r >> 2)).astype(np.uint8)
+    return out
+
+
 def to_send_format(small: np.ndarray, fmt: str, threshold: int) -> tuple[np.ndarray, int]:
-    """送る形式に合わせた見た目と、おおよその 1 枚の大きさ (バイト。差分で縮む前)。"""
+    """送る形式に合わせた見た目 (ESP32 の液晶に出るのと同じ色) と、おおよその 1 枚の大きさ (バイト。差分で縮む前)。"""
     if fmt.startswith("BadCodec 1bit"):
         g = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         bw = np.where(g > threshold, 255, 0).astype(np.uint8)
         return cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR), SEND_W * SEND_H // 8
-    if fmt.startswith("BadCodec 16bit"):
-        q = small.copy()  # RGB565 にしたときの色
-        q[:, :, 0] &= 0xF8
-        q[:, :, 1] &= 0xFC
-        q[:, :, 2] &= 0xF8
-        return q, SEND_W * SEND_H * 2
+    bits = color_bits(fmt)
+    if bits is not None:
+        from .bad16 import replicate565, to565
+
+        img = to565(small)
+        if bits != (5, 6, 5):  # 送らない下位ビットは上位ビットの繰り返しで埋まる (ESP32 の表示と同じ)
+            img = replicate565(img, bits)
+        return from565(img), SEND_W * SEND_H * sum(bits) // 8
     ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 70])
     return (cv2.imdecode(buf, cv2.IMREAD_COLOR) if ok else small), (len(buf) if ok else 0)
 
