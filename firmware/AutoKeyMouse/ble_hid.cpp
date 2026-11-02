@@ -1,3 +1,4 @@
+#include <Preferences.h>
 #include "ble_hid.h"
 
 #include "config.h"
@@ -176,7 +177,33 @@ void sendMouse(int8_t dx, int8_t dy, int8_t wheel) {
 
 }  // namespace
 
+// BLE を使うか (ESP32 に保存。ble disable / ble enable、GET /radio?ble=disable|enable)。
+// 使わないときは起動時に BLE を始めない: 液晶ミラーの Wi-Fi が約 3 倍速く、空きメモリも約 38KB 増える
+bool enabledSetting() {
+  Preferences p;
+  bool on = true;
+  if (p.begin("hid", true)) {  // 一度も保存していなければ開けないので、既定 (使う)
+    on = p.getBool("ble", true);
+    p.end();
+  }
+  return on;
+}
+
+void setEnabled(bool on) {
+  Preferences p;
+  p.begin("hid", false);
+  p.putBool("ble", on);
+  p.end();
+  Serial.printf("[BLE] %s (saved)%s\n", on ? "enabled" : "disabled", on ? ". restart to start BLE" : "");
+  if (!on) shutdown();
+}
+
 void begin(const char* deviceName, const char* manufacturer) {
+  if (!enabledSetting()) {
+    gOff = true;
+    Serial.println("[BLE] disabled by setting: Wi-Fi only (keyboard / mouse not available). serial: ble enable");
+    return;
+  }
   NimBLEDevice::init(deviceName);
   // ボンディングあり / MITM なし / Secure Connections。表示・入力手段がないので Just Works。
   NimBLEDevice::setSecurityAuth(true, false, true);

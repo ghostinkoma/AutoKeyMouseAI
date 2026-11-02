@@ -72,7 +72,8 @@ def main():
     ap.add_argument("--fps", type=float, default=60)
     ap.add_argument("--http-port", type=int, default=80)
     ap.add_argument("--ble", help="BLE の接続間隔 (ms) を変えてから試す。例 --ble 60,80 (frame-stream-27 以降)。"
-                                  "off = BLE を止めて Wi-Fi だけで試す (キー・マウスは ESP32 の再起動まで使えない。28 以降)")
+                                  "off = BLE を止めて Wi-Fi だけで試す (キー・マウスは ESP32 の再起動まで使えない。28 以降)。"
+                                  "disable / enable = BLE を使うかを ESP32 に保存する (再起動しても残る。30 以降)")
     ap.add_argument("--lat", type=int,
                     help="BLE のスレーブレイテンシ (送るものが無いとき聞き飛ばしてよい接続イベントの数。29 以降)。例 --lat 20")
     ap.add_argument("--sleep", choices=["on", "off"],
@@ -203,6 +204,8 @@ def main():
             rr = (st or {}).get("radio")
             if rr:
                 ble = "停止中" if rr.get("ble_off") else f"接続間隔 {rr.get('ble_ms')} ms / レイテンシ {rr.get('ble_lat', '?')}"
+                if rr.get("ble_setting") is False:
+                    ble += " (保存: 起動時に BLE を始めない)"
                 sleep = {True: "あり", False: "なし"}.get(rr.get("wifi_sleep"), "?")
                 print(f"   電波: BLE {ble} / 優先 {rr.get('prefer')} / Wi-Fi の省電力 {sleep}")
             pp = (st or {}).get("pipe")

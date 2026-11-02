@@ -102,6 +102,7 @@ void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
                     WiFi.gatewayIP().toString().c_str(), WiFi.RSSI());
       Serial.printf("[WIFI] Web UI: http://%s/  (http://autokeymouse.local/)\n",
                     WiFi.localIP().toString().c_str());
+      if (hid::isOff()) WiFi.setSleep(false);  // BLE を使わないときは省電力を切る (受信の遅れを減らす)
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
       wifi_err_reason_t r = (wifi_err_reason_t)info.wifi_sta_disconnected.reason;
@@ -231,7 +232,12 @@ void handleStop() {
 const char* gPrefer = "balance";
 void handleRadio() {
   String msg;
-  if (gServer.hasArg("ble") && gServer.arg("ble") == "off") {
+  if (gServer.hasArg("ble") && (gServer.arg("ble") == "disable" || gServer.arg("ble") == "enable")) {
+    bool on = gServer.arg("ble") == "enable";
+    hid::setEnabled(on);  // 保存 (再起動しても残る)
+    if (!on) WiFi.setSleep(false);
+    msg += on ? "ble enabled (saved). restart the ESP32 to start BLE. " : "ble disabled (saved, also after restart). ";
+  } else if (gServer.hasArg("ble") && gServer.arg("ble") == "off") {
     hid::shutdown();
     msg += "ble off (until restart). ";
   } else if (gServer.hasArg("ble") || gServer.hasArg("lat")) {
@@ -288,7 +294,7 @@ void handleStatus() {
   j += ",\"cpuMHz\":" + String(getCpuFrequencyMhz());
   j += ",\"mirror\":" + display::frameStatsJson();
   j += ",\"radio\":{\"ble_ms\":" + String(hid::connIntervalMs(), 2) + ",\"ble_lat\":" + String(hid::connLatency()) +
-       ",\"ble_off\":" +
+       ",\"ble_setting\":" + String(hid::enabledSetting() ? "true" : "false") + ",\"ble_off\":" +
        String(hid::isOff() ? "true" : "false") + ",\"prefer\":\"" + gPrefer + "\",\"wifi_sleep\":" +
        String(WiFi.getSleep() ? "true" : "false") + "}";
   j += ",\"win\":" + edge_win::json();

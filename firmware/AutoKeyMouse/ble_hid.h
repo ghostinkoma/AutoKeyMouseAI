@@ -31,6 +31,9 @@ uint16_t connLatency();  // 今の接続の実際のスレーブレイテンシ
 // BLE を止める (Wi-Fi だけの速さを試す用。キー・マウスは使えなくなる。再起動で元に戻る)
 void shutdown();
 bool isOff();
+// BLE を使うかの設定 (ESP32 に保存。再起動しても残る)。false にするとすぐ止まり、次の起動からも始めない
+bool enabledSetting();
+void setEnabled(bool on);
 uint32_t connectedPeers();
 bool advertising();
 uint32_t sendRetries();     // 送信バッファ待ちで再送した回数

@@ -828,7 +828,8 @@ void loop() {
   }
 
   // BLE / マクロ
-  if (ble) line(104, 2, ST77XX_GREEN, "BLE connected");
+  if (hid::isOff()) line(104, 2, ST77XX_ORANGE, "BLE off (Wi-Fi only)");
+  else if (ble) line(104, 2, ST77XX_GREEN, "BLE connected");
   else if (hid::connectedPeers() > 0) line(104, 2, ST77XX_YELLOW, "BLE pairing...");
   else line(104, 2, ST77XX_RED, "BLE waiting");
   if (!cur.isEmpty()) line(124, 1, ST77XX_MAGENTA, "run: " + cur);

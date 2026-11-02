@@ -184,6 +184,8 @@ void printHelp() {
   Serial.println("  tft spi <MHz>     change the display SPI clock (80 / 40 / 27 / 20). no number = show it");
   Serial.println("  tft dma on|off    draw the mirror with DMA (on) or the old way (off)");
   Serial.println("  ble clear         forget BLE pairings (then remove the device in Windows and pair again)");
+  Serial.println("  ble disable       stop BLE and do not start it at boot (Wi-Fi only: faster mirror, no keyboard)");
+  Serial.println("  ble enable        start BLE again from the next boot");
   Serial.println("  stream <baud>     receive the mirror over this serial line (used by the PC app)");
 }
 
@@ -254,6 +256,10 @@ void handleLine(String line) {
     long mhz = line.substring(7).toInt();
     if (mhz >= 1 && mhz <= 80) display::setSpiHz((uint32_t)mhz * 1000000UL);
     Serial.printf("OK tft spi %lu Hz\n", (unsigned long)display::spiHz());
+  } else if (line == "ble disable" || line == "ble enable") {
+    hid::setEnabled(line.endsWith("enable"));
+    if (line.endsWith("disable")) WiFi.setSleep(false);
+    Serial.println(line.endsWith("enable") ? "OK BLE enabled. restart to start BLE" : "OK BLE disabled (Wi-Fi only)");
   } else if (line == "ble clear") {
     hid::clearBonds();
     Serial.println("OK");
