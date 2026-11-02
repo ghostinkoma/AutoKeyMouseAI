@@ -40,7 +40,8 @@ struct Reader {
   size_t pos = 0, n = 0;
 };
 
-bool readFn(void* ctx, uint8_t* dst, size_t want) {
+// 展開が 1 ブロックに 20 回ほど呼ぶので IRAM に置く (受信バッファが空のときだけフラッシュの受信処理へ)
+IRAM_ATTR bool readFn(void* ctx, uint8_t* dst, size_t want) {
   Reader* r = (Reader*)ctx;
   while (want) {
     if (r->pos == r->n) {
@@ -66,6 +67,22 @@ bool readFn(void* ctx, uint8_t* dst, size_t want) {
     want -= k;
   }
   return true;
+}
+
+// 先頭 2 バイト (形式の判定に読んだ分) を付け直して展開側に渡す。これも 1 ブロックに 20 回ほど呼ばれる
+struct Pre {
+  Reader* r;
+  uint8_t h[2];
+  int used;
+};
+
+IRAM_ATTR bool readPre(void* ctx, uint8_t* dst, size_t n) {
+  Pre* p = (Pre*)ctx;
+  while (n && p->used < 2) {
+    *dst++ = p->h[p->used++];
+    --n;
+  }
+  return n == 0 || readFn(p->r, dst, n);
 }
 
 void task(void*) {
@@ -121,19 +138,7 @@ void task(void*) {
     if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6')) {
       // 受信しながら描く (フレームバッファ不要)。描き終わったら返事:
       //   'K' = OK / 'R' = 次はキーフレームが欲しい / 'E' = この形式は使えない (メモリ不足。PC は JPEG に戻す)
-      struct Pre {
-        Reader* r;
-        uint8_t h[2];
-        int used;
-      } pre{&rd, {head[0], head[1]}, 0};
-      auto readPre = [](void* ctx, uint8_t* dst, size_t n) -> bool {
-        Pre* p = (Pre*)ctx;
-        while (n && p->used < 2) {
-          *dst++ = p->h[p->used++];
-          --n;
-        }
-        return n == 0 || readFn(p->r, dst, n);
-      };
+      Pre pre{&rd, {head[0], head[1]}, 0};
       int res = head[1] == '6' ? display::drawBad16(readPre, &pre, len, &rd.waitUs)
                                : display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
       if (res == 0) {

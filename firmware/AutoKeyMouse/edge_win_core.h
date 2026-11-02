@@ -16,6 +16,9 @@ constexpr int FW = 240, FH = 135;  // 液晶に出る画面
 constexpr int GW = 120, GH = 68;   // スロットの座標
 constexpr int N = 16;
 
+#if defined(__GNUC__)
+__attribute__((always_inline))  // 1 画素ごとに呼ぶので、IRAM に置いた呼び出し元に展開させる
+#endif
 inline uint8_t gray565(uint16_t p) {
   uint32_t r = p >> 11 & 31, g = p >> 5 & 63, b = p & 31;
   uint32_t r8 = (r << 3) | (r >> 2), g8 = (g << 2) | (g >> 4), b8 = (b << 3) | (b >> 2);
@@ -30,13 +33,20 @@ struct Gray {
   int lineY = -1;
 };
 
+// always_inline: ESP32 では IRAM に置いた呼び出し元 (edge_win::feedBlock) に展開させる (フラッシュに置かれないように)
+#if defined(__GNUC__)
+#define EDGE_INLINE __attribute__((always_inline))
+#else
+#define EDGE_INLINE
+#endif
+
 template <typename Px>
-inline void feedRows(Gray& g, int x, int y, int w, int h, Px px) {
+EDGE_INLINE inline void feedRows(Gray& g, int x, int y, int w, int h, Px px) {
   int sx = (x & 1) ? 1 : 0;  // 奇数から始まることは無いはずだが、来たら 1 画素捨てて偶数にそろえる
   int c0 = sx, c1 = w;       // 使う列 [c0, c1): 画面の外 (x < 0, x >= 240) は除く
   while (x + c0 < 0) c0 += 2;
   while (c1 > c0 && x + c1 > FW) c1--;
-  auto hp = [&](int r, int c) { return (gray565(px(r, c)) + gray565(px(r, c + 1))) >> 1; };
+  auto hp = [&](int r, int c) EDGE_INLINE { return (gray565(px(r, c)) + gray565(px(r, c + 1))) >> 1; };
   for (int r = 0; r < h; r++) {
     int yy = y + r;
     if (yy < 0 || yy >= FH) continue;
@@ -58,8 +68,8 @@ inline void feedRows(Gray& g, int x, int y, int w, int h, Px px) {
 }
 
 // 液晶に描いた w x h の画素 (1 行 stride 画素)。x は偶数 (8x8 ブロック・JPEG の MCU・行全体)
-inline void feedBlock(Gray* g, int x, int y, int w, int h, const uint16_t* px, int stride) {
-  if (g) feedRows(*g, x, y, w, h, [&](int r, int c) { return px[r * stride + c]; });
+EDGE_INLINE inline void feedBlock(Gray* g, int x, int y, int w, int h, const uint16_t* px, int stride) {
+  if (g) feedRows(*g, x, y, w, h, [&](int r, int c) EDGE_INLINE { return px[r * stride + c]; });
 }
 
 // 1 色で塗ったブロック (BlockDiff)

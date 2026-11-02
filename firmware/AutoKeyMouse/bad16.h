@@ -97,6 +97,18 @@ namespace detail {
 // 1 バイトの 8 ビットを 8 バイトに広げる表 (bit k → バイト k の bit 0)。2KB。
 // const にすると ESP32 ではフラッシュに置かれ、読むたびに Wi-Fi の処理とキャッシュを取り合うので、
 // 内部 RAM に置いて最初の 1 回だけ作る
+// 8x8 のビット行列 (バイト i の bit j) を転置する (バイト j の bit i へ)。ビット演算 9 回
+inline uint64_t transpose8(uint64_t x) {
+  uint64_t t;
+  t = (x ^ (x >> 7)) & 0x00AA00AA00AA00AAULL;
+  x = x ^ t ^ (t << 7);
+  t = (x ^ (x >> 14)) & 0x0000CCCC0000CCCCULL;
+  x = x ^ t ^ (t << 14);
+  t = (x ^ (x >> 28)) & 0x00000000F0F0F0F0ULL;
+  x = x ^ t ^ (t << 28);
+  return x;
+}
+
 inline const uint64_t* spread() {
   static uint64_t t[256];
   static bool done = false;
@@ -240,6 +252,9 @@ inline int decodeBody(State& s, const Header& h, ReadFn read, void* ctx) {
 // 本体: SKIP (0x80-0xBF) = n+1 ブロック変化なし / それ以外 = 次のブロックの mask の面 (bit0 → bit15) の命令が 1 つずつ
 // (FILL / RLE_BLOCK_4 / RLE_BLOCK_8 / MASTER_BLOCK)。戻り値: 描いたブロック数、失敗なら -1
 template <typename Sink>
+#if defined(__GNUC__)
+__attribute__((always_inline))  // 呼び出し元 (ESP32 では IRAM に置いた関数) に展開させる
+#endif
 inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
   constexpr int NBX = W / 8, NBY = H / 8, TOTAL = NBX * NBY;
   uint16_t px[64];
@@ -251,7 +266,10 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       ptr += BAD_SKIP_COUNT(op);
       continue;
     }
-    uint8_t rowsAll[16][8];  // 面ごとの 8 行 (1 行 1 バイト)
+    // 行ごとに 16 面ぶんのバイトを並べて持つ: rm[y][b] = 面 b の y 行目 (bit x = 画素 x)。
+    // 1 行の面 0〜7 / 8〜15 がそれぞれ 8 バイト続くので、そのまま 64 ビットとして転置に渡せる
+    alignas(8) uint8_t rm[8][16];
+    if (!h.rep && h.mask != 0xFFFF) memset(rm, 0, sizeof(rm));  // 送られない面は 0
     uint32_t c0 = BAD16_CYCLES();
     bool first = true;
     for (int b = 0; b < 16; b++) {
@@ -267,11 +285,14 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       if (n == 0 || (n > 1 && !read(ctx, d + 1, n - 1))) return -1;
       // よく出る 2 つは直接 (公式の命令処理を通すと 1 面ごとに作業領域の初期化と 1 バイトずつの読み出しが入る)
       if (BAD_IS_FILL(d[0])) {
-        memset(rowsAll[b], BAD_FILL_COLOR(d[0]) ? 0xFF : 0x00, 8);  // 全面 0 / 1
+        uint8_t v = BAD_FILL_COLOR(d[0]) ? 0xFF : 0x00;  // 全面 0 / 1
+        for (int y = 0; y < 8; y++) rm[y][b] = v;
       } else if (d[0] == BAD_OP_MASTER_BLOCK) {
-        memcpy(rowsAll[b], d + 1, 8);  // 8 行をそのまま (1 行 1 バイト, LSB = 左)
-      } else if (bad_block_abs_rows(d, rowsAll[b]) != BAD_OK) {
-        return -1;
+        for (int y = 0; y < 8; y++) rm[y][b] = d[1 + y];  // 8 行をそのまま (1 行 1 バイト, LSB = 左)
+      } else {
+        uint8_t rows8[8];
+        if (bad_block_abs_rows(d, rows8) != BAD_OK) return -1;
+        for (int y = 0; y < 8; y++) rm[y][b] = rows8[y];
       }
     }
     uint32_t c1 = BAD16_CYCLES();
@@ -282,46 +303,33 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       for (int c = 0; c < 3; c++)
         for (int b = hi[c] - 1; b >= lo[c]; b--) {
           if (!(h.mask >> b & 1)) break;
-          for (int y = 0; y < 8; y++) rowsAll[b][y] ^= rowsAll[b + 1][y];
+          for (int y = 0; y < 8; y++) rm[y][b] ^= rm[y][b + 1];
         }
     }
-    uint16_t present = h.mask;
     if (h.rep) {
-      // 送られない下位の面を上位の面の複製で埋める (R3 なら bit12 = bit15, bit11 = bit14)。面の行のコピーだけ
+      // 送られない下位の面を上位の面の複製で埋める (R3 なら bit12 = bit15, bit11 = bit14)
       static const uint8_t lo[3] = {0, 5, 11}, hi[3] = {4, 10, 15};
       for (int c = 0; c < 3; c++) {
         int n = 0;
         while (n <= hi[c] - lo[c] && (h.mask >> (hi[c] - n) & 1)) n++;
         if (n == 0) continue;
-        for (int b = hi[c] - n; b >= lo[c]; b--) memcpy(rowsAll[b], rowsAll[b + n], 8);
+        for (int b = hi[c] - n; b >= lo[c]; b--)
+          for (int y = 0; y < 8; y++) rm[y][b] = rm[y][b + n];
       }
-      present = 0xFFFF;
     }
-    // 16 面の 1 行 (各 1 バイト) から 8 画素を表引きでまとめて組む (ビットの数に関係なく一定の速さ)。
-    // 表は 1 バイトの 8 ビットを 8 バイトに広げたもの。32 ビットの CPU なので 64 ビットの演算は使わず、
-    // 前半 4 画素 (表の下位 32 ビット) と後半 4 画素 (上位 32 ビット) に分けて組む
-    const uint64_t* sp = detail::spread();
-    uint8_t planes[16];
-    int np = 0;
-    for (int b = 0; b < 16; b++)
-      if (present >> b & 1) planes[np++] = (uint8_t)b;
+    // 画素を組む = ビットの行列の転置。1 行の「面 0〜7 x 画素 0〜7」(8x8 ビット) を転置すると
+    // 「画素 0〜7 x 下位 8 ビット」になる。面 8〜15 で上位 8 ビット。1 行に転置 2 回で 8 画素
     for (int y = 0; y < 8; y++) {
-      uint32_t lo0 = 0, lo1 = 0, hi0 = 0, hi1 = 0;  // 下位バイト (bit0-7) / 上位バイト (bit8-15) の、前半・後半
-      for (int i = 0; i < np; i++) {
-        int b = planes[i];
-        const uint32_t* w = (const uint32_t*)&sp[rowsAll[b][y]];  // [0] = 画素 0-3, [1] = 画素 4-7 (リトルエンディアン)
-        if (b < 8) {
-          lo0 |= w[0] << b;
-          lo1 |= w[1] << b;
-        } else {
-          hi0 |= w[0] << (b - 8);
-          hi1 |= w[1] << (b - 8);
-        }
-      }
+      uint64_t L, Hh;
+      memcpy(&L, &rm[y][0], 8);   // バイト b = 面 b (リトルエンディアン)
+      memcpy(&Hh, &rm[y][8], 8);  // バイト b = 面 8 + b
+      L = detail::transpose8(L);  // バイト x = 画素 x の下位 8 ビット
+      Hh = detail::transpose8(Hh);  // バイト x = 画素 x の上位 8 ビット
+      uint32_t l0 = (uint32_t)L, l1 = (uint32_t)(L >> 32), h0 = (uint32_t)Hh, h1 = (uint32_t)(Hh >> 32);
       uint16_t* p = px + y * 8;
       for (int k = 0; k < 4; k++) {
-        p[k] = (uint16_t)((lo0 >> (8 * k)) & 0xFF) | (uint16_t)(((hi0 >> (8 * k)) & 0xFF) << 8);
-        p[k + 4] = (uint16_t)((lo1 >> (8 * k)) & 0xFF) | (uint16_t)(((hi1 >> (8 * k)) & 0xFF) << 8);
+        p[k] = (uint16_t)(((l0 >> (8 * k)) & 0xFF) | (((h0 >> (8 * k)) & 0xFF) << 8));
+        p[k + 4] = (uint16_t)(((l1 >> (8 * k)) & 0xFF) | (((h1 >> (8 * k)) & 0xFF) << 8));
       }
     }
     uint32_t c2 = BAD16_CYCLES();

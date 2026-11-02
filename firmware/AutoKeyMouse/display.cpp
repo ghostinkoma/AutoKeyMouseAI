@@ -200,6 +200,24 @@ void dmaFlush() {
 }
 
 // 8 x rows のブロックを帯に足す (画素はホストのバイト順。液晶は上位バイトが先なので入れ替えて置く)
+IRAM_ATTR void dmaBlock(int x, int y, int rows, const uint16_t* px);
+
+// BadCodec 16bit (ver 3) の 1 フレームの展開を、ブロックごとの描画まで含めて IRAM で回す。
+// フラッシュから実行すると、展開の命令を読むたびに Wi-Fi の処理とキャッシュを取り合って遅くなる
+// (1 ブロックにかかる時間が命令の数から計算した値の数倍あった)。decodeAbs は always_inline でここに展開される
+// noinline: 呼び出し元 (drawBad16。フラッシュ) に埋め込まれると IRAM に置かれないため
+__attribute__((noinline)) IRAM_ATTR int decodeAbsDma(const bad16::Header& h, ReadFn read, void* ctx, uint32_t* drawUs,
+                                                    uint32_t* edgeUs) {
+  return bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) __attribute__((always_inline)) {
+    uint32_t d0 = micros();
+    edge_win::feedBlock(bx * 8, by * 8, 8, rows, px, 8);
+    uint32_t d1 = micros();
+    dmaBlock(bx * 8, by * 8, rows, px);  // 帯がつながらなくなったら前の帯を DMA で送る
+    *edgeUs += d1 - d0;
+    *drawUs += micros() - d1;
+  });
+}
+
 IRAM_ATTR void dmaBlock(int x, int y, int rows, const uint16_t* px) {
   if (gRunX >= 0 && (y != gRunY || x != gRunX + gRunW || rows != gRunRows)) dmaFlush();
   if (gRunX < 0) {
@@ -559,14 +577,7 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
       dma = false;
     }
     if (dma) {
-      n = bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) {
-        uint32_t d0 = micros();
-        edge_win::feedBlock(bx * 8, by * 8, 8, rows, px, 8);
-        uint32_t d1 = micros();
-        dmaBlock(bx * 8, by * 8, rows, px);  // 帯がつながらなくなったら前の帯を DMA で送る
-        edgeUs += d1 - d0;
-        drawUs += micros() - d1;
-      });
+      n = decodeAbsDma(h, read, ctx, &drawUs, &edgeUs);
       uint32_t d0 = micros();
       dmaFlush();
       dmaWait();  // 帯は共用バッファなので、返す前に送り終える
