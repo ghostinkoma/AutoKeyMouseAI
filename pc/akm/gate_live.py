@@ -113,6 +113,7 @@ class LiveFeed:
         self.title = ""            # 今のウィンドウのタイトル (OBS の撮影先に使う)
         self._obs = None
         self._obs_err = ""
+        self._obs_wait_since = 0.0  # OBS がゲームをつかむのを待ち始めた時刻
         self._snap = Snapshot()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -266,6 +267,22 @@ class LiveFeed:
                 else:
                     img = self._obs.grab(src, PREVIEW_GRAB_W, max(8, round(PREVIEW_GRAB_W * fh / fw)), 85)
             except Exception as e:
+                from .obs_windows import ObsNotReady
+
+                if isinstance(e, ObsNotReady):
+                    # 接続は正常で、OBS がまだゲームをつかんでいない。張り直すとつかみ直しになるので待つだけ
+                    now = time.monotonic()
+                    if not self._obs_wait_since:
+                        self._obs_wait_since = now
+                    waited = now - self._obs_wait_since
+                    msg = "OBS がゲームの画面をつかむのを待っています"
+                    if waited > 10:
+                        msg += (f" ({waited:.0f} 秒)。OBS を管理者として実行しているか・ゲームを最小化していないか・"
+                                "OBS のソース 'AKM ...' のプロパティでウィンドウが選ばれているか確認してください")
+                    if waited > 10 and self._obs_err != "wait":
+                        self._obs_err = "wait"
+                        self.log("WARN", msg)
+                    raise RuntimeError(msg) from e
                 self._obs.reset()
                 msg = str(e)
                 if msg != self._obs_err:  # 同じ失敗を何度もログに出さない
@@ -273,6 +290,7 @@ class LiveFeed:
                     self.log("ERR", f"OBS から撮れません: {msg}")
                 raise RuntimeError(f"OBS: {msg}") from e
             self._obs_err = ""
+            self._obs_wait_since = 0.0
             if float(img.max()) < 8:
                 raise RuntimeError("OBS の画像が真っ黒です (ゲームに入れていない。OBS を管理者として実行していますか)")
             return img, f"obs ({src})"

@@ -39,6 +39,9 @@ class FakeObs:
         self.calls.append("set")
         self.inputs[name][2].update(settings)
 
+    def get_input_settings(self, name):
+        return NS(input_settings=dict(self.inputs[name][2]))
+
     def get_source_screenshot(self, name, fmt, w, h, q):
         img = np.full((768, 1366, 3), 90, np.uint8)
         ok, buf = cv2.imencode(".jpg", img)
@@ -115,3 +118,25 @@ def test_color_formats_preview_matches_bits():
     q, n343 = to_send_format(img, "BadCodec 343", 100)
     assert n343 == 240 * 135 * 10 // 8
     assert (to565(q) == replicate565(to565(img), (3, 4, 3))).all()  # ESP32 の表示 (下位ビットは繰り返し) と同じ
+
+
+def test_not_ready_is_not_a_connection_error_and_settings_are_not_rewritten(monkeypatch):
+    """OBS が 702 (まだ画像が無い) を返しても接続を張り直さず、張り直しても同じ設定は書き直さない (つかみ直しにならない)"""
+    import pytest
+
+    from akm.obs_windows import ObsNotReady
+
+    fake = FakeObs()
+
+    def shot(*a):
+        raise RuntimeError("Request GetSourceScreenshot returned code 702. With message: Failed to render screenshot.")
+
+    fake.get_source_screenshot = shot
+    install(monkeypatch, fake)
+    o = ObsWindows({}, log=lambda *a: None)
+    src = o.ensure("Tiffany", "MURex Client || Tiffany || Lv: 400")
+    with pytest.raises(ObsNotReady):
+        o.grab(src)
+    o.reset()  # 何かで張り直しても
+    o.ensure("Tiffany", "MURex Client || Tiffany || Lv: 400")
+    assert fake.calls == ["create"]  # 同じ設定は書き直さない

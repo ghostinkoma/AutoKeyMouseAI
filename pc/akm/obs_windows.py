@@ -83,6 +83,10 @@ def obs_command(cfg: dict) -> tuple[list[str], Path]:
     return args, exe.parent
 
 
+class ObsNotReady(RuntimeError):
+    """ゲームキャプチャにまだ画像が無い (OBS がゲームをつかむ前・つかめない)。接続は正常なので張り直さない"""
+
+
 def source_name(character: str) -> str:
     return SOURCE_PREFIX + character
 
@@ -176,8 +180,13 @@ class ObsWindows:
         settings = {"capture_mode": "window", "window": want, "priority": PRIORITY_TITLE, "capture_cursor": False}
         names = {i.get("inputName") for i in c.get_input_list(None).inputs}
         if src in names:
-            c.set_input_settings(src, settings, True)
-            if src in self._known:
+            # 設定を書き直すと OBS はゲームをつかみ直す (その間は画像が無い)。同じなら書かない
+            try:
+                cur = c.get_input_settings(src).input_settings or {}
+            except Exception:
+                cur = {}
+            if any(cur.get(k) != v for k, v in settings.items()):
+                c.set_input_settings(src, settings, True)
                 self.log("INFO", f"OBS '{src}' の撮影先を今のタイトルに合わせました")
         else:
             c.create_input(SCENE, src, "game_capture", settings, True)
@@ -188,7 +197,13 @@ class ObsWindows:
     # ---- 画像 -------------------------------------------------------------------
     def grab(self, src: str, width: int | None = None, height: int | None = None, quality: int = 90) -> np.ndarray:
         with self._lock:
-            r = self.client().get_source_screenshot(src, "jpg", width, height, quality)
+            try:
+                r = self.client().get_source_screenshot(src, "jpg", width, height, quality)
+            except Exception as e:
+                t = str(e)
+                if "702" in t or "Failed to render" in t:  # ソースに画像が無い (大きさ 0)
+                    raise ObsNotReady(t) from e
+                raise
         data = r.image_data
         data = data.split(",", 1)[1] if data.startswith("data:") else data
         img = cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR)
