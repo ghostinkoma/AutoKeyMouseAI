@@ -7,6 +7,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
+#include <driver/spi_master.h>
 
 #include "akm_tjpgd.h"
 #include "bc_decode.h"
@@ -21,18 +22,31 @@
 namespace display {
 namespace {
 
-Adafruit_ST7789 gTft(&SPI, TFT_PIN_CS, TFT_PIN_DC, TFT_PIN_RST);
+// Adafruit の液晶の座標のずれ (_xstart / _ystart) を DMA の描画でも使うため、読めるようにしておく
+class Tft : public Adafruit_ST7789 {
+ public:
+  using Adafruit_ST7789::Adafruit_ST7789;
+  int16_t xStart() const { return _xstart; }
+  int16_t yStart() const { return _ystart; }
+};
+Tft gTft(&SPI, TFT_PIN_CS, TFT_PIN_DC, TFT_PIN_RST);
 String gShown;
 uint32_t gLastCheck = 0;
 
-// 受信 JPEG 用の共用バッファ (24KB)。無印 ESP32 は Wi-Fi + BLE でメモリに余裕が無いので 1 つだけ持つ
-uint8_t gFrameBuf[FRAME_BUF_SIZE];
+// 受信 JPEG 用の共用バッファ (24KB)。無印 ESP32 は Wi-Fi + BLE でメモリに余裕が無いので 1 つだけ持つ。
+// BadCodec 16bit (ver 3) を DMA で描くときは、ここを 2 本の帯 (240x8 画素 x 2) として使う
+alignas(4) uint8_t gFrameBuf[FRAME_BUF_SIZE];
 SemaphoreHandle_t gBufLock = nullptr;
 
 // 液晶は loop() (状態画面) とミラー受信タスクの両方から描くので排他する
 SemaphoreHandle_t gLock = nullptr;
+void dmaEnd();  // DMA の描画をやめて、Adafruit (Arduino の SPI) に液晶を戻す (下で定義)
+// keepDma = false (既定): Adafruit で描く前に DMA をやめる。DMA で描く場所だけ true
 struct TftLock {
-  TftLock() { if (gLock) xSemaphoreTakeRecursive(gLock, portMAX_DELAY); }
+  explicit TftLock(bool keepDma = false) {
+    if (gLock) xSemaphoreTakeRecursive(gLock, portMAX_DELAY);
+    if (!keepDma) dmaEnd();
+  }
   ~TftLock() { if (gLock) xSemaphoreGiveRecursive(gLock); }
 };
 
@@ -43,6 +57,146 @@ bool gFrameShown = false;
 uint32_t gFrames = 0;
 volatile bool gNeedKey = true;  // 液晶が上書きされたので次は全体 (キーフレーム) が欲しい
 uint32_t gSpiHz = 40000000;  // 今の液晶の SPI クロック (setSpiHz)
+
+// ---- DMA で描く (BadCodec 16bit ver 3 のブロック) -------------------------------------------
+// Adafruit は Arduino の SPI (VSPI) で 1 画素ずつ CPU が送り終わるまで待つ。DMA で描くときは ESP-IDF の
+// spi_master を別の SPI (HSPI) で使い、同じピン (SCLK / MOSI) をそちらへつなぎ替える。CS / DC は今まで通り GPIO。
+//   * 同じ行の続いたブロックを 1 本の帯にまとめて 1 回で送る (範囲指定の命令の回数を減らす)
+//   * 帯を 2 本交互に使い、1 本を DMA で送っている間に CPU は次の帯を組み立てる (展開と描画を重ねる)
+// 状態画面・JPEG などを Adafruit で描くときは dmaEnd() で VSPI に戻す (TftLock が自動で行う)。
+bool gDmaOn = TFT_DMA;          // 使うか (シリアルの tft dma on / off)
+bool gDmaActive = false;        // 今 HSPI につなぎ替えてある
+spi_device_handle_t gDmaDev = nullptr;
+uint32_t gDmaHz = 0;
+bool gDmaPending = false;       // 送信中の DMA がある
+spi_transaction_t gDmaTrans[2];
+int gDmaCur = 0;                // 今組み立てている帯 (0 / 1)
+int gRunX = -1, gRunY = 0, gRunW = 0, gRunRows = 0;  // 組み立て中の帯 (x < 0 = 無し)
+constexpr int kStrip = 240 * 8;  // 帯 1 本の画素数 (gFrameBuf の前半 / 後半)
+
+uint16_t* dmaBuf(int i) { return (uint16_t*)gFrameBuf + i * kStrip; }
+
+void dmaWait() {
+  if (!gDmaPending) return;
+  spi_transaction_t* r = nullptr;
+  spi_device_get_trans_result(gDmaDev, &r, portMAX_DELAY);
+  gDmaPending = false;
+}
+
+void dmaSend(const uint8_t* d, int n) {  // 短い送信 (命令・範囲)。DMA の送信が終わってから呼ぶ
+  spi_transaction_t t = {};
+  t.length = 8 * n;
+  if (n <= 4) {
+    t.flags = SPI_TRANS_USE_TXDATA;
+    memcpy(t.tx_data, d, n);
+  } else {
+    t.tx_buffer = d;
+  }
+  spi_device_polling_transmit(gDmaDev, &t);
+}
+
+void dmaCmd(uint8_t c, uint16_t a, uint16_t b) {
+  digitalWrite(TFT_PIN_DC, LOW);
+  dmaSend(&c, 1);
+  digitalWrite(TFT_PIN_DC, HIGH);
+  const uint8_t d[4] = {(uint8_t)(a >> 8), (uint8_t)a, (uint8_t)(b >> 8), (uint8_t)b};
+  dmaSend(d, 4);
+}
+
+bool dmaBegin() {
+  if (gDmaActive) return true;
+  SPI.end();  // Arduino の SPI からピンを外す
+  spi_bus_config_t bc = {};
+  bc.mosi_io_num = TFT_PIN_MOSI;
+  bc.miso_io_num = -1;
+  bc.sclk_io_num = TFT_PIN_SCLK;
+  bc.quadwp_io_num = -1;
+  bc.quadhd_io_num = -1;
+  bc.max_transfer_sz = kStrip * 2;
+  esp_err_t e = spi_bus_initialize(SPI2_HOST, &bc, SPI_DMA_CH_AUTO);
+  if (e == ESP_OK) {
+    spi_device_interface_config_t dc = {};
+    dc.mode = 3;
+    dc.spics_io_num = -1;  // CS は GPIO で持つ
+    dc.queue_size = 2;
+    dc.flags = SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_NO_DUMMY;
+    dc.clock_speed_hz = (int)gSpiHz;
+    e = spi_bus_add_device(SPI2_HOST, &dc, &gDmaDev);
+    if (e != ESP_OK && gSpiHz > 40000000) {  // 80MHz を受け付けなければ 40MHz で
+      dc.clock_speed_hz = 40000000;
+      e = spi_bus_add_device(SPI2_HOST, &dc, &gDmaDev);
+    }
+    gDmaHz = dc.clock_speed_hz;
+    if (e != ESP_OK) spi_bus_free(SPI2_HOST);
+  }
+  if (e != ESP_OK) {
+    Serial.printf("[TFT] DMA start failed (%d). back to normal SPI\n", (int)e);
+    gDmaOn = false;
+    SPI.begin(TFT_PIN_SCLK, -1, TFT_PIN_MOSI, TFT_PIN_CS);
+    return false;
+  }
+  static bool once = false;
+  if (!once) {
+    once = true;
+    Serial.printf("[TFT] DMA drawing on (HSPI %lu Hz)\n", (unsigned long)gDmaHz);
+  }
+  digitalWrite(TFT_PIN_CS, LOW);
+  gDmaActive = true;
+  gRunX = -1;
+  return true;
+}
+
+// 組み立てた帯を送る (前の帯の DMA が終わるのを待ってから)
+void dmaFlush() {
+  if (gRunX < 0) return;
+  uint16_t* buf = dmaBuf(gDmaCur);
+  if (gRunW < 240) {  // 1 行 240 画素の間隔で置いたので、帯の幅に詰める
+    for (int r = 1; r < gRunRows; r++) memmove(buf + r * gRunW, buf + r * 240, gRunW * 2);
+  }
+  dmaWait();
+  int x = gRunX + gTft.xStart(), y = gRunY + gTft.yStart();
+  dmaCmd(ST77XX_CASET, x, x + gRunW - 1);
+  dmaCmd(ST77XX_RASET, y, y + gRunRows - 1);
+  digitalWrite(TFT_PIN_DC, LOW);
+  const uint8_t ramwr = ST77XX_RAMWR;
+  dmaSend(&ramwr, 1);
+  digitalWrite(TFT_PIN_DC, HIGH);
+  spi_transaction_t& t = gDmaTrans[gDmaCur];
+  t = {};
+  t.length = 16 * gRunW * gRunRows;
+  t.tx_buffer = buf;
+  spi_device_queue_trans(gDmaDev, &t, portMAX_DELAY);
+  gDmaPending = true;
+  gDmaCur ^= 1;
+  gRunX = -1;
+}
+
+// 8 x rows のブロックを帯に足す (画素はホストのバイト順。液晶は上位バイトが先なので入れ替えて置く)
+void dmaBlock(int x, int y, int rows, const uint16_t* px) {
+  if (gRunX >= 0 && (y != gRunY || x != gRunX + gRunW || rows != gRunRows)) dmaFlush();
+  if (gRunX < 0) {
+    gRunX = x;
+    gRunY = y;
+    gRunW = 0;
+    gRunRows = rows;
+  }
+  uint16_t* dst = dmaBuf(gDmaCur) + gRunW;
+  for (int r = 0; r < rows; r++)
+    for (int k = 0; k < 8; k++) dst[r * 240 + k] = __builtin_bswap16(px[r * 8 + k]);
+  gRunW += 8;
+}
+
+void dmaEnd() {
+  if (!gDmaActive) return;
+  dmaFlush();
+  dmaWait();
+  digitalWrite(TFT_PIN_CS, HIGH);
+  spi_bus_remove_device(gDmaDev);
+  spi_bus_free(SPI2_HOST);
+  gDmaDev = nullptr;
+  gDmaActive = false;
+  SPI.begin(TFT_PIN_SCLK, -1, TFT_PIN_MOSI, TFT_PIN_CS);  // Adafruit (Arduino の SPI) に戻す
+}
 
 // 液晶の内蔵フォントは ASCII のみなので、それ以外は '?' にする
 String ascii(const String& s, size_t maxLen) {
@@ -89,8 +243,17 @@ void releaseFrameBuffer() {
   if (gBufLock) xSemaphoreGive(gBufLock);
 }
 
+void setDma(bool on) {
+  TftLock lock;  // DMA をやめる (次の ver 3 のフレームから on なら使う)
+  gDmaOn = on;
+  gNeedKey = true;
+  Serial.printf("[TFT] DMA drawing %s\n", on ? "on" : "off");
+}
+
+bool dmaOn() { return gDmaOn; }
+
 void setSpiHz(uint32_t hz) {
-  TftLock lock;
+  TftLock lock;  // DMA をやめるので、次に始めるときは新しい速さで
   gTft.setSPISpeed(hz);
   gSpiHz = hz;
   gNeedKey = true;  // 全体を描き直してもらう (乱れていてもすぐ分かるように)
@@ -340,7 +503,7 @@ void releaseBad16() {
 }
 
 int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
-  TftLock lock;
+  TftLock lock(true);  // ver 3 は DMA で描く。それ以外は下で dmaEnd()
   uint32_t t0 = micros();
   uint32_t recv0 = recvUs ? *recvUs : 0;
   bad16::Header h;
@@ -352,15 +515,37 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
     // ver 3: 前フレーム不要。変わったブロックだけ液晶へ (面のメモリは使わないので返しておく)
     if (gB16.ready || gB16HasBuf) b16Free();
     uint32_t drawUs = 0;
-    gTft.startWrite();
-    int n = bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) {
+    int n;
+    // DMA: 共用バッファを帯に使うので借りる (JPEG の受信中などで借りられなければ今まで通り)
+    bool dma = gDmaOn && acquireFrameBuffer(0) != nullptr;
+    if (dma && !dmaBegin()) {
+      releaseFrameBuffer();
+      dma = false;
+    }
+    if (dma) {
+      n = bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) {
+        uint32_t d0 = micros();
+        edge_win::feedBlock(bx * 8, by * 8, 8, rows, px, 8);
+        dmaBlock(bx * 8, by * 8, rows, px);  // 帯がつながらなくなったら前の帯を DMA で送る
+        drawUs += micros() - d0;
+      });
       uint32_t d0 = micros();
-      edge_win::feedBlock(bx * 8, by * 8, 8, rows, px, 8);  // 液晶に送る前に (送ると並びが変わることがある)
-      gTft.setAddrWindow(bx * 8, by * 8, 8, rows);
-      gTft.writePixels(px, 8 * rows);
+      dmaFlush();
+      dmaWait();  // 帯は共用バッファなので、返す前に送り終える
       drawUs += micros() - d0;
-    });
-    gTft.endWrite();
+      releaseFrameBuffer();
+    } else {
+      dmaEnd();
+      gTft.startWrite();
+      n = bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) {
+        uint32_t d0 = micros();
+        edge_win::feedBlock(bx * 8, by * 8, 8, rows, px, 8);  // 液晶に送る前に (送ると並びが変わることがある)
+        gTft.setAddrWindow(bx * 8, by * 8, 8, rows);
+        gTft.writePixels(px, 8 * rows);
+        drawUs += micros() - d0;
+      });
+      gTft.endWrite();
+    }
     uint32_t waited = recvUs ? *recvUs - recv0 : 0;
     uint32_t total = micros() - t0;
     rollStats();
@@ -380,6 +565,7 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
     ++gFrames;
     return h.key ? 2 : (n ? 1 : 3);
   }
+  dmaEnd();  // ver 1/2 は Adafruit で描く
   if (!(gB16.ready && gB16.mask == h.mask)) {
     if (!h.key) {  // 面の組み合わせが変わった / まだ無い: キーフレームから
       gNeedKey = true;
@@ -457,8 +643,8 @@ String frameStatsJson() {
   char b[200];
   snprintf(b, sizeof(b),
            "{\"fps\":%.1f,\"recv_ms\":%.1f,\"decode_ms\":%.1f,\"draw_ms\":%.1f,\"cpu_pct\":%.1f,\"kbps\":%.0f,"
-           "\"spi_mhz\":%.1f}",
-           fps, recv, dec, draw, cpu, kbps, gSpiHz / 1e6);
+           "\"spi_mhz\":%.1f,\"dma\":%s}",
+           fps, recv, dec, draw, cpu, kbps, gSpiHz / 1e6, gDmaOn ? "true" : "false");
   return String(b);
 }
 
@@ -486,6 +672,7 @@ void rawFlush() {
 
 bool rawBegin() {
   if (gLock) xSemaphoreTakeRecursive(gLock, portMAX_DELAY);  // rawEnd / rawAbort で返す
+  dmaEnd();
   gTft.startWrite();
   gTft.setAddrWindow(0, 0, FRAME_W, FRAME_H);
   gRawActive = true;
@@ -615,6 +802,8 @@ bool rawEnd() { return false; }
 void rawAbort() {}
 void test() { Serial.println("[TFT] this build has no TFT (HAS_TFT=0)"); }
 void setSpiHz(uint32_t) {}
+void setDma(bool) {}
+bool dmaOn() { return false; }
 uint32_t spiHz() { return 0; }
 }  // namespace display
 

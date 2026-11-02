@@ -10,6 +10,8 @@ void loop();  // loop() から呼ぶ。内容が変わったときだけ描き�
 void test();  // 赤・緑・青で全面を塗る (表示確認用)
 void setSpiHz(uint32_t hz);  // 液晶の SPI クロックを変える (次の描画から)。全体を描き直す
 uint32_t spiHz();
+void setDma(bool on);  // BadCodec 16bit (ver 3) を DMA で描くか (既定 config.h の TFT_DMA)
+bool dmaOn();
 
 // PC から送られてくる縮小画面を液晶に表示する。形式は
 //   * JPEG (240x135 以下)                         … 通常はこちら (数 KB で済む)
