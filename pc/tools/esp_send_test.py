@@ -80,9 +80,12 @@ def main():
     if not host and not a.serial:
         raise SystemExit("ESP32 の IP か --serial COMx を指定してください")
 
+    up0 = None
     if host:
         st = esp_stats(host, a.http_port)
-        print(f"1) http://{host}/status ... " + (f"OK  firmware={st.get('fw')}" if st else "返事なし"))
+        print(f"1) http://{host}/status ... " + (f"OK  firmware={st.get('fw')}  起動から {st.get('uptime')} 秒  "
+                                                f"空きメモリ {st.get('heap')} (最小 {st.get('heapMin')})" if st else "返事なし"))
+        up0 = (st or {}).get("uptime")
         if not st:
             print("   → Web の返事がありません (IP・同じネットワークか確認)。送信は続けて試します")
     link = None
@@ -144,7 +147,20 @@ def main():
     el = time.monotonic() - t0
     print(f"結果: {route}  {m.sent / el:4.1f} fps  " + ("成功" if m.sent > 0 else "1 枚も送れませんでした"))
     if host:
-        st = esp_stats(host, a.http_port)
+        st = None
+        for _ in range(5):  # 再起動中・忙しいときは少し待って聞き直す
+            st = esp_stats(host, a.http_port)
+            if st:
+                break
+            time.sleep(1)
+        if not st:
+            print("ESP32 の /status に返事がありません (固まっている / 再起動中かもしれません)")
+        elif up0 is not None and st.get("uptime", 0) < up0:
+            print(f"!! ESP32 が試験の途中で再起動しました (起動から {st.get('uptime')} 秒)。"
+                  "シリアルモニタに出た reset reason / Backtrace の行を見てください")
+        else:
+            print(f"ESP32 は再起動していません  空きメモリ {st.get('heap')} (最小 {st.get('heapMin')}  "
+                  f"最大の塊 {st.get('heapBlock')})")
         mm = (st or {}).get("mirror")
         if mm:
             print(f"ESP32 の内訳 (直近 5 秒): {mm.get('fps', 0):.1f} fps  受信待ち {mm.get('recv_ms', 0):.0f} ms / "
