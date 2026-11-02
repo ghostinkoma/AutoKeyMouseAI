@@ -1,12 +1,16 @@
-"""ESP32 の液晶へテスト画像 (色の帯 + 動く四角 + 数字) を送り、届くか確かめる。ゲーム・OBS・仲介アプリは使わない。
+"""ESP32 の液晶へテスト画像を送り、届くか・何 fps 出るか・どこに時間がかかっているかを測る。
+ゲーム・OBS・仲介アプリは使わない (通信路と ESP32 だけを試す)。
 
-    python tools\\esp_send_test.py                 # config.yaml の device.host へ 15 秒
-    python tools\\esp_send_test.py 192.168.1.43 --seconds 30 --format jpeg
+    python tools\\esp_send_test.py 192.168.1.43                        # Wi-Fi (TCP 5005)
+    python tools\\esp_send_test.py 192.168.1.43 --serial COM18          # 有線 2,000,000bps (frame-stream-15 以降)
+    python tools\\esp_send_test.py 192.168.1.43 --serial COM18 --baud 921600
+    python tools\\esp_send_test.py 192.168.1.43 --pattern game          # ゲームのように大きく変わる画像 (1 枚 15〜25KB)
 
-順に確かめて、どこで止まっているかを表示する:
-  1. ESP32 の Web (http://<IP>/status) に返事があるか
-  2. 画面の専用ポート (TCP 5005) につながるか
-  3. 画像を送って、ESP32 から受け取りの返事が来るか (送れた枚数・fps)
+  --pattern bars : 色の帯 + 動く白い四角 (変わるところが少ない。1 枚 1KB 前後)
+  --pattern game : 画面全体が少しずつ動く模様 (ゲーム画面に近い大きさ)
+
+IP を渡すと、最後に ESP32 自身が測った内訳 (受信待ち / 展開 / 描画) を Wi-Fi の /status から読んで出す。
+有線で試すときは、シリアルモニタや仲介アプリを閉じて COM ポートを空けておく。
 """
 import argparse
 import socket
@@ -18,7 +22,7 @@ import cv2
 import numpy as np
 
 
-def test_image(i: int) -> np.ndarray:
+def bars_image(i: int) -> np.ndarray:
     img = np.zeros((135, 240, 3), np.uint8)
     for k, c in enumerate([(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255), (255, 0, 255), (255, 255, 0)]):
         img[:, k * 40:(k + 1) * 40] = c
@@ -28,61 +32,124 @@ def test_image(i: int) -> np.ndarray:
     return img
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("host", nargs="?")
-    ap.add_argument("--port", type=int, default=5005)
-    ap.add_argument("--seconds", type=float, default=15)
-    ap.add_argument("--format", default="bad16", choices=["bad16", "jpeg"])
-    ap.add_argument("--fps", type=float, default=30)
-    ap.add_argument("--http-port", type=int, default=80)
-    a = ap.parse_args()
-    host = a.host
-    if not host:
-        from akm.config import load_config
+_TEX = None
 
-        host = str((load_config("config.yaml").get("device") or {}).get("host") or "")
-    if not host:
-        raise SystemExit("ESP32 の IP を指定してください (例: python tools\\esp_send_test.py 192.168.1.43)")
 
-    web = host if a.http_port == 80 else f"{host}:{a.http_port}"
-    print(f"1) http://{web}/status ...", end=" ", flush=True)
+def game_image(i: int) -> np.ndarray:
+    """模様が毎回 3 画素ずつ流れる (ゲームで画面が動いているときのように、ほぼ全部のブロックが変わる)"""
+    global _TEX
+    if _TEX is None:
+        rng = np.random.default_rng(1)
+        t = (rng.random((270, 480, 3)) * 255).astype(np.uint8)
+        _TEX = cv2.GaussianBlur(t, (0, 0), 4)
+        _TEX = cv2.normalize(_TEX, None, 0, 255, cv2.NORM_MINMAX)
+    s = (i * 3) % 240
+    img = _TEX[s // 2:s // 2 + 135, s:s + 240].copy()
+    cv2.putText(img, f"GAME {i}", (8, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    return img
+
+
+def esp_stats(host: str, http_port: int):
     try:
         import requests
 
-        st = requests.get(f"http://{web}/status", timeout=5).json()
-        print(f"OK  firmware={st.get('fw')}  ble={st.get('ble')}  wifi={st.get('wifi')}")
-    except Exception as e:
-        print(f"返事なし ({e})\n   → PC と ESP32 が同じネットワークか、IP が合っているか確認してください")
-        return
+        web = host if http_port == 80 else f"{host}:{http_port}"
+        return requests.get(f"http://{web}/status", timeout=3).json()
+    except Exception:
+        return None
 
-    print(f"2) TCP {host}:{a.port} ...", end=" ", flush=True)
-    try:
-        socket.create_connection((host, a.port), timeout=5).close()
-        print("OK")
-    except Exception as e:
-        print(f"つながりません ({e})\n   → ESP32 のログに [STREAM] mirror stream on tcp port 5005 が出ているか確認してください")
-        return
-    time.sleep(0.5)  # 今の接続を ESP32 が閉じるのを待つ
 
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("host", nargs="?", help="ESP32 の IP (Wi-Fi で送るとき・内訳を読むとき)")
+    ap.add_argument("--serial", help="有線で送る COM ポート (例 COM18)")
+    ap.add_argument("--baud", type=int, default=2_000_000)
+    ap.add_argument("--port", type=int, default=5005)
+    ap.add_argument("--seconds", type=float, default=15)
+    ap.add_argument("--format", default="bad16", choices=["bad16", "jpeg"])
+    ap.add_argument("--color", default="343", help="bad16 の色のビット数 (343 / 332 / 111 など)")
+    ap.add_argument("--pattern", default="bars", choices=["bars", "game"])
+    ap.add_argument("--fps", type=float, default=60)
+    ap.add_argument("--http-port", type=int, default=80)
+    a = ap.parse_args()
+    host = a.host
+    if not host and not a.serial:
+        from akm.config import load_config
+
+        host = str((load_config("config.yaml").get("device") or {}).get("host") or "")
+    if not host and not a.serial:
+        raise SystemExit("ESP32 の IP か --serial COMx を指定してください")
+
+    if host:
+        st = esp_stats(host, a.http_port)
+        print(f"1) http://{host}/status ... " + (f"OK  firmware={st.get('fw')}" if st else "返事なし"))
+        if not st:
+            print("   → Web の返事がありません (IP・同じネットワークか確認)。送信は続けて試します")
+    link = None
+    if a.serial:
+        from akm.serial_link import SerialFrameLink
+
+        print(f"2) 有線 {a.serial} {a.baud:,}bps ...", end=" ", flush=True)
+        try:
+            SerialFrameLink(a.serial, a.baud, log=lambda *x: None).close()
+            print("OK")
+        except Exception as e:
+            print(f"だめ ({e})")
+            return
+        time.sleep(0.3)
+
+        def make_link():
+            return SerialFrameLink(a.serial, a.baud)
+
+        link = make_link
+    else:
+        print(f"2) TCP {host}:{a.port} ...", end=" ", flush=True)
+        try:
+            socket.create_connection((host, a.port), timeout=5).close()
+            print("OK")
+        except Exception as e:
+            print(f"つながりません ({e})")
+            return
+        time.sleep(0.5)
+
+    from akm.bad16 import parse_color
     from akm.mirror import Mirror
 
+    make = game_image if a.pattern == "game" else bars_image
     n = {"i": 0}
 
     def grab():
         n["i"] += 1
-        return test_image(n["i"])
+        return make(n["i"])
 
-    print(f"3) {a.format} で {a.seconds:.0f} 秒送ります (液晶に色の帯と動く白い四角が出れば成功)")
-    m = Mirror(host, 1.0 / a.fps, fmt=a.format, grab=grab, transport="tcp", port=a.port)
+    route = f"有線 {a.serial} {a.baud:,}bps" if a.serial else "Wi-Fi"
+    print(f"3) {route} / {a.format} {a.color} / 模様 {a.pattern} で {a.seconds:.0f} 秒送ります")
+    m = Mirror(host or "serial", 1.0 / a.fps, fmt=a.format, grab=grab, transport="tcp", port=a.port,
+               pipeline=1 if a.serial else 2, link_factory=link, b16_bits=parse_color(a.color))
     m.set_lines([])
     t0 = time.monotonic()
-    while time.monotonic() - t0 < a.seconds:
-        time.sleep(1)
-        el = time.monotonic() - t0
-        print(f"   {el:4.0f}s  送れた {m.sent} 枚 ({m.sent / el:4.1f} fps)  1 枚 {m.last_bytes} バイト  失敗 {m.errors}")
+    total = 0
+    last_sent = 0
+    try:
+        while time.monotonic() - t0 < a.seconds:
+            time.sleep(1)
+            el = time.monotonic() - t0
+            total += m.last_bytes * (m.sent - last_sent)
+            last_sent = m.sent
+            print(f"   {el:4.0f}s  送れた {m.sent} 枚 ({m.sent / el:4.1f} fps)  1 枚 {m.last_bytes} バイト  "
+                  f"約 {total / el / 1024:5.1f} KB/s  失敗 {m.errors}")
+    except KeyboardInterrupt:
+        pass
     m.stop()
-    print("結果:", "成功" if m.sent > 0 else "1 枚も送れませんでした (上の [mirror] の行を見てください)")
+    el = time.monotonic() - t0
+    print(f"結果: {route}  {m.sent / el:4.1f} fps  " + ("成功" if m.sent > 0 else "1 枚も送れませんでした"))
+    if host:
+        st = esp_stats(host, a.http_port)
+        mm = (st or {}).get("mirror")
+        if mm:
+            print(f"ESP32 の内訳 (直近 5 秒): {mm.get('fps', 0):.1f} fps  受信待ち {mm.get('recv_ms', 0):.0f} ms / "
+                  f"展開 {mm.get('decode_ms', 0):.0f} ms / 描画(SPI) {mm.get('draw_ms', 0):.0f} ms  "
+                  f"CPU {mm.get('cpu_pct', 0):.0f}%")
 
 
 if __name__ == "__main__":

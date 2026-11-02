@@ -319,7 +319,10 @@ class Mirror:
                     raise ConnectionError("ESP32 が切断しました")
         except Exception:
             try:
-                self._sock.close()
+                if self._sock is not None:  # つなぐ前に失敗したときは None
+                    self._sock.close()
+            except Exception:
+                pass
             finally:
                 self._sock = None
                 self._inflight.clear()

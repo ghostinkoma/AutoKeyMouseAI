@@ -545,7 +545,8 @@ class GateApp:
             where = f"{port} {baud:,}bps"
         self.sender = Mirror(host or "serial", 1.0 / max(1, int(self.fps.get())), fmt=kind,
                              quality=int(mcfg.get("quality", 70)), grab=self._sender_grab,
-                             transport="tcp" if wired else mcfg.get("transport", "auto"),
+                             # HTTP に逃げない (逃げると 1 枚ずつの POST が並行して届き、液晶が詰まる)
+                             transport="tcp",
                              port=int(mcfg.get("port", 5005)), b16_bits=bits,
                              # 有線は 1 枚ずつ返事を待つ (ESP32 の受信バッファ 8KB を溢れさせない)
                              pipeline=1 if wired else 2, link_factory=link,
@@ -590,8 +591,12 @@ class GateApp:
 
     def stop_sending(self):
         if self.sender is not None:
-            self.sender.stop(timeout=2)
-            self.sender = None
+            # 前の送信が本当に終わるまで待つ (返事待ちは最大 3 秒)。残っていると Wi-Fi と有線の
+            # 2 つが同時に送ることになり、ESP32 の液晶が両方を待って詰まる
+            m, self.sender = self.sender, None
+            m.stop(timeout=5)
+            if m._thread is not None and m._thread.is_alive():
+                self.log("WARN", "前の送信がまだ終わっていません (返事待ち)")
             self.log("INFO", "ESP32 への送信を止めました")
 
     def _sender_grab(self):
