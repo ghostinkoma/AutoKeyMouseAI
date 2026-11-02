@@ -21,7 +21,99 @@ from pathlib import Path
 
 import _path  # noqa: F401  (akm を import できるようにする)
 
-from akm.screen import IS_WINDOWS, bring_to_front, is_foreground, list_windows, set_ime, ime_open
+# 標準ライブラリだけで動かす (akm.screen は numpy / OpenCV が要るので使わない。virtual_hid も標準ライブラリだけ)
+IS_WINDOWS = sys.platform == "win32"
+if IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    imm32 = ctypes.WinDLL("imm32")
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SendMessageW.restype = ctypes.c_ssize_t
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.BringWindowToTop.argtypes = [wintypes.HWND]
+    user32.IsIconic.argtypes = [wintypes.HWND]
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    imm32.ImmGetDefaultIMEWnd.argtypes = [wintypes.HWND]
+    imm32.ImmGetDefaultIMEWnd.restype = wintypes.HWND
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _ENUM = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [_ENUM, wintypes.LPARAM]
+
+
+def _proc_name(hwnd) -> str:
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    h = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        ok = kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+        return buf.value.replace("/", "\\").split("\\")[-1] if ok else ""
+    finally:
+        kernel32.CloseHandle(h)
+
+
+def list_windows() -> list[tuple[int, str, str]]:
+    """可視でタイトルのあるウィンドウ: (hwnd, タイトル, プロセス名)"""
+    out = []
+
+    @_ENUM
+    def cb(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                out.append((hwnd, buf.value, _proc_name(hwnd)))
+        return True
+
+    user32.EnumWindows(cb, 0)
+    return out
+
+
+def is_foreground(hwnd) -> bool:
+    return user32.GetForegroundWindow() == hwnd
+
+
+def bring_to_front(hwnd, wait_s: float = 1.0) -> bool:
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    user32.keybd_event(0x87, 0, 0, 0)  # F24 を一瞬押すと、手前に出すのを Windows が許す
+    user32.keybd_event(0x87, 0, 2, 0)
+    user32.BringWindowToTop(hwnd)
+    user32.SetForegroundWindow(hwnd)
+    end = time.monotonic() + wait_s
+    while time.monotonic() < end:
+        if is_foreground(hwnd):
+            return True
+        time.sleep(0.05)
+    return is_foreground(hwnd)
+
+
+def ime_open(hwnd) -> bool | None:
+    ime = imm32.ImmGetDefaultIMEWnd(hwnd)
+    if not ime:
+        return None
+    return bool(user32.SendMessageW(ime, 0x0283, 0x0005, 0))  # WM_IME_CONTROL, IMC_GETOPENSTATUS
+
+
+def set_ime(hwnd, on: bool) -> None:
+    ime = imm32.ImmGetDefaultIMEWnd(hwnd)
+    if ime:
+        user32.SendMessageW(ime, 0x0283, 0x0006, 1 if on else 0)  # IMC_SETOPENSTATUS
 
 CANDIDATES = [r"C:\Program Files (x86)\sakura\sakura.exe", r"C:\Program Files\sakura\sakura.exe"]
 
@@ -40,7 +132,7 @@ def escape(text: str) -> str:
 
 
 def sakura_windows() -> set[int]:
-    return {h for h, _t, proc, _r in list_windows() if proc.lower() == "sakura.exe"}
+    return {h for h, _t, proc in list_windows() if proc.lower() == "sakura.exe"}
 
 
 def find_exe(given: str | None) -> str:
@@ -51,8 +143,6 @@ def find_exe(given: str | None) -> str:
 
 
 def keyboard_layout() -> str:
-    import ctypes
-
     return "jp" if ctypes.windll.user32.GetKeyboardType(0) == 7 else "us"  # 7 = 日本語キーボード
 
 
@@ -98,7 +188,7 @@ def main():
         time.sleep(0.1)
     if not hwnd:
         raise SystemExit("   新しいウィンドウが見つかりません (10 秒待ちました)")
-    title = next((t for h, t, _p, _r in list_windows() if h == hwnd), "")
+    title = next((t for h, t, _p in list_windows() if h == hwnd), "")
     print(f"   ウィンドウ {hwnd:#x} '{title}'")
     time.sleep(0.5)  # 立ち上がりきるのを待つ
 
