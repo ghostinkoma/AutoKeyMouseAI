@@ -149,7 +149,7 @@ def main():
         if mm:
             print(f"ESP32 の内訳 (直近 5 秒): {mm.get('fps', 0):.1f} fps  受信待ち {mm.get('recv_ms', 0):.0f} ms / "
                   f"展開 {mm.get('decode_ms', 0):.0f} ms / 描画(SPI) {mm.get('draw_ms', 0):.0f} ms  "
-                  f"CPU {mm.get('cpu_pct', 0):.0f}%")
+                  f"CPU {mm.get('cpu_pct', 0):.0f}%" + (f"  SPI {mm['spi_mhz']:.0f}MHz" if "spi_mhz" in mm else ""))
 
 
 if __name__ == "__main__":

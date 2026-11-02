@@ -181,6 +181,7 @@ void printHelp() {
   Serial.println("  macro <id> [rep]  run macro slot 1-10 (rep 0 = loop until stop)");
   Serial.println("  stop              stop the running macro");
   Serial.println("  tft test          fill the display red/green/blue");
+  Serial.println("  tft spi <MHz>     change the display SPI clock (80 / 40 / 27 / 20). no number = show it");
   Serial.println("  ble clear         forget BLE pairings (then remove the device in Windows and pair again)");
   Serial.println("  stream <baud>     receive the mirror over this serial line (used by the PC app)");
 }
@@ -244,6 +245,11 @@ void handleLine(String line) {
     Serial.println("OK Wi-Fi settings cleared");
   } else if (line == "tft test") {
     display::test();
+  } else if (line.startsWith("tft spi")) {
+    // tft spi 80 / tft spi 40 (MHz)。数字が無ければ今の値を出す
+    long mhz = line.substring(7).toInt();
+    if (mhz >= 1 && mhz <= 80) display::setSpiHz((uint32_t)mhz * 1000000UL);
+    Serial.printf("OK tft spi %lu Hz\n", (unsigned long)display::spiHz());
   } else if (line == "ble clear") {
     hid::clearBonds();
     Serial.println("OK");

@@ -42,6 +42,7 @@ uint32_t gLastFrame = 0;
 bool gFrameShown = false;
 uint32_t gFrames = 0;
 volatile bool gNeedKey = true;  // 液晶が上書きされたので次は全体 (キーフレーム) が欲しい
+uint32_t gSpiHz = 40000000;  // 今の液晶の SPI クロック (setSpiHz)
 
 // 液晶の内蔵フォントは ASCII のみなので、それ以外は '?' にする
 String ascii(const String& s, size_t maxLen) {
@@ -88,6 +89,16 @@ void releaseFrameBuffer() {
   if (gBufLock) xSemaphoreGive(gBufLock);
 }
 
+void setSpiHz(uint32_t hz) {
+  TftLock lock;
+  gTft.setSPISpeed(hz);
+  gSpiHz = hz;
+  gNeedKey = true;  // 全体を描き直してもらう (乱れていてもすぐ分かるように)
+  Serial.printf("[TFT] SPI clock %lu Hz\n", (unsigned long)hz);
+}
+
+uint32_t spiHz() { return gSpiHz; }
+
 void begin() {
   if (!gLock) gLock = xSemaphoreCreateRecursiveMutex();
   if (!gBufLock) gBufLock = xSemaphoreCreateMutex();
@@ -99,7 +110,9 @@ void begin() {
   SPI.begin(TFT_PIN_SCLK, -1, TFT_PIN_MOSI, TFT_PIN_CS);
   // ST7789 は MODE3 なら CS の有無に関係なく動く (T-Display 公式設定と同じ)
   gTft.init(135, 240, SPI_MODE3);
-  gTft.setSPISpeed(40000000);  // ST7789 は 40MHz で書き込める (T-Display 公式と同じ)
+  gTft.setSPISpeed(TFT_SPI_HZ);  // 既定 config.h の TFT_SPI_HZ (T-Display 公式は 40MHz)
+  gSpiHz = TFT_SPI_HZ;
+  Serial.printf("[TFT] SPI clock %lu Hz\n", (unsigned long)gSpiHz);
   gTft.setRotation(1);  // 横向き 240x135
   test();
   gTft.fillScreen(ST77XX_BLACK);
@@ -442,8 +455,10 @@ String frameStatsJson() {
   float fps, recv, dec, draw, cpu, kbps;
   statsValues(fps, recv, dec, draw, cpu, kbps);
   char b[200];
-  snprintf(b, sizeof(b), "{\"fps\":%.1f,\"recv_ms\":%.1f,\"decode_ms\":%.1f,\"draw_ms\":%.1f,\"cpu_pct\":%.1f,\"kbps\":%.0f}",
-           fps, recv, dec, draw, cpu, kbps);
+  snprintf(b, sizeof(b),
+           "{\"fps\":%.1f,\"recv_ms\":%.1f,\"decode_ms\":%.1f,\"draw_ms\":%.1f,\"cpu_pct\":%.1f,\"kbps\":%.0f,"
+           "\"spi_mhz\":%.1f}",
+           fps, recv, dec, draw, cpu, kbps, gSpiHz / 1e6);
   return String(b);
 }
 
@@ -599,6 +614,8 @@ bool rawWrite(const uint8_t*, size_t) { return false; }
 bool rawEnd() { return false; }
 void rawAbort() {}
 void test() { Serial.println("[TFT] this build has no TFT (HAS_TFT=0)"); }
+void setSpiHz(uint32_t) {}
+uint32_t spiHz() { return 0; }
 }  // namespace display
 
 #endif

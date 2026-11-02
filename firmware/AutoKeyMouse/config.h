@@ -6,7 +6,7 @@
 // ---- デバイス名 -----------------------------------------------------------
 #define DEVICE_NAME      "AutoKeyMouse"     // BLE 表示名 / mDNS 名 (autokeymouse.local)
 // ファームウェアの版 (/status と起動ログに出る。PC 側で書き込み済みか確認する)
-#define FW_VERSION "frame-stream-16"
+#define FW_VERSION "frame-stream-17"
 #define BLE_MANUFACTURER "ghostinkoma"
 
 // ---- Wi-Fi SoftAP ---------------------------------------------------------
@@ -44,6 +44,13 @@
 #define TFT_PIN_DC   16
 #define TFT_PIN_RST  23
 #define TFT_PIN_BL   4
+// 液晶の SPI クロック (Hz)。ESP32 は 80MHz を割って作るので 80 / 40 / 26.7 / 20MHz ... になる。
+// 80MHz は試験的: ST7789 の書き込みの上限 (約 62.5MHz) と、MOSI=GPIO19 (専用ピンでなく GPIO マトリクス経由)
+// の上限 (40MHz) を超えるので、表示が乱れる・色化けすることがある。乱れたら 40000000 に戻す。
+// 動かしたままシリアルの  tft spi 40  /  tft spi 80  でも切り替えられる (書き込み直し不要)。
+#ifndef TFT_SPI_HZ
+#define TFT_SPI_HZ 80000000
+#endif
 
 // ---- 液晶ミラーの専用 TCP 受信 (PC の mirror が接続しっぱなしで JPEG を流す) ----
 #define FRAME_STREAM_PORT 5005
