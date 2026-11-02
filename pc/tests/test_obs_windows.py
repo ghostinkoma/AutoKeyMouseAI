@@ -140,3 +140,14 @@ def test_not_ready_is_not_a_connection_error_and_settings_are_not_rewritten(monk
     o.reset()  # 何かで張り直しても
     o.ensure("Tiffany", "MURex Client || Tiffany || Lv: 400")
     assert fake.calls == ["create"]  # 同じ設定は書き直さない
+
+
+def test_source_per_client_follows_character_change(monkeypatch):
+    """ゲーム内でキャラクターを変えても同じソース (プロセス ID ごと) を使い、撮影先のタイトルだけ書き直す"""
+    fake = FakeObs()
+    install(monkeypatch, fake)
+    o = ObsWindows({}, log=lambda *a: None)
+    a = o.ensure(30560, "MURex Client || Tiffany || Lv: 400")
+    b = o.ensure(30560, "MURex Client || Thanatos || Lv: 400")
+    assert a == b == "AKM 30560"
+    assert fake.calls == ["create", "set"] and "Thanatos" in fake.inputs[a][2]["window"]

@@ -83,12 +83,29 @@ def obs_command(cfg: dict) -> tuple[list[str], Path]:
     return args, exe.parent
 
 
+def process_alive(pid: int) -> bool:
+    """そのプロセスが動いているか (Windows 以外では常に True)"""
+    if sys.platform != "win32":
+        return True
+    import ctypes
+
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    code = ctypes.c_ulong()
+    ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+    k32.CloseHandle(h)
+    return bool(ok) and code.value == 259  # STILL_ACTIVE
+
+
 class ObsNotReady(RuntimeError):
     """ゲームキャプチャにまだ画像が無い (OBS がゲームをつかむ前・つかめない)。接続は正常なので張り直さない"""
 
 
-def source_name(character: str) -> str:
-    return SOURCE_PREFIX + character
+def source_name(client) -> str:
+    """ゲームのクライアント (プロセス ID) ごとのソース名。キャラクターを変えても同じソースを使い続ける"""
+    return f"{SOURCE_PREFIX}{client}"
 
 
 class ObsWindows:
@@ -165,13 +182,14 @@ class ObsWindows:
                 self.log("INFO", f"OBS の番組を '{SCENE}' に切り替えました (ゲームキャプチャは表示中のときだけ撮るため)")
         self._scene_ready = True
 
-    def ensure(self, character: str, title: str) -> str:
-        """このキャラクターのゲームキャプチャを用意し、撮影先を今のタイトルに合わせる。ソース名を返す。"""
+    def ensure(self, client, title: str) -> str:
+        """このクライアント (プロセス ID) のゲームキャプチャを用意し、撮影先を今のタイトルに合わせる。ソース名を返す。
+        ゲーム内でキャラクターを変えるとタイトルが変わるので、撮影先を書き直す (OBS はつかみ直す)"""
         with self._lock:
-            return self._ensure(character, title)
+            return self._ensure(client, title)
 
-    def _ensure(self, character: str, title: str) -> str:
-        src = source_name(character)
+    def _ensure(self, client, title: str) -> str:
+        src = source_name(client)
         want = obs_window_string(title, GAME_CLASS, self.exe)
         if self._known.get(src) == want:
             return src
@@ -189,10 +207,25 @@ class ObsWindows:
                 c.set_input_settings(src, settings, True)
                 self.log("INFO", f"OBS '{src}' の撮影先を今のタイトルに合わせました")
         else:
+            self._cleanup(c, names, keep=src)
             c.create_input(SCENE, src, "game_capture", settings, True)
             self.log("INFO", f"OBS にゲームキャプチャ '{src}' を作りました")
         self._known[src] = want
         return src
+
+    def _cleanup(self, c, names, keep: str) -> None:
+        """終了したクライアントの 'AKM <プロセス ID>' と、キャラクター名で作っていた古い 'AKM <名前>' を消す"""
+        for n in names:
+            if not n or not n.startswith(SOURCE_PREFIX) or n == keep:
+                continue
+            tail = n[len(SOURCE_PREFIX):]
+            if tail.isdigit() and process_alive(int(tail)):
+                continue
+            try:
+                c.remove_input(n)
+                self.log("INFO", f"OBS の使っていないゲームキャプチャ '{n}' を消しました")
+            except Exception:
+                pass
 
     # ---- 画像 -------------------------------------------------------------------
     def grab(self, src: str, width: int | None = None, height: int | None = None, quality: int = 90) -> np.ndarray:

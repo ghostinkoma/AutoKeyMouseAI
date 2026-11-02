@@ -189,6 +189,7 @@ class GateApp:
 
         self.windows: list[GameWindow] = []
         self.target_name: str | None = None
+        self.target_hwnd: int | None = None  # 送信先のウィンドウ (キャラクターを変えても同じ)
         self.armed = tk.BooleanVar(value=False)
         self.bring_front = tk.BooleanVar(value=False)
         self.auto_refresh = tk.BooleanVar(value=True)
@@ -636,37 +637,45 @@ class GateApp:
         self.windows = list_game_windows()
         fg = foreground_hwnd(self.windows)
         self.win_list.delete(0, tk.END)
-        sel = None
-        for i, w in enumerate(self.windows):
+        for w in self.windows:
             self.win_list.insert(tk.END, w.label(w.hwnd == fg))
-            if w.name == self.target_name:
-                sel = i
-        if sel is not None:
-            self.win_list.selection_set(sel)
-            if self.live is not None:  # 再起動して hwnd が変わっても同じ名前を撮る。タイトルの変化も OBS に伝える
-                w = self.windows[sel]
-                self.live.set_target(w.hwnd, w.name, w.title)
+        t = self.target()
+        if t is not None:
+            if t.name != self.target_name:  # ゲーム内でキャラクターを変えた (同じウィンドウ) / クライアントを再起動した
+                self.log("INFO", f"送信先のキャラクターが {self.target_name} → {t.name} に変わりました (同じウィンドウを撮り続けます)")
+                self.target_name = t.name
+            self.target_hwnd = t.hwnd
+            self.win_list.selection_set(self.windows.index(t))
+            if self.live is not None:  # タイトル (キャラクター名・レベル) の変化も OBS に伝える
+                self.live.set_target(t.hwnd, t.name, t.title, t.pid)
         elif self.target_name and self.armed.get():
             self.log("WARN", f"送信先 {self.target_name} のウィンドウが見つかりません。停止します")
             self.disarm()
 
     def target(self) -> GameWindow | None:
-        return next((w for w in self.windows if w.name == self.target_name), None)
+        """送信先のウィンドウ。ウィンドウ (hwnd) で覚えているので、ゲーム内でキャラクターを変えても同じウィンドウ。
+        クライアントを再起動して hwnd が変わったときだけ、キャラクター名で探し直す"""
+        hwnd = getattr(self, "target_hwnd", None)
+        t = next((w for w in self.windows if w.hwnd == hwnd), None) if hwnd else None
+        if t is None and self.target_name:
+            t = next((w for w in self.windows if w.name == self.target_name), None)
+        return t
 
     def on_select_window(self, _):
         sel = self.win_list.curselection()
         if not sel:
             return
         w = self.windows[sel[0]]
-        if w.name != self.target_name:
+        if w.hwnd != getattr(self, "target_hwnd", None):
             if self.armed.get():
                 self.disarm()
             self.target_name = w.name
+            self.target_hwnd = w.hwnd
             self.log("INFO", f"送信先を {w.name} (PID {w.pid}, hwnd {w.hwnd:#010x}) にしました")
             if self.auto_send.get() and self.sender is None and self.host.get().strip():
                 self.root.after(500, self.start_sending)
             if self.live is not None:
-                self.live.set_target(w.hwnd, w.name, w.title)
+                self.live.set_target(w.hwnd, w.name, w.title, w.pid)
                 self.snap = None
                 self.draw_map()
 

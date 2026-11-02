@@ -109,7 +109,8 @@ class LiveFeed:
         self.fps_target = 15.0
         self.mode = "obs"          # "obs" / "window"
         self.hwnd = 0
-        self.name = ""             # キャラクター名 (OBS のソース名に使う)
+        self.name = ""             # キャラクター名 (表示用)
+        self.pid = 0               # ゲームのクライアントのプロセス ID (OBS のソース名に使う)
         self.title = ""            # 今のウィンドウのタイトル (OBS の撮影先に使う)
         self._obs = None
         self._obs_err = ""
@@ -144,12 +145,14 @@ class LiveFeed:
             self.log("WARN", f"現在地の読み取り (OCR) は使えません: {e}")
 
     # ---- 操作 (UI のスレッドから) -------------------------------------------------
-    def set_target(self, hwnd: int, name: str = "", title: str = "") -> None:
+    def set_target(self, hwnd: int, name: str = "", title: str = "", pid: int = 0) -> None:
+        """送信先のウィンドウ。同じウィンドウでキャラクター名・タイトルが変わったときは、撮影先 (OBS) だけ合わせる"""
         with self._lock:
             self.title = title or self.title
-            if hwnd != self.hwnd or (name and name != self.name):
+            self.name = name or self.name
+            self.pid = pid or self.pid
+            if hwnd != self.hwnd:
                 self.hwnd = hwnd
-                self.name = name
                 self._trail = []
                 self._loc = None
                 self._hp = self._mp = None
@@ -259,7 +262,7 @@ class LiveFeed:
             if self._obs is None:
                 self._obs = ObsWindows(self.cfg.get("obs"), log=self.log)
             try:
-                src = self._obs.ensure(self.name, self.title)
+                src = self._obs.ensure(self.pid or self.name, self.title)
                 fw, fh = self._full_size
                 if full or not fw:  # 原寸 (初回は縦横比を知るためにも)
                     img = self._obs.grab(src)
