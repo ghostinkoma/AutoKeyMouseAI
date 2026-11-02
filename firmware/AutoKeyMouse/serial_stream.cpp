@@ -34,23 +34,50 @@ bool readExact(uint8_t* dst, size_t n, uint32_t* waitUs) {
   return true;
 }
 
+// 受信しながら読む。展開側は 1〜2 バイトずつ欲しがるので、Serial からは最大 1KB ずつまとめて取り、
+// ここから渡す (Serial.read を細かく呼ぶと 1 回ごとの手間で展開が数倍遅くなり、その間に受信バッファが溢れる)。
+// 1 フレーム分 (left) を超えては取らない (次のフレームの頭を食べない)。
 struct Reader {
-  uint32_t left;    // このフレームの残りバイト
+  uint32_t left;    // このフレームでまだ Serial から取っていないバイト
   uint32_t waitUs;  // データ待ちに使った時間
+  size_t pos, n;    // buf の中の読み位置 / 入っている量
+  uint8_t buf[1024];
 };
+Reader gRd;  // タスクのスタックを使わないように 1 つだけ置く
 
-bool readFn(void* ctx, uint8_t* dst, size_t n) {
+bool readFn(void* ctx, uint8_t* dst, size_t want) {
   Reader* r = (Reader*)ctx;
-  if (n > r->left) return false;
-  if (!readExact(dst, n, &r->waitUs)) return false;
-  r->left -= n;
+  while (want) {
+    if (r->pos == r->n) {
+      if (!r->left) return false;
+      uint32_t t0 = millis();
+      int a;
+      while ((a = Serial.available()) <= 0) {
+        if (millis() - t0 > READ_MS) return false;
+        uint32_t w0 = micros();
+        vTaskDelay(1);
+        r->waitUs += micros() - w0;
+      }
+      size_t get = min((size_t)a, min(sizeof(r->buf), (size_t)r->left));
+      size_t got = Serial.read(r->buf, get);
+      if (got == 0) continue;
+      r->pos = 0;
+      r->n = got;
+      r->left -= got;
+    }
+    size_t k = min(want, r->n - r->pos);
+    memcpy(dst, r->buf + r->pos, k);
+    r->pos += k;
+    dst += k;
+    want -= k;
+  }
   return true;
 }
 
 void discardRest(Reader& r) {
   uint8_t junk[64];
-  while (r.left) {
-    size_t k = min((size_t)sizeof(junk), (size_t)r.left);
+  while (r.pos < r.n || r.left) {
+    size_t k = min((size_t)sizeof(junk), (size_t)(r.n - r.pos + r.left));
     if (!readFn(&r, junk, k)) break;
   }
 }
@@ -62,7 +89,10 @@ void ack(char c) {
 
 // 1 枚分 (長さ len) を受け取って描き、返事をする
 void handleFrame(uint32_t len) {
-  Reader rd{len, 0};
+  Reader& rd = gRd;
+  rd.left = len;
+  rd.waitUs = 0;
+  rd.pos = rd.n = 0;
   uint8_t head[2];
   if (len < 2 || !readFn(&rd, head, 2)) {
     discardRest(rd);
