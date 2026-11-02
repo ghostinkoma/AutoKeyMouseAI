@@ -183,6 +183,7 @@ void printHelp() {
   Serial.println("  tft test          fill the display red/green/blue");
   Serial.println("  tft spi <MHz>     change the display SPI clock (80 / 40 / 27 / 20). no number = show it");
   Serial.println("  tft dma on|off    draw the mirror with DMA (on) or the old way (off)");
+  Serial.println("  mirror pipe on|off receive the mirror on core 0 (on) or in the draw task (off)");
   Serial.println("  ble clear         forget BLE pairings (then remove the device in Windows and pair again)");
   Serial.println("  stream <baud>     receive the mirror over this serial line (used by the PC app)");
 }
@@ -246,6 +247,9 @@ void handleLine(String line) {
     Serial.println("OK Wi-Fi settings cleared");
   } else if (line == "tft test") {
     display::test();
+  } else if (line == "mirror pipe on" || line == "mirror pipe off") {
+    frame_stream::setPipe(line.endsWith("on"));
+    Serial.printf("OK mirror pipe %s\n", frame_stream::pipeOn() ? "on" : "off");
   } else if (line == "tft dma on" || line == "tft dma off") {
     display::setDma(line.endsWith("on"));
     Serial.printf("OK tft dma %s\n", display::dmaOn() ? "on" : "off");

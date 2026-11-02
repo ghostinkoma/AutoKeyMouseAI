@@ -71,6 +71,8 @@ def main():
     ap.add_argument("--pattern", default="bars", choices=["bars", "game"])
     ap.add_argument("--fps", type=float, default=60)
     ap.add_argument("--http-port", type=int, default=80)
+    ap.add_argument("--pipe", choices=["on", "off"],
+                    help="Wi-Fi の受信を ESP32 のコア 0 に分担するか (frame-stream-23 以降。省略 = ESP32 の今の設定)")
     a = ap.parse_args()
     host = a.host
     if not host and not a.serial:
@@ -88,6 +90,15 @@ def main():
         up0 = (st or {}).get("uptime")
         if not st:
             print("   → Web の返事がありません (IP・同じネットワークか確認)。送信は続けて試します")
+    if host and a.pipe:
+        try:
+            import requests
+
+            web = host if a.http_port == 80 else f"{host}:{a.http_port}"
+            r = requests.get(f"http://{web}/mirror", params={"pipe": 1 if a.pipe == "on" else 0}, timeout=3)
+            print(f"   受信の分担: {r.text.strip()}")
+        except Exception as e:
+            print(f"   受信の分担を切り替えられません ({e})")
     link = None
     if a.serial:
         from akm.serial_link import SerialFrameLink
@@ -166,6 +177,10 @@ def main():
             print(f"ESP32 の内訳 (直近 5 秒): {mm.get('fps', 0):.1f} fps  受信待ち {mm.get('recv_ms', 0):.0f} ms / "
                   f"展開 {mm.get('decode_ms', 0):.0f} ms / 描画(SPI) {mm.get('draw_ms', 0):.0f} ms  "
                   f"CPU {mm.get('cpu_pct', 0):.0f}%" + (f"  SPI {mm['spi_mhz']:.0f}MHz" if "spi_mhz" in mm else ""))
+            pp = (st or {}).get("pipe")
+            if pp:
+                print(f"   受信タスク: {'分担あり' if pp.get('on') else '分担なし'}  受信 {pp.get('kbps', 0) / 8:.0f} KB/s  "
+                      f"順番待ちが満杯 {pp.get('full_pct', 0):.0f}%  スタックの余り {pp.get('stack_free')} バイト")
             if "parse_ms" in mm:
                 print(f"   展開の内訳: 命令の読み取り {mm['parse_ms']:.1f} ms / 画素の組み立て {mm['asm_ms']:.1f} ms / "
                       f"窓認識への受け渡し {mm['edge_ms']:.1f} ms" + (f"  DMA {'on' if mm.get('dma') else 'off'}"))
