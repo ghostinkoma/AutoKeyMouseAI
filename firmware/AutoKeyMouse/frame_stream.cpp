@@ -1,6 +1,7 @@
 #include "frame_stream.h"
 
 #include <WiFi.h>
+#include <freertos/stream_buffer.h>
 
 #include "config.h"
 #include "display.h"
@@ -8,64 +9,118 @@
 namespace frame_stream {
 namespace {
 
-constexpr size_t kMax = display::FRAME_BUF_SIZE;  // JPEG 240x135 は 5〜10KB (液晶モジュールの共用バッファ)
-volatile bool gClient = false;
+volatile bool gClient = false;  // PC (ミラーの送り手) がつながっている
 
-bool readAll(WiFiClient& c, uint8_t* dst, size_t n, uint32_t timeoutMs) {
-  size_t got = 0;
+// ---- 受信の分担 -----------------------------------------------------------------------------
+// 受信 (pump) は Wi-Fi と同じコア 0 で、TCP から読んで順番待ち (FreeRTOS の stream buffer) に入れ続ける。
+// 展開・描画 (このファイルの task) はコア 1 で、順番待ちから読む。これで「次のフレームを受け取る」と
+// 「今のフレームを展開・描画する」が同時に進む (これまでは展開・描画の間は受信が止まっていた)。
+// 順番待ちの置き場所は液晶の共用バッファの後ろ側 (display::acquireRingArea) なので、ヒープは使わない。
+constexpr size_t kChunk = 1436;  // pump が 1 回に TCP から読む量 (TCP の 1 パケット)
+StreamBufferHandle_t gSb = nullptr;
+StaticStreamBuffer_t gSbStatic;
+uint8_t* gChunk = nullptr;
+TaskHandle_t gPumpTask = nullptr;
+WiFiClient* volatile gPumpClient = nullptr;
+volatile bool gPumpStop = false;     // 展開側が「やめて」と言った
+volatile bool gPumpRunning = false;  // pump が TCP を読んでいる
+volatile bool gPumpEof = false;      // 切断された (順番待ちに残っている分は読める)
+
+void pump(void*) {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // 接続ごとに起こされる
+    WiFiClient* c = gPumpClient;
+    while (!gPumpStop) {
+      int a = c->available();
+      if (a <= 0) {
+        if (!c->connected()) break;
+        vTaskDelay(1);
+        continue;
+      }
+      size_t space = xStreamBufferSpacesAvailable(gSb);
+      if (space == 0) {  // 展開が追いつかない: 待つ (その間 TCP の窓が詰まって PC が待つ)
+        vTaskDelay(1);
+        continue;
+      }
+      size_t get = min((size_t)a, min(space, kChunk));
+      int got = c->read(gChunk, get);
+      if (got <= 0) {
+        if (!c->connected()) break;
+        continue;
+      }
+      xStreamBufferSend(gSb, gChunk, (size_t)got, 0);  // 空きは確かめてあるので待たない
+    }
+    gPumpEof = true;
+    gPumpRunning = false;
+  }
+}
+
+// 順番待ちから 1 フレーム分 (left) を超えずに読む。データ待ちの時間を waitUs に足す
+struct RingReader {
+  uint32_t left;
+  uint32_t waitUs;
+};
+
+bool ringRecv(uint8_t* dst, size_t want, uint32_t* waitUs, uint32_t timeoutMs) {
   uint32_t t0 = millis();
-  while (got < n) {
-    if (!c.connected() && !c.available()) return false;
-    int a = c.available();
-    if (a <= 0) {
-      if (timeoutMs && millis() - t0 > timeoutMs) return false;  // 0 = 接続している限り待つ
-      vTaskDelay(1);
+  while (want) {
+    bool empty = xStreamBufferIsEmpty(gSb) == pdTRUE;
+    uint32_t w0 = micros();
+    size_t n = xStreamBufferReceive(gSb, dst, want, pdMS_TO_TICKS(20));
+    if (empty && waitUs) *waitUs += micros() - w0;
+    if (n == 0) {
+      if (gPumpEof && xStreamBufferIsEmpty(gSb) == pdTRUE) return false;  // 切断されて残りも無い
+      if (timeoutMs && millis() - t0 > timeoutMs) return false;
       continue;
     }
-    int r = c.read(dst + got, min((size_t)a, n - got));
-    if (r > 0) {
-      got += r;
-      t0 = millis();
-    }
+    t0 = millis();
+    dst += n;
+    want -= n;
   }
   return true;
 }
 
-// 受信しながら読む (ブロック形式用)。1 フレーム分 (len) を超えては読まない
-struct Reader {
-  WiFiClient* c;
-  uint32_t left;      // このフレームの残りバイト
-  uint32_t waitUs;    // データ待ちに使った時間
-  uint8_t buf[512];
-  size_t pos = 0, n = 0;
-};
-
-bool readFn(void* ctx, uint8_t* dst, size_t want) {
-  Reader* r = (Reader*)ctx;
-  while (want) {
-    if (r->pos == r->n) {
-      if (!r->left) return false;
-      uint32_t w0 = micros(), t0 = millis();
-      int a;
-      while ((a = r->c->available()) <= 0) {
-        if (!r->c->connected() || millis() - t0 > 3000) return false;
-        vTaskDelay(1);
-      }
-      size_t get = min((size_t)a, min(sizeof(r->buf), (size_t)r->left));
-      int got = r->c->read(r->buf, get);
-      r->waitUs += micros() - w0;
-      if (got <= 0) return false;
-      r->pos = 0;
-      r->n = got;
-      r->left -= got;
-    }
-    size_t k = min(want, r->n - r->pos);
-    memcpy(dst, r->buf + r->pos, k);
-    r->pos += k;
-    dst += k;
-    want -= k;
-  }
+bool ringRead(void* ctx, uint8_t* dst, size_t want) {
+  RingReader* r = (RingReader*)ctx;
+  if (want > r->left) return false;
+  if (!ringRecv(dst, want, &r->waitUs, 3000)) return false;
+  r->left -= want;
   return true;
+}
+
+void discardRest(RingReader& r) {
+  uint8_t junk[64];
+  while (r.left) {
+    size_t k = min((size_t)sizeof(junk), (size_t)r.left);
+    if (!ringRead(&r, junk, k)) break;
+  }
+}
+
+// 受信の分担を始める (接続ごと)。順番待ちの置き場所が借りられなければ false
+bool pumpStart(WiFiClient* c) {
+  size_t area = 0;
+  uint8_t* mem = display::acquireRingArea(&area, 1000);
+  if (!mem) return false;
+  gChunk = mem;
+  size_t sbSize = area - kChunk - 1;  // stream buffer の置き場所は「大きさ + 1」バイト要る
+  gSb = xStreamBufferCreateStatic(sbSize, 1, mem + kChunk, &gSbStatic);
+  gPumpStop = false;
+  gPumpEof = false;
+  gPumpRunning = true;
+  gPumpClient = c;
+  xTaskNotifyGive(gPumpTask);
+  return true;
+}
+
+// 受信の分担をやめる (pump が TCP を読み終えるのを待ってから順番待ちを返す)
+void pumpStop() {
+  if (!gSb) return;
+  gPumpStop = true;
+  uint32_t t0 = millis();
+  while (gPumpRunning && millis() - t0 < 1000) vTaskDelay(1);
+  vStreamBufferDelete(gSb);
+  gSb = nullptr;
+  display::releaseRingArea();
 }
 
 void task(void*) {
@@ -82,102 +137,86 @@ void task(void*) {
       server.begin();
       server.setNoDelay(true);
       started = true;
-      Serial.printf("[STREAM] mirror stream on tcp port %d\n", FRAME_STREAM_PORT);
+      Serial.printf("[STREAM] mirror stream on tcp port %d (receive on core 0, draw on core 1)\n", FRAME_STREAM_PORT);
     }
-    if (!client || !client.connected()) {
-      if (gClient) display::releaseBad16();  // 切れたら面のメモリと共用バッファを返す
-      gClient = false;
+    if (!gClient) {
       client = server.available();
       if (!client) {
         vTaskDelay(pdMS_TO_TICKS(50));
         continue;
       }
       client.setNoDelay(true);
+      if (!pumpStart(&client)) {  // 共用バッファを JPEG の POST などが使っている
+        Serial.println("[STREAM] frame buffer busy, closing");
+        client.stop();
+        continue;
+      }
       gClient = true;
       display::requestKeyframe();  // つなぎ直したら全体から
       Serial.printf("[STREAM] client %s connected\n", client.remoteIP().toString().c_str());
     }
+    bool close = false;
     uint8_t hdr[8];
-    if (!readAll(client, hdr, 8, 0)) {  // 次のフレームが来るまで待つ (切断されたら false)
-      client.stop();
-      continue;
-    }
-    if (memcmp(hdr, "AKMF", 4) != 0) {
+    if (!ringRecv(hdr, 8, nullptr, 0)) {  // 次のフレームが来るまで待つ (切断されたら false)
+      close = true;
+    } else if (memcmp(hdr, "AKMF", 4) != 0) {
       Serial.println("[STREAM] bad header, closing");
-      client.stop();
-      continue;
-    }
-    uint32_t len = hdr[4] | hdr[5] << 8 | hdr[6] << 16 | (uint32_t)hdr[7] << 24;
-    // 先頭 2 バイトで形式を見分ける: FF D8 = JPEG / 'B' 'C' = ブロック差分 / 'B' '6' = BadCodec 16bit
-    Reader rd;
-    rd.c = &client;
-    rd.left = len;
-    rd.waitUs = 0;
-    uint8_t head[2];
-    if (len < 2 || !readFn(&rd, head, 2)) {
-      client.stop();
-      continue;
-    }
-    if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6')) {
-      // 受信しながら描く (フレームバッファ不要)。描き終わったら返事:
-      //   'K' = OK / 'R' = 次はキーフレームが欲しい / 'E' = この形式は使えない (メモリ不足。PC は JPEG に戻す)
-      struct Pre {
-        Reader* r;
-        uint8_t h[2];
-        int used;
-      } pre{&rd, {head[0], head[1]}, 0};
-      auto readPre = [](void* ctx, uint8_t* dst, size_t n) -> bool {
-        Pre* p = (Pre*)ctx;
-        while (n && p->used < 2) {
-          *dst++ = p->h[p->used++];
-          --n;
-        }
-        return n == 0 || readFn(p->r, dst, n);
-      };
-      int res = head[1] == '6' ? display::drawBad16(readPre, &pre, len, &rd.waitUs)
-                               : display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
-      if (res == 0) {
-        Serial.println("[STREAM] block frame failed");
-        client.stop();
-        continue;
-      }
-      // このフレームの残りを捨てる (メモリ不足で展開しなかったときは全部)
-      uint8_t junk[64];
-      while (rd.pos < rd.n || rd.left) {
-        size_t k = min((size_t)sizeof(junk), (size_t)(rd.n - rd.pos + rd.left));
-        if (!readFn(&rd, junk, k)) break;
-      }
-      if (res < 0) {
-        display::releaseBad16();
-        client.write((uint8_t)'E');  // 入らない: PC は面を減らして (最後は JPEG で) 送り直す
+      close = true;
+    } else {
+      uint32_t len = hdr[4] | hdr[5] << 8 | hdr[6] << 16 | (uint32_t)hdr[7] << 24;
+      RingReader rd{len, 0};
+      uint8_t head[2];
+      if (len < 2 || !ringRead(&rd, head, 2)) {
+        close = true;
       } else {
-        client.write((uint8_t)(display::needKeyframe() || res == 4 ? 'R' : 'K'));
+        // 先頭 2 バイトは読んでしまったので、展開側には付け直して渡す
+        struct Pre {
+          RingReader* r;
+          uint8_t h[2];
+          int used;
+        } pre{&rd, {head[0], head[1]}, 0};
+        auto readPre = [](void* ctx, uint8_t* dst, size_t n) -> bool {
+          Pre* p = (Pre*)ctx;
+          while (n && p->used < 2) {
+            *dst++ = p->h[p->used++];
+            --n;
+          }
+          return n == 0 || ringRead(p->r, dst, n);
+        };
+        if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6')) {
+          // 'K' = OK / 'R' = 次はキーフレームが欲しい / 'E' = この形式は使えない (メモリ不足。PC は面を減らす)
+          int res = head[1] == '6' ? display::drawBad16(readPre, &pre, len, &rd.waitUs)
+                                   : display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
+          if (res == 0) {
+            Serial.println("[STREAM] block frame failed");
+            close = true;
+          } else {
+            discardRest(rd);  // このフレームの残り (メモリ不足で展開しなかったときは全部)
+            if (res < 0) {
+              display::releaseBad16();
+              client.write((uint8_t)'E');
+            } else {
+              client.write((uint8_t)(display::needKeyframe() || res == 4 ? 'R' : 'K'));
+            }
+          }
+        } else if (head[0] == 0xFF && head[1] == 0xD8) {
+          display::releaseBad16();
+          // JPEG も受信しながら展開する (共用バッファは順番待ちに貸しているので使わない)
+          if (!display::showJpegStream(readPre, &pre, len)) Serial.println("[STREAM] frame decode failed");
+          discardRest(rd);
+          client.write((uint8_t)'K');
+        } else {
+          Serial.println("[STREAM] unknown frame, closing");
+          close = true;
+        }
       }
-      continue;
     }
-    if (len > kMax) {
-      Serial.printf("[STREAM] jpeg too large: %lu\n", (unsigned long)len);
+    if (close || (gPumpEof && xStreamBufferIsEmpty(gSb) == pdTRUE)) {
+      pumpStop();  // 先に pump を止めてから切る (pump がまだ TCP を読んでいることがある)
       client.stop();
-      continue;
+      display::releaseBad16();  // 面のメモリと共用バッファを返す
+      gClient = false;
     }
-    display::releaseBad16();  // JPEG に戻った: 共用バッファを返してもらう
-    uint8_t* buf = display::acquireFrameBuffer(1000);
-    if (!buf) {
-      client.stop();
-      continue;
-    }
-    uint32_t t0 = micros();
-    buf[0] = head[0];
-    buf[1] = head[1];
-    if (!readFn(&rd, buf + 2, len - 2)) {
-      display::releaseFrameBuffer();
-      client.stop();
-      continue;
-    }
-    display::noteReceive(micros() - t0, len);
-    client.write((uint8_t)'K');  // 受信完了。PC はすぐ次を送ってよい (展開と次の受信が重なる)
-    if (!display::showFrame(buf, len)) Serial.println("[STREAM] frame decode failed");
-    display::releaseFrameBuffer();
   }
 }
 
@@ -185,7 +224,9 @@ void task(void*) {
 
 void begin() {
 #if HAS_TFT
-  // Arduino の loop() と同じコア 1・同じ優先度。Wi-Fi / BLE の処理 (コア 0) は邪魔しない
+  // 展開・描画: Arduino の loop() と同じコア 1・同じ優先度。
+  // 受信 (pump): Wi-Fi と同じコア 0。Wi-Fi / BLE の処理 (優先度 18 以上) より低い優先度で、TCP から読むだけ
+  xTaskCreatePinnedToCore(pump, "frame_pump", 3072, nullptr, 2, &gPumpTask, 0);
   xTaskCreatePinnedToCore(task, "frame_stream", 4096, nullptr, 1, nullptr, 1);
 #endif
 }
