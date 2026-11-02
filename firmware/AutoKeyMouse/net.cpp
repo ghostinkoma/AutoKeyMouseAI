@@ -11,7 +11,6 @@
 #include "config.h"
 #include "display.h"
 #include "edge_win.h"
-#include "frame_stream.h"
 #include "macro.h"
 #include "web_ui.h"
 
@@ -225,12 +224,6 @@ void handleStop() {
   sendText(200, "stopping");
 }
 
-// GET /mirror?pipe=1|0 : 液晶ミラーの受信をコア 0 に分担するか (次の接続から)
-void handleMirror() {
-  if (gServer.hasArg("pipe")) frame_stream::setPipe(gServer.arg("pipe") != "0");
-  sendText(200, String("pipe ") + (frame_stream::pipeOn() ? "on" : "off"));
-}
-
 void handleStatus() {
   String j = "{";
   j += "\"fw\":\"" FW_VERSION "\",";
@@ -251,7 +244,6 @@ void handleStatus() {
   j += ",\"heapBlock\":" + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   j += ",\"cpuMHz\":" + String(getCpuFrequencyMhz());
   j += ",\"mirror\":" + display::frameStatsJson();
-  j += ",\"pipe\":" + frame_stream::pipeJson();
   j += ",\"win\":" + edge_win::json();
   j += "}";
   sendJson(j);
@@ -451,7 +443,6 @@ void begin() {
   gServer.on("/run", handleRun);
   gServer.on("/stop", handleStop);
   gServer.on("/status", HTTP_GET, handleStatus);
-  gServer.on("/mirror", HTTP_GET, handleMirror);
   gServer.on("/macros", HTTP_GET, handleMacros);
   gServer.on("/save", HTTP_POST, handleSave);
   gServer.on("/settings", handleSettings);

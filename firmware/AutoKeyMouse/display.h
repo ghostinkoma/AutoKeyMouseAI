@@ -47,12 +47,6 @@ void requestKeyframe();
 constexpr size_t FRAME_BUF_SIZE = 24 * 1024;
 uint8_t* acquireFrameBuffer(uint32_t waitMs);
 void releaseFrameBuffer();
-// 共用バッファの後ろ側 (DMA の帯 2 本より後、約 16KB) を受信の順番待ちに借りる (frame_stream の受信の分担用)。
-// 借りている間は共用バッファの鍵を持つので、JPEG の POST / 面の置き場所には使えない。前側の帯は drawBad16 が使う
-uint8_t* acquireRingArea(size_t* size, uint32_t waitMs);
-void releaseRingArea();
-// JPEG を受信しながら展開して描く (フレームバッファに全部を読み込まない)。len バイトをすべて読む
-bool showJpegStream(ReadFn read, void* ctx, uint32_t len);
 
 // RGB565 BE を受信しながらそのまま液晶へ流す (64,800 バイトのバッファを確保しなくて済む)
 bool rawBegin();

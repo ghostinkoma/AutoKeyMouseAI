@@ -78,11 +78,7 @@ bool gDmaPending = false;       // 送信中の DMA がある
 spi_transaction_t gDmaTrans[2];
 int gDmaCur = 0;                // 今組み立てている帯 (0 / 1)
 int gRunX = -1, gRunY = 0, gRunW = 0, gRunRows = 0;  // 組み立て中の帯 (x < 0 = 無し)
-constexpr int kStrip = 240 * 8;  // 帯 1 本の画素数 (gFrameBuf の先頭から 2 本)
-constexpr size_t kStripBytes = 2 * kStrip * 2;  // 帯 2 本ぶん (7,680 バイト)。その後ろは受信の順番待ち (acquireRingArea)
-// 受信の順番待ちに共用バッファの後ろ側を貸している (frame_stream が鍵を持っている)。
-// その間、前側の帯は同じ持ち主の描画 (drawBad16) だけが使うので鍵を取らない
-volatile bool gRingActive = false;
+constexpr int kStrip = 240 * 8;  // 帯 1 本の画素数 (gFrameBuf の前半 / 後半)
 
 uint16_t* dmaBuf(int i) { return (uint16_t*)gFrameBuf + i * kStrip; }
 
@@ -269,19 +265,6 @@ uint8_t* acquireFrameBuffer(uint32_t waitMs) {
   return xSemaphoreTake(gBufLock, pdMS_TO_TICKS(waitMs)) == pdTRUE ? gFrameBuf : nullptr;
 }
 
-uint8_t* acquireRingArea(size_t* size, uint32_t waitMs) {
-  if (!acquireFrameBuffer(waitMs)) return nullptr;
-  gRingActive = true;  // 前半 (DMA の帯 2 本) はこの持ち主の描画 (drawBad16) が鍵無しで使う
-  *size = FRAME_BUF_SIZE - kStripBytes;
-  return gFrameBuf + kStripBytes;
-}
-
-void releaseRingArea() {
-  if (!gRingActive) return;
-  gRingActive = false;
-  releaseFrameBuffer();
-}
-
 void releaseFrameBuffer() {
   if (gBufLock) xSemaphoreGive(gBufLock);
 }
@@ -383,13 +366,11 @@ int jpegOut(JDEC* jd, void* bitmap, JRECT* r) {
   return 1;
 }
 
-// JPEG 展開の作業領域 (約 3KB)。メモリからの展開と受信しながらの展開で共用する (どちらも液晶の鍵の中)
-uint32_t gJpegWork[TJPGD_WORKSPACE_SIZE / 4 + 1];  // 4 バイト境界に置く
-
 bool drawJpeg(const uint8_t* data, size_t len) {
+  static uint32_t work[TJPGD_WORKSPACE_SIZE / 4 + 1];  // 4 バイト境界に置く
   JDEC jd;
   JpegSrc src{data, len, 0};
-  JRESULT rc = akm_jd_prepare(&jd, jpegIn, gJpegWork, sizeof(gJpegWork), &src);
+  JRESULT rc = akm_jd_prepare(&jd, jpegIn, work, sizeof(work), &src);
   if (rc != JDR_OK) {
     Serial.printf("[TFT] jpeg prepare failed: %d\n", rc);
     return false;
@@ -441,74 +422,6 @@ bool showFrame(const uint8_t* data, size_t len) {
     gNeedKey = false;  // JPEG は全面を描くのでキーフレームと同じ
   }
   return ok;
-}
-
-namespace {
-struct JpegStream {
-  ReadFn read;
-  void* ctx;
-  uint32_t left;
-  bool err;
-};
-
-size_t jpegInStream(JDEC* jd, uint8_t* buf, size_t n) {
-  JpegStream* s = (JpegStream*)jd->device;
-  if (n > s->left) n = s->left;
-  if (buf) {
-    if (n && !s->read(s->ctx, buf, n)) {
-      s->err = true;
-      return 0;
-    }
-  } else {  // 読み飛ばし
-    uint8_t junk[32];
-    for (size_t k = n; k;) {
-      size_t m = k < sizeof(junk) ? k : sizeof(junk);
-      if (!s->read(s->ctx, junk, m)) {
-        s->err = true;
-        return 0;
-      }
-      k -= m;
-    }
-  }
-  s->left -= n;
-  return n;
-}
-}  // namespace
-
-bool showJpegStream(ReadFn read, void* ctx, uint32_t len) {
-  TftLock lock;
-  gDrawUsFrame = 0;
-  uint32_t t0 = micros();
-  JpegStream src{read, ctx, len, false};
-  JDEC jd;
-  bool ok = false;
-  JRESULT rc = akm_jd_prepare(&jd, jpegInStream, gJpegWork, sizeof(gJpegWork), &src);
-  if (rc == JDR_OK && jd.width <= FRAME_W && jd.height <= FRAME_H) {
-    jd.swap = 0;
-    rc = akm_jd_decomp(&jd, jpegOut, 0);
-    ok = rc == JDR_OK;
-  }
-  if (!ok) Serial.printf("[TFT] jpeg (stream) failed: %d\n", rc);
-  // 残り (JPEG の後ろの余り) を読み捨てる
-  uint8_t junk[32];
-  while (src.left && !src.err) {
-    size_t m = src.left < sizeof(junk) ? src.left : sizeof(junk);
-    if (!read(ctx, junk, m)) break;
-    src.left -= m;
-  }
-  uint32_t total = micros() - t0;
-  rollStats();
-  gCur.frames++;
-  gCur.bytes += len;
-  gCur.drawUs += gDrawUsFrame;
-  gCur.decodeUs += total > gDrawUsFrame ? total - gDrawUsFrame : 0;
-  if (ok) {
-    gLastFrame = millis();
-    gFrameShown = true;
-    ++gFrames;
-    gNeedKey = false;
-  }
-  return ok && !src.err;
 }
 
 uint32_t framesShown() { return gFrames; }
@@ -589,7 +502,7 @@ void b16Free() {
 uint8_t* b16Slot(int i) {
   // PSRAM があればすべて PSRAM へ (S3)
   if (void* p = heap_caps_malloc(bad16::PLANE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) return gB16Heap[i] = (uint8_t*)p;
-  if (i < kBufSlots && !gRingActive) {  // 受信の順番待ちに貸している間は使えない
+  if (i < kBufSlots) {
     if (!gB16HasBuf) {
       if (!acquireFrameBuffer(1000)) return nullptr;
       gB16HasBuf = true;
@@ -640,11 +553,9 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
     bad16::Prof p0 = bad16::prof();
     int n;
     // DMA: 共用バッファを帯に使うので借りる (JPEG の受信中などで借りられなければ今まで通り)
-    bool owned = false;  // 帯のために共用バッファの鍵を取った
-    bool dma = gDmaOn && (gRingActive || (owned = acquireFrameBuffer(0) != nullptr));
+    bool dma = gDmaOn && acquireFrameBuffer(0) != nullptr;
     if (dma && !dmaBegin()) {
-      if (owned) releaseFrameBuffer();
-      owned = false;
+      releaseFrameBuffer();
       dma = false;
     }
     if (dma) {
@@ -660,7 +571,7 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
       dmaFlush();
       dmaWait();  // 帯は共用バッファなので、返す前に送り終える
       drawUs += micros() - d0;
-      if (owned) releaseFrameBuffer();
+      releaseFrameBuffer();
     } else {
       dmaEnd();
       gTft.startWrite();
@@ -931,9 +842,6 @@ bool needKeyframe() { return false; }
 void requestKeyframe() {}
 uint8_t* acquireFrameBuffer(uint32_t) { return nullptr; }
 void releaseFrameBuffer() {}
-uint8_t* acquireRingArea(size_t*, uint32_t) { return nullptr; }
-void releaseRingArea() {}
-bool showJpegStream(ReadFn, void*, uint32_t) { return false; }
 String frameStatsJson() { return "{}"; }
 String frameStatsLine() { return "no display"; }
 bool rawBegin() { return false; }
