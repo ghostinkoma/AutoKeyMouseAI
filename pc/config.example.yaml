@@ -12,9 +12,18 @@ performance:
   # 自動学習が使う CPU のスレッドは、既定でコア数の半分 (環境変数 AKM_TRAIN_THREADS で変更)
 
 device:
-  transport: http          # http (Wi-Fi) | serial (COM ポート。USB が不安定な基板では http 推奨)
+  transport: http          # http (Wi-Fi) | serial (COM ポート。USB が不安定な基板では http 推奨) | virtual (ESP32 なし)
   port: COM18              # serial のとき
   host: 192.168.1.43       # ESP32 の IP (液晶 / シリアルに表示される) または autokeymouse.local
+
+# transport: virtual のとき: ESP32 を使わず、この PC から直接キー・マウスを送る (akm/virtual_hid.py)
+# 遅れはすべて 0 から始め、ESP32 (BLE) に近づけたいときに足す
+virtual_hid:
+  event_delay_ms: 10       # 1 つの操作ごとの間隔 (ESP32 の既定と同じ。スクリプトの d: で変えられる)
+  latency_ms: 0            # 届くまでの固定の遅れ (BLE なら 10〜30)
+  jitter_ms: 0             # 遅れのばらつき (0〜この値)
+  report_interval_ms: 0    # この間隔の区切りでしか届かない (BLE の接続間隔。7.5〜50)
+  layout: jp               # t: の文字の配列 (jp / us)
 
 mouse:
   # auto     : 絶対座標で届く位置は一発移動、届かない位置 (別モニタ等) は相対移動で合わせ込む

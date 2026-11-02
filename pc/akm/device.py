@@ -1,8 +1,9 @@
 """ESP32 (AutoKeyMouse firmware) との通信。
 
-経路は 2 つ:
-  * serial: USB の COM ポート。低遅延。``run <script>`` を送って ``OK`` / ``ERR`` を待つ
-  * http  : Wi-Fi。``GET /run?s=<script>``
+経路は 3 つ:
+  * serial : USB の COM ポート。低遅延。``run <script>`` を送って ``OK`` / ``ERR`` を待つ
+  * http   : Wi-Fi。``GET /run?s=<script>``
+  * virtual: ESP32 を使わず、この PC から直接送る (akm/virtual_hid.py。開発・検証用)
 
 スクリプト書式は firmware/AutoKeyMouse/macro.h を参照。
 """
@@ -126,6 +127,37 @@ class HttpTransport(Transport):
         self._s.get(f"{self._base}/stop", timeout=3)
 
 
+class VirtualTransport(Transport):
+    """ESP32 の代わりに akm/virtual_hid.py で実行する。書式・返事は ESP32 と同じ ('ok' / DeviceError)。"""
+
+    def __init__(self, cfg: dict | None = None, allow=None, backend=None):
+        from .virtual_hid import VirtualHid
+
+        self.hid = VirtualHid.from_config(cfg, allow=allow, backend=backend)
+
+    def run(self, script: str, timeout: float = 35.0) -> str:
+        from .virtual_hid import MacroError
+
+        try:
+            return self.hid.run(script)
+        except MacroError as e:
+            raise DeviceError(str(e)) from None
+        except InterruptedError as e:
+            raise DeviceError(f"interrupted: {e}") from None
+
+    def status(self) -> dict:
+        p = self.hid.pipe
+        return {"fw": "virtual", "latency_ms": p.latency * 1000, "jitter_ms": p.jitter * 1000,
+                "report_interval_ms": p.interval * 1000, "event_delay_ms": self.hid.event_delay * 1000}
+
+    def stop(self) -> None:
+        self.hid.stop()
+
+    def close(self) -> None:
+        self.hid.stop()
+        self.hid.release_all()
+
+
 class Device:
     """HID 操作の高水準 API。座標はすべてスクリーン座標 (物理ピクセル)。
 
@@ -211,7 +243,8 @@ class Device:
         self.run("ra")
 
 
-def open_device(cfg: dict, abs_map: AbsMap, dry_run: bool = False) -> Device:
+def open_device(cfg: dict, abs_map: AbsMap, dry_run: bool = False, allow=None) -> Device:
+    """allow: virtual のときのゲート (() -> bool。False で止めてキー・ボタンを離す)"""
     from .screen import IS_WINDOWS, cursor_pos
 
     dev_cfg = cfg["device"]
@@ -219,8 +252,11 @@ def open_device(cfg: dict, abs_map: AbsMap, dry_run: bool = False) -> Device:
     cursor = cursor_pos if IS_WINDOWS else None
     if dry_run:
         return Device(Transport(), abs_map, dry_run=True, mouse_mode=mode, cursor=cursor)
-    if dev_cfg.get("transport", "serial") == "serial":
-        t: Transport = SerialTransport(dev_cfg["port"], int(dev_cfg.get("baud", 115200)))
+    kind = dev_cfg.get("transport", "serial")
+    if kind == "virtual":
+        t: Transport = VirtualTransport(cfg.get("virtual_hid"), allow=allow)
+    elif kind == "serial":
+        t = SerialTransport(dev_cfg["port"], int(dev_cfg.get("baud", 115200)))
     else:
         t = HttpTransport(dev_cfg["host"])
     return Device(t, abs_map, mouse_mode=mode, cursor=cursor)
