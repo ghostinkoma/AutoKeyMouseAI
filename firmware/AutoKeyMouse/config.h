@@ -6,7 +6,7 @@
 // ---- デバイス名 -----------------------------------------------------------
 #define DEVICE_NAME      "AutoKeyMouse"     // BLE 表示名 / mDNS 名 (autokeymouse.local)
 // ファームウェアの版 (/status と起動ログに出る。PC 側で書き込み済みか確認する)
-#define FW_VERSION "frame-stream-28"
+#define FW_VERSION "frame-stream-29"
 #define BLE_MANUFACTURER "ghostinkoma"
 
 // ---- Wi-Fi SoftAP ---------------------------------------------------------
@@ -66,6 +66,8 @@
 // Wi-Fi (画面の受信) が遅くなる。24-40 = 30-50ms (キー・マウス操作には十分)
 #define BLE_CONN_INTERVAL_MIN 24
 #define BLE_CONN_INTERVAL_MAX 40
+// スレーブレイテンシの既定 (0 = 毎回聞く)。試験は GET /radio?ble=30,30&lat=20
+#define BLE_CONN_LATENCY 0
 
 // ---- マクロ実行 -----------------------------------------------------------
 #define MACRO_SLOTS            10

@@ -95,7 +95,17 @@ volatile uint32_t gPeers   = 0;
 volatile bool     gSecured = false;
 // 接続間隔の要求 (1.25ms 単位)。setConnInterval で変えられる。実際の値はホスト (Windows) が決める
 uint16_t gItvlMin = BLE_CONN_INTERVAL_MIN, gItvlMax = BLE_CONN_INTERVAL_MAX;
+// スレーブレイテンシ: 送るものが無いとき、この回数までの接続イベントを ESP32 が聞き飛ばしてよい
+// (その間 Wi-Fi が電波を使える。キーを送るときは次のイベントで送れるので入力の遅れは増えない)
+uint16_t gLatency = BLE_CONN_LATENCY;
 volatile uint16_t gItvlNow = 0;  // 今の接続の実際の間隔 (1.25ms 単位。0 = 未接続)
+volatile uint16_t gLatNow = 0;   // 今の接続の実際のスレーブレイテンシ
+
+// 監視の切断時間 (10ms 単位): (1 + レイテンシ) x 間隔 x 2 より長くないといけない
+uint16_t supervisionTimeout(uint16_t itvlMax, uint16_t latency) {
+  uint32_t need = (uint32_t)(1 + latency) * itvlMax * 125 * 2 / 1000 + 50;  // 1.25ms = 125/100 → 10ms 単位
+  return (uint16_t)constrain(max<uint32_t>(400, need), 10, 3200);
+}
 volatile bool gOff = false;      // shutdown() で BLE を止めた (再起動まで戻らない)
 
 uint8_t gMods    = 0;
@@ -106,8 +116,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* server, NimBLEConnInfo& info) override {
     gPeers = gPeers + 1;
     // 接続間隔を要求 (最終的な値はホストが決める)。短すぎると Wi-Fi の受信が遅くなる (config.h 参照)
-    server->updateConnParams(info.getConnHandle(), gItvlMin, gItvlMax, 0, 400);
+    server->updateConnParams(info.getConnHandle(), gItvlMin, gItvlMax, gLatency, supervisionTimeout(gItvlMax, gLatency));
     gItvlNow = info.getConnInterval();
+    gLatNow = info.getConnLatency();
     Serial.printf("[BLE] connected: %s\n", info.getAddress().toString().c_str());
     // ホスト任せにせず、こちらから暗号化 (ペアリング / ボンド復元) を要求する
     NimBLEDevice::startSecurity(info.getConnHandle());
@@ -115,7 +126,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
   void onConnParamsUpdate(NimBLEConnInfo& info) override {
     gItvlNow = info.getConnInterval();
-    Serial.printf("[BLE] connection interval %.2f ms\n", gItvlNow * 1.25f);
+    gLatNow = info.getConnLatency();
+    Serial.printf("[BLE] connection interval %.2f ms, latency %u, timeout %u ms\n", gItvlNow * 1.25f,
+                  (unsigned)gLatNow, (unsigned)info.getConnTimeout() * 10);
   }
 
   void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int reason) override {
@@ -210,21 +223,23 @@ void shutdown() {
 
 bool isOff() { return gOff; }
 
-void setConnInterval(uint16_t minMs, uint16_t maxMs) {
+void setConnInterval(uint16_t minMs, uint16_t maxMs, int latency) {
   if (gOff) return;
+  if (latency >= 0) gLatency = (uint16_t)constrain(latency, 0, 100);
   // 1.25ms 単位に直す (BLE の規格は 7.5ms〜4s)
   uint16_t lo = (uint16_t)constrain(minMs * 4 / 5, 6, 3200), hi = (uint16_t)constrain(maxMs * 4 / 5, lo, 3200);
   gItvlMin = lo;
   gItvlMax = hi;
   NimBLEServer* server = NimBLEDevice::getServer();
   if (!server) return;
-  // 監視の切断時間 (400 = 4 秒) は間隔の 2 倍より長くないといけない
-  uint16_t timeout = (uint16_t)max(400, hi * 3 / 4 + 10);
-  for (uint16_t h : server->getPeerDevices()) server->updateConnParams(h, lo, hi, 0, timeout);
-  Serial.printf("[BLE] request connection interval %.2f-%.2f ms\n", lo * 1.25f, hi * 1.25f);
+  uint16_t timeout = supervisionTimeout(hi, gLatency);
+  for (uint16_t h : server->getPeerDevices()) server->updateConnParams(h, lo, hi, gLatency, timeout);
+  Serial.printf("[BLE] request connection interval %.2f-%.2f ms, latency %u\n", lo * 1.25f, hi * 1.25f,
+                (unsigned)gLatency);
 }
 
 float connIntervalMs() { return gItvlNow * 1.25f; }
+uint16_t connLatency() { return gLatNow; }
 
 void clearBonds() {
   if (gOff) return;

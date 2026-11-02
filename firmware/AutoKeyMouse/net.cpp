@@ -234,13 +234,15 @@ void handleRadio() {
   if (gServer.hasArg("ble") && gServer.arg("ble") == "off") {
     hid::shutdown();
     msg += "ble off (until restart). ";
-  } else if (gServer.hasArg("ble")) {
-    String v = gServer.arg("ble");
+  } else if (gServer.hasArg("ble") || gServer.hasArg("lat")) {
+    String v = gServer.hasArg("ble") ? gServer.arg("ble") : String(BLE_CONN_INTERVAL_MIN * 5 / 4) + "," +
+                                                                String(BLE_CONN_INTERVAL_MAX * 5 / 4);
     int comma = v.indexOf(',');
     long lo = v.toInt(), hi = comma > 0 ? v.substring(comma + 1).toInt() : lo;
+    int lat = gServer.hasArg("lat") ? (int)gServer.arg("lat").toInt() : -1;
     if (lo >= 8 && hi >= lo && hi <= 4000) {
-      hid::setConnInterval((uint16_t)lo, (uint16_t)hi);
-      msg += "ble " + String(lo) + "-" + String(hi) + "ms requested. ";
+      hid::setConnInterval((uint16_t)lo, (uint16_t)hi, lat);
+      msg += "ble " + String(lo) + "-" + String(hi) + "ms" + (lat >= 0 ? " latency " + String(lat) : "") + " requested. ";
     }
   }
   if (gServer.hasArg("prefer")) {
@@ -259,7 +261,9 @@ void handleRadio() {
     bool ok = WiFi.setSleep(on);
     msg += String("wifi sleep ") + (on ? "on" : "off") + (ok ? "" : " (failed: stop BLE first with ble=off)") + ". ";
   }
-  sendText(200, msg + "now: ble " + (hid::isOff() ? String("off") : String(hid::connIntervalMs(), 2) + "ms") +
+  sendText(200, msg + "now: ble " +
+                    (hid::isOff() ? String("off")
+                                  : String(hid::connIntervalMs(), 2) + "ms latency " + String(hid::connLatency())) +
                     ", prefer " + gPrefer + ", wifi sleep " + (WiFi.getSleep() ? "on" : "off"));
 }
 
@@ -283,7 +287,8 @@ void handleStatus() {
   j += ",\"heapBlock\":" + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   j += ",\"cpuMHz\":" + String(getCpuFrequencyMhz());
   j += ",\"mirror\":" + display::frameStatsJson();
-  j += ",\"radio\":{\"ble_ms\":" + String(hid::connIntervalMs(), 2) + ",\"ble_off\":" +
+  j += ",\"radio\":{\"ble_ms\":" + String(hid::connIntervalMs(), 2) + ",\"ble_lat\":" + String(hid::connLatency()) +
+       ",\"ble_off\":" +
        String(hid::isOff() ? "true" : "false") + ",\"prefer\":\"" + gPrefer + "\",\"wifi_sleep\":" +
        String(WiFi.getSleep() ? "true" : "false") + "}";
   j += ",\"win\":" + edge_win::json();

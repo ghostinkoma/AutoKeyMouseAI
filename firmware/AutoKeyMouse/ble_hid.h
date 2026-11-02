@@ -24,8 +24,10 @@ void begin(const char* deviceName, const char* manufacturer);
 // ホストと接続済みかつ暗号化 (ペアリング) 済みなら true
 bool connected();
 // 接続間隔を変える (ms)。長いほど Wi-Fi が電波を使える時間が増える (キー・マウスの遅れは増える)
-void setConnInterval(uint16_t minMs, uint16_t maxMs);
+// latency: スレーブレイテンシ (送るものが無いとき聞き飛ばしてよい接続イベントの数。-1 = 今のまま)
+void setConnInterval(uint16_t minMs, uint16_t maxMs, int latency = -1);
 float connIntervalMs();  // 今の接続の実際の間隔 (0 = 未接続)
+uint16_t connLatency();  // 今の接続の実際のスレーブレイテンシ
 // BLE を止める (Wi-Fi だけの速さを試す用。キー・マウスは使えなくなる。再起動で元に戻る)
 void shutdown();
 bool isOff();
