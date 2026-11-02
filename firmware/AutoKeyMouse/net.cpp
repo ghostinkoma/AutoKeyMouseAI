@@ -11,6 +11,7 @@
 #include "config.h"
 #include "display.h"
 #include "edge_win.h"
+#include <esp_coexist.h>
 #include "macro.h"
 #include "web_ui.h"
 
@@ -224,6 +225,34 @@ void handleStop() {
   sendText(200, "stopping");
 }
 
+// 電波の分け方を試す (液晶ミラーの Wi-Fi の速さを比べる用。電源を切ると元に戻る):
+//   GET /radio?ble=40,60      BLE の接続間隔を 40〜60ms に (Windows が受け入れた値は /status の radio.ble_ms)
+//   GET /radio?prefer=wifi    Wi-Fi と BLE が同時に電波を使いたいとき Wi-Fi を優先 (wifi / balance / bt)
+const char* gPrefer = "balance";
+void handleRadio() {
+  String msg;
+  if (gServer.hasArg("ble")) {
+    String v = gServer.arg("ble");
+    int comma = v.indexOf(',');
+    long lo = v.toInt(), hi = comma > 0 ? v.substring(comma + 1).toInt() : lo;
+    if (lo >= 8 && hi >= lo && hi <= 4000) {
+      hid::setConnInterval((uint16_t)lo, (uint16_t)hi);
+      msg += "ble " + String(lo) + "-" + String(hi) + "ms requested. ";
+    }
+  }
+  if (gServer.hasArg("prefer")) {
+    String p = gServer.arg("prefer");
+    esp_coex_prefer_t v = p == "wifi" ? ESP_COEX_PREFER_WIFI : p == "bt" ? ESP_COEX_PREFER_BT : ESP_COEX_PREFER_BALANCE;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    esp_err_t e = esp_coex_preference_set(v);
+#pragma GCC diagnostic pop
+    gPrefer = v == ESP_COEX_PREFER_WIFI ? "wifi" : v == ESP_COEX_PREFER_BT ? "bt" : "balance";
+    msg += String("prefer ") + gPrefer + (e == ESP_OK ? "" : " (failed)") + ". ";
+  }
+  sendText(200, msg + "now: ble " + String(hid::connIntervalMs(), 2) + "ms, prefer " + gPrefer);
+}
+
 void handleStatus() {
   String j = "{";
   j += "\"fw\":\"" FW_VERSION "\",";
@@ -244,6 +273,7 @@ void handleStatus() {
   j += ",\"heapBlock\":" + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   j += ",\"cpuMHz\":" + String(getCpuFrequencyMhz());
   j += ",\"mirror\":" + display::frameStatsJson();
+  j += ",\"radio\":{\"ble_ms\":" + String(hid::connIntervalMs(), 2) + ",\"prefer\":\"" + gPrefer + "\"}";
   j += ",\"win\":" + edge_win::json();
   j += "}";
   sendJson(j);
@@ -443,6 +473,7 @@ void begin() {
   gServer.on("/run", handleRun);
   gServer.on("/stop", handleStop);
   gServer.on("/status", HTTP_GET, handleStatus);
+  gServer.on("/radio", HTTP_GET, handleRadio);
   gServer.on("/macros", HTTP_GET, handleMacros);
   gServer.on("/save", HTTP_POST, handleSave);
   gServer.on("/settings", handleSettings);

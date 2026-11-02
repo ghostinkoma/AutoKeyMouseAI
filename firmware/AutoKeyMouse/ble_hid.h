@@ -23,6 +23,9 @@ void begin(const char* deviceName, const char* manufacturer);
 
 // ホストと接続済みかつ暗号化 (ペアリング) 済みなら true
 bool connected();
+// 接続間隔を変える (ms)。長いほど Wi-Fi が電波を使える時間が増える (キー・マウスの遅れは増える)
+void setConnInterval(uint16_t minMs, uint16_t maxMs);
+float connIntervalMs();  // 今の接続の実際の間隔 (0 = 未接続)
 uint32_t connectedPeers();
 bool advertising();
 uint32_t sendRetries();     // 送信バッファ待ちで再送した回数

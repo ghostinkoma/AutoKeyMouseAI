@@ -93,6 +93,9 @@ NimBLECharacteristic* gAbsIn    = nullptr;
 
 volatile uint32_t gPeers   = 0;
 volatile bool     gSecured = false;
+// 接続間隔の要求 (1.25ms 単位)。setConnInterval で変えられる。実際の値はホスト (Windows) が決める
+uint16_t gItvlMin = BLE_CONN_INTERVAL_MIN, gItvlMax = BLE_CONN_INTERVAL_MAX;
+volatile uint16_t gItvlNow = 0;  // 今の接続の実際の間隔 (1.25ms 単位。0 = 未接続)
 
 uint8_t gMods    = 0;
 uint8_t gKeys[6] = {0};
@@ -102,10 +105,16 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* server, NimBLEConnInfo& info) override {
     gPeers = gPeers + 1;
     // 接続間隔を要求 (最終的な値はホストが決める)。短すぎると Wi-Fi の受信が遅くなる (config.h 参照)
-    server->updateConnParams(info.getConnHandle(), BLE_CONN_INTERVAL_MIN, BLE_CONN_INTERVAL_MAX, 0, 400);
+    server->updateConnParams(info.getConnHandle(), gItvlMin, gItvlMax, 0, 400);
+    gItvlNow = info.getConnInterval();
     Serial.printf("[BLE] connected: %s\n", info.getAddress().toString().c_str());
     // ホスト任せにせず、こちらから暗号化 (ペアリング / ボンド復元) を要求する
     NimBLEDevice::startSecurity(info.getConnHandle());
+  }
+
+  void onConnParamsUpdate(NimBLEConnInfo& info) override {
+    gItvlNow = info.getConnInterval();
+    Serial.printf("[BLE] connection interval %.2f ms\n", gItvlNow * 1.25f);
   }
 
   void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int reason) override {
@@ -187,6 +196,21 @@ void begin(const char* deviceName, const char* manufacturer) {
 }
 
 bool connected() { return gPeers > 0 && gSecured; }
+
+void setConnInterval(uint16_t minMs, uint16_t maxMs) {
+  // 1.25ms 単位に直す (BLE の規格は 7.5ms〜4s)
+  uint16_t lo = (uint16_t)constrain(minMs * 4 / 5, 6, 3200), hi = (uint16_t)constrain(maxMs * 4 / 5, lo, 3200);
+  gItvlMin = lo;
+  gItvlMax = hi;
+  NimBLEServer* server = NimBLEDevice::getServer();
+  if (!server) return;
+  // 監視の切断時間 (400 = 4 秒) は間隔の 2 倍より長くないといけない
+  uint16_t timeout = (uint16_t)max(400, hi * 3 / 4 + 10);
+  for (uint16_t h : server->getPeerDevices()) server->updateConnParams(h, lo, hi, 0, timeout);
+  Serial.printf("[BLE] request connection interval %.2f-%.2f ms\n", lo * 1.25f, hi * 1.25f);
+}
+
+float connIntervalMs() { return gItvlNow * 1.25f; }
 
 void clearBonds() {
   NimBLEDevice::deleteAllBonds();

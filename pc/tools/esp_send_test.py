@@ -71,6 +71,9 @@ def main():
     ap.add_argument("--pattern", default="bars", choices=["bars", "game"])
     ap.add_argument("--fps", type=float, default=60)
     ap.add_argument("--http-port", type=int, default=80)
+    ap.add_argument("--ble", help="BLE の接続間隔 (ms) を変えてから試す。例 --ble 60,80 (frame-stream-27 以降)")
+    ap.add_argument("--prefer", choices=["wifi", "balance", "bt"],
+                    help="Wi-Fi と BLE が同時に電波を使いたいときの優先 (frame-stream-27 以降)")
     ap.add_argument("--pipe", choices=["on", "off"],
                     help="Wi-Fi の受信を ESP32 のコア 0 に分担するか (frame-stream-23 以降。省略 = ESP32 の今の設定)")
     a = ap.parse_args()
@@ -99,6 +102,17 @@ def main():
             print(f"   受信の分担: {r.text.strip()}")
         except Exception as e:
             print(f"   受信の分担を切り替えられません ({e})")
+    if host and (a.ble or a.prefer):
+        try:
+            import requests
+
+            web = host if a.http_port == 80 else f"{host}:{a.http_port}"
+            params = {k: v for k, v in (("ble", a.ble), ("prefer", a.prefer)) if v}
+            r = requests.get(f"http://{web}/radio", params=params, timeout=3)
+            print(f"   電波の設定: {r.text.strip()}")
+            time.sleep(2)  # Windows が新しい接続間隔に応じるのを待つ
+        except Exception as e:
+            print(f"   電波の設定を変えられません ({e})")
     link = None
     if a.serial:
         from akm.serial_link import SerialFrameLink
@@ -177,6 +191,9 @@ def main():
             print(f"ESP32 の内訳 (直近 5 秒): {mm.get('fps', 0):.1f} fps  受信待ち {mm.get('recv_ms', 0):.0f} ms / "
                   f"展開 {mm.get('decode_ms', 0):.0f} ms / 描画(SPI) {mm.get('draw_ms', 0):.0f} ms  "
                   f"CPU {mm.get('cpu_pct', 0):.0f}%" + (f"  SPI {mm['spi_mhz']:.0f}MHz" if "spi_mhz" in mm else ""))
+            rr = (st or {}).get("radio")
+            if rr:
+                print(f"   電波: BLE の接続間隔 {rr.get('ble_ms')} ms / 優先 {rr.get('prefer')}")
             pp = (st or {}).get("pipe")
             if pp:
                 print(f"   受信タスク: {'分担あり' if pp.get('on') else '分担なし'}  受信 {pp.get('kbps', 0) / 8:.0f} KB/s  "
