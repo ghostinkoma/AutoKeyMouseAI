@@ -31,9 +31,14 @@ volatile bool gPipeOn = true;
 volatile uint32_t gPumpBytes = 0, gPumpFullUs = 0;
 uint32_t gPumpWin = 0, gPumpLastBytes = 0, gPumpLastFullUs = 0, gPumpLastWinMs = 0;
 
+// 受信タスクは「分担ありで接続している間」だけ作る。スタックと管理領域は共用バッファの中 (順番待ちと同じ場所)
+// に置くので、ヒープを使わない (ヒープが数 KB 減るだけで Wi-Fi の受信が遅くなるため。frame-stream-22/23 の退行)
+constexpr size_t kPumpStack = 2560;  // 実測で 2,080 バイト使う
+StaticTask_t gPumpTcb;
+volatile uint32_t gPumpStackFree = 0;  // 受信タスクのスタックの余り (タスク自身が時々測る)
+
 void pump(void*) {
-  for (;;) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // 接続ごとに起こされる
+  {
     WiFiClient* c = gPumpClient;
     while (!gPumpStop) {
       int a = c->available();
@@ -57,10 +62,13 @@ void pump(void*) {
       }
       xStreamBufferSend(gSb, gChunk, (size_t)got, 0);  // 空きは確かめてあるので待たない
       gPumpBytes += got;
+      static uint8_t k = 0;
+      if (++k == 0) gPumpStackFree = uxTaskGetStackHighWaterMark(nullptr);  // 256 回に 1 回
     }
     gPumpEof = true;
     gPumpRunning = false;
   }
+  vTaskSuspend(nullptr);  // 消すのは展開側 (pumpStop)。自分で消すとスタックを返すのが遅れる
 }
 
 // 1 フレーム分 (left) を超えずに読む。展開側は 1〜9 バイトずつ欲しがるので、取り出しは 512 バイトまとめて行い
@@ -173,14 +181,19 @@ bool pumpStart(WiFiClient* c) {
   size_t area = 0;
   uint8_t* mem = display::acquireRingArea(&area, 1000);
   if (!mem) return false;
-  gChunk = mem;
-  size_t sbSize = area - kChunk - 1;  // stream buffer の置き場所は「大きさ + 1」バイト要る
-  gSb = xStreamBufferCreateStatic(sbSize, 1, mem + kChunk, &gSbStatic);
+  // 共用バッファの後ろ側: [受信タスクのスタック][TCP から読む 1 パケット分][順番待ち]
+  uint8_t* stack = mem;
+  gChunk = mem + kPumpStack;
+  uint8_t* sbMem = gChunk + kChunk;
+  size_t sbSize = area - kPumpStack - kChunk - 1;  // stream buffer の置き場所は「大きさ + 1」バイト要る
+  gSb = xStreamBufferCreateStatic(sbSize, 1, sbMem, &gSbStatic);
   gPumpStop = false;
   gPumpEof = false;
   gPumpRunning = true;
   gPumpClient = c;
-  xTaskNotifyGive(gPumpTask);
+  // 受信: Wi-Fi と同じコア 0。Wi-Fi / BLE の処理 (優先度 18 以上) より低い優先度で、TCP から読むだけ
+  gPumpTask = xTaskCreateStaticPinnedToCore(pump, "frame_pump", kPumpStack, nullptr, 2, (StackType_t*)stack,
+                                            &gPumpTcb, 0);
   return true;
 }
 
@@ -190,6 +203,10 @@ void pumpStop() {
   gPumpStop = true;
   uint32_t t0 = millis();
   while (gPumpRunning && millis() - t0 < 1000) vTaskDelay(1);
+  if (gPumpTask) {  // スタックは共用バッファの中なので、返す前に必ず消す
+    vTaskDelete(gPumpTask);
+    gPumpTask = nullptr;
+  }
   vStreamBufferDelete(gSb);
   gSb = nullptr;
   display::releaseRingArea();
@@ -304,9 +321,7 @@ void task(void*) {
 
 void begin() {
 #if HAS_TFT
-  // 展開・描画: Arduino の loop() と同じコア 1・同じ優先度。
-  // 受信 (pump): Wi-Fi と同じコア 0。Wi-Fi / BLE の処理 (優先度 18 以上) より低い優先度で、TCP から読むだけ
-  xTaskCreatePinnedToCore(pump, "frame_pump", 2560, nullptr, 2, &gPumpTask, 0);
+  // 展開・描画: Arduino の loop() と同じコア 1・同じ優先度。受信タスク (コア 0) は接続ごとに pumpStart で作る
   xTaskCreatePinnedToCore(task, "frame_stream", 4096, nullptr, 1, nullptr, 1);
 #endif
 }
@@ -335,7 +350,7 @@ String pipeJson() {
   snprintf(b, sizeof(b), "{\"on\":%s,\"active\":%s,\"kbps\":%.0f,\"full_pct\":%.1f,\"stack_free\":%u}",
            gPipeOn ? "true" : "false", gSb ? "true" : "false", gPumpLastBytes * 8.0f / win,
            gPumpLastFullUs / 10.0f / win,
-           gPumpTask ? (unsigned)uxTaskGetStackHighWaterMark(gPumpTask) : 0U);
+           (unsigned)gPumpStackFree);
   return String(b);
 }
 
