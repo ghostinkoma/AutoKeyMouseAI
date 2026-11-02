@@ -49,6 +49,8 @@ if IS_WINDOWS:
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _ENUM = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     user32.EnumWindows.argtypes = [_ENUM, wintypes.LPARAM]
+    user32.EnumChildWindows.argtypes = [wintypes.HWND, _ENUM, wintypes.LPARAM]
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 
 
 def _proc_name(hwnd) -> str:
@@ -82,6 +84,63 @@ def list_windows() -> list[tuple[int, str, str]]:
 
     user32.EnumWindows(cb, 0)
     return out
+
+
+def _text(hwnd) -> str:
+    n = user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value
+
+
+def _class(hwnd) -> str:
+    buf = ctypes.create_unicode_buffer(128)
+    user32.GetClassNameW(hwnd, buf, 128)
+    return buf.value
+
+
+def sakura_dialogs() -> list[str]:
+    """サクラエディタが出しているメッセージボックスの文面 (無ければ空)"""
+    out = []
+    for h, title, proc in list_windows():
+        if proc.lower() != "sakura.exe" or _class(h) != "#32770":
+            continue
+        parts = []
+
+        @_ENUM
+        def cb(child, _):
+            if _class(child) == "Static" and _text(child).strip():
+                parts.append(_text(child).strip())
+            return True
+
+        user32.EnumChildWindows(h, cb, 0)
+        out.append(f"[{title}] " + " ".join(parts))
+    return out
+
+
+def is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def check_dialogs(when: str) -> bool:
+    """サクラエディタがエラーを出していたら案内して True"""
+    ds = sakura_dialogs()
+    if not ds:
+        return False
+    print(f"   !! {when}、サクラエディタがメッセージを出しています:")
+    for d in ds:
+        print(f"      {d}")
+    if any("権限" in d for d in ds):
+        me = "管理者" if is_admin() else "管理者でない"
+        print(f"   → この試験は {me} として動いていますが、すでに別の権限で動いているサクラエディタ (タスクトレイの常駐を含む) "
+              "があり、話ができません。次のどちらかで試してください:\n"
+              "      a) サクラエディタをすべて閉じる (タスクトレイのサクラエディタも右クリック → 終了) → もう一度実行\n"
+              "      b) サクラエディタと同じ権限の PowerShell から実行する (常駐が管理者でないなら、管理者でない PowerShell)")
+    print("   メッセージボックスは OK で閉じてください")
+    return True
 
 
 def is_foreground(hwnd) -> bool:
@@ -132,7 +191,7 @@ def escape(text: str) -> str:
 
 
 def sakura_windows() -> set[int]:
-    return {h for h, _t, proc in list_windows() if proc.lower() == "sakura.exe"}
+    return {h for h, _t, proc in list_windows() if proc.lower() == "sakura.exe" and _class(h) != "#32770"}
 
 
 def find_exe(given: str | None) -> str:
@@ -144,6 +203,16 @@ def find_exe(given: str | None) -> str:
 
 def keyboard_layout() -> str:
     return "jp" if ctypes.windll.user32.GetKeyboardType(0) == 7 else "us"  # 7 = 日本語キーボード
+
+
+def clear_clipboard() -> None:
+    import tkinter
+
+    root = tkinter.Tk()
+    root.withdraw()
+    root.clipboard_clear()
+    root.update()
+    root.destroy()
 
 
 def read_clipboard() -> str:
@@ -173,6 +242,7 @@ def main():
     a = ap.parse_args()
     if not IS_WINDOWS:
         raise SystemExit("Windows で動かしてください")
+    print(f"0) この試験は{'管理者として' if is_admin() else '管理者でなく'}動いています")
 
     from akm.virtual_hid import VirtualHid
 
@@ -190,7 +260,9 @@ def main():
         raise SystemExit("   新しいウィンドウが見つかりません (10 秒待ちました)")
     title = next((t for h, t, _p in list_windows() if h == hwnd), "")
     print(f"   ウィンドウ {hwnd:#x} '{title}'")
-    time.sleep(0.5)  # 立ち上がりきるのを待つ
+    time.sleep(1.0)  # 立ち上がりきるのを待つ (エラーのメッセージボックスが出るならこの間に出る)
+    if check_dialogs("起動したとき"):
+        return 1
 
     print("2) 手前に出して IME を OFF にします")
     if not bring_to_front(hwnd, 1.0):
@@ -224,7 +296,20 @@ def main():
     print(f"   {el:.2f} 秒 ({n_chars / el:.0f} 文字/秒)")
 
     print("4) Ctrl+A → Ctrl+C で読み戻して比べます")
-    hid.run("k:ctrl+a;k:ctrl+c;w:200")
+    if check_dialogs("打ち終わったとき"):
+        return 1
+    clear_clipboard()  # 前の中身を読み違えないように
+    try:
+        hid.run("k:ctrl+a;w:300")
+        if check_dialogs("すべて選択したとき"):
+            return 1
+        hid.run("k:ctrl+c;w:300")
+    except InterruptedError as e:
+        print(f"   読み戻しの途中でサクラエディタが前面でなくなりました ({e})")
+        check_dialogs("読み戻しのとき")
+        return 1
+    if check_dialogs("コピーしたとき"):
+        return 1
     got = read_clipboard().replace("\r\n", "\n").rstrip("\n").split("\n")
     ok = got == LINES
     for i, want in enumerate(LINES):
