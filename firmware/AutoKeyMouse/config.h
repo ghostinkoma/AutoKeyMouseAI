@@ -6,7 +6,16 @@
 // ---- デバイス名 -----------------------------------------------------------
 #define DEVICE_NAME      "AutoKeyMouse"     // BLE 表示名 / mDNS 名 (autokeymouse.local)
 // ファームウェアの版 (/status と起動ログに出る。PC 側で書き込み済みか確認する)
-#define FW_VERSION "frame-stream-30"
+// 画像転送 (液晶ミラー) だけのビルド: platformio.ini の -e esp32_mirror が -DAKM_MIRROR_ONLY=1 を付ける。
+// BLE (キーボード・マウス) を組み込まないので、Wi-Fi が電波を独占でき (ミラーが約 3 倍速い)、メモリも空く
+#ifndef AKM_MIRROR_ONLY
+#define AKM_MIRROR_ONLY 0
+#endif
+#if AKM_MIRROR_ONLY
+#define FW_VERSION "frame-stream-31-mirror"
+#else
+#define FW_VERSION "frame-stream-31"
+#endif
 #define BLE_MANUFACTURER "ghostinkoma"
 
 // ---- Wi-Fi SoftAP ---------------------------------------------------------

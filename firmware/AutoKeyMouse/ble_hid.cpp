@@ -1,8 +1,10 @@
-#include <Preferences.h>
 #include "ble_hid.h"
 
 #include "config.h"
 
+#if !AKM_MIRROR_ONLY
+
+#include <Preferences.h>
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
@@ -369,3 +371,40 @@ void releaseAll() {
 }
 
 }  // namespace hid
+
+#else  // AKM_MIRROR_ONLY: 画像転送 (液晶ミラー) だけのビルド。BLE (NimBLE) を組み込まない
+
+#include <Arduino.h>
+
+namespace hid {
+void begin(const char*, const char*) {
+  Serial.println("[BLE] not built in (mirror-only firmware). keyboard / mouse not available");
+}
+bool connected() { return false; }
+void setConnInterval(uint16_t, uint16_t, int) {}
+float connIntervalMs() { return 0; }
+uint16_t connLatency() { return 0; }
+void shutdown() {}
+bool isOff() { return true; }
+bool enabledSetting() { return false; }
+void setEnabled(bool) { Serial.println("[BLE] not built in (mirror-only firmware)"); }
+uint32_t connectedPeers() { return 0; }
+bool advertising() { return false; }
+uint32_t sendRetries() { return 0; }
+uint32_t droppedReports() { return 0; }
+void loop() {}
+void clearBonds() {}
+void keyDown(uint8_t) {}
+void keyUp(uint8_t) {}
+void modifiersDown(uint8_t) {}
+void modifiersUp(uint8_t) {}
+void releaseKeys() {}
+void buttonsDown(uint8_t) {}
+void buttonsUp(uint8_t) {}
+void moveRelStep(int8_t, int8_t) {}
+void wheelStep(int8_t) {}
+void moveAbs(uint16_t, uint16_t) {}
+void releaseAll() {}
+}  // namespace hid
+
+#endif
