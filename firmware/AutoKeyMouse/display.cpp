@@ -200,7 +200,7 @@ void dmaFlush() {
 }
 
 // 8 x rows のブロックを帯に足す (画素はホストのバイト順。液晶は上位バイトが先なので入れ替えて置く)
-void dmaBlock(int x, int y, int rows, const uint16_t* px) {
+IRAM_ATTR void dmaBlock(int x, int y, int rows, const uint16_t* px) {
   if (gRunX >= 0 && (y != gRunY || x != gRunX + gRunW || rows != gRunRows)) dmaFlush();
   if (gRunX < 0) {
     gRunX = x;

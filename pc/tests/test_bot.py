@@ -2956,3 +2956,23 @@ def test_home_return_interval_in_minutes():
     assert Settings.from_props({"interval_min": "999"}).interval_s == 240 * 60  # 最大 240 分
     assert Settings.from_props({"interval_min": "0"}).interval_s == 60          # 最小 1 分
     assert Settings.from_props({"interval_s": "300"}).interval_s == 300          # 前の版の設定 (秒)
+
+
+def test_badcodec_fast_rle_matches_reference():
+    """ESP32 の RLE_BLOCK_4/8 の高速版 (bad_decode.cpp) が元の 1 画素ずつの処理と同じ 8x8 を出す (間引き版)。
+    全部の組み合わせは  g++ -O2 tests/rle_equiv_test.cpp ../firmware/AutoKeyMouse/bad_decode.cpp && ./a.out"""
+    import shutil
+    import subprocess
+
+    gxx = shutil.which("g++")
+    if gxx is None:
+        pytest.skip("g++ が無い")
+    exe = PC / "tests" / "_rle_equiv_test"
+    fw = PC.parent / "firmware" / "AutoKeyMouse"
+    subprocess.run([gxx, "-std=c++17", "-O2", "-o", str(exe), str(PC / "tests" / "rle_equiv_test.cpp"),
+                    str(fw / "bad_decode.cpp")], check=True)
+    try:
+        out = subprocess.run([str(exe), "quick"], capture_output=True, text=True)
+        assert out.returncode == 0 and out.stdout.strip() == "ok", out.stdout
+    finally:
+        exe.unlink(missing_ok=True)

@@ -124,55 +124,76 @@ BAD_STATIC_INLINE uint16_t blk_row(const bad_ctx_t *ctx, uint8_t bx, uint8_t by,
  * p_idx bits: bit2=scan_dir  bit1=start_y  bit0=start_x
  * ============================================================ */
 
+/* [AutoKeyMouse 高速化] 64 画素を 1 つずつ歩く代わりに、ランをビットの範囲としてまとめて置き (走査順の 64 ビット)、
+ * 最後に走査の向きに合わせて行の左右反転・縦横の入れ替え (8x8 の転置) をする。結果は元の 1 画素ずつの処理と
+ * 同じ (長さ 0 のラン・ランを使い切った後の扱いも含めて。pc/tests/rle_equiv_test.cpp で全パターンと照合)。 */
+BAD_STATIC_INLINE uint8_t rev8(uint8_t b)
+{
+    b = (uint8_t)(((b & 0xF0U) >> 4U) | ((b & 0x0FU) << 4U));
+    b = (uint8_t)(((b & 0xCCU) >> 2U) | ((b & 0x33U) << 2U));
+    b = (uint8_t)(((b & 0xAAU) >> 1U) | ((b & 0x55U) << 1U));
+    return b;
+}
+
+/* 8x8 のビット行列 (バイト i = 行 i、ビット j = 列 j) を転置する */
+BAD_STATIC_INLINE uint64_t transpose8(uint64_t x)
+{
+    uint64_t t;
+    t = (x ^ (x >> 7U)) & 0x00AA00AA00AA00AAULL;  x = x ^ t ^ (t << 7U);
+    t = (x ^ (x >> 14U)) & 0x0000CCCC0000CCCCULL; x = x ^ t ^ (t << 14U);
+    t = (x ^ (x >> 28U)) & 0x00000000F0F0F0F0ULL; x = x ^ t ^ (t << 28U);
+    return x;
+}
+
 BAD_HOT static void apply_rle_runs(bad_ctx_t *ctx,
                             uint8_t bx, uint8_t by,
                             uint8_t p_idx, uint8_t start_color,
                             const uint8_t *runs, uint8_t n_runs)
 {
     uint8_t scan_dir = (p_idx >> 2U) & 1U;
-    uint8_t sx       = (p_idx & 1U) ? 7U : 0U;
-    uint8_t sy       = (p_idx & 2U) ? 7U : 0U;
-    int8_t  dx       = (p_idx & 1U) ? -1 : 1;
-    int8_t  dy       = (p_idx & 2U) ? -1 : 1;
+    uint8_t flip_x   = (p_idx & 1U);   /* 右から左へ */
+    uint8_t flip_y   = (p_idx & 2U);   /* 下から上へ */
 
     uint8_t color   = start_color;
     uint8_t ri      = 0U;
     uint8_t remain  = (n_runs > 0U) ? runs[0] : 0U;
-
-    /* [AutoKeyMouse 修正] 長さ 0 のランを飛ばす。RLE_BLOCK_8 は開始色が固定なので、
-     * 先頭画素が開始色と違うと runs[0]=0 になる (Codec.py のエンコーダがそう出力する)。
-     * 元の実装では 0 のランでも 1 画素描いてしまい、ブロックが 1 画素ずれていた。 */
+    /* [AutoKeyMouse 修正] 先頭の長さ 0 のランを飛ばす (元の 1 画素ずつの処理と同じ) */
     while (remain == 0U && ri + 1U < n_runs) {
         color ^= 1U;
         ri++;
         remain = runs[ri];
     }
 
-    uint8_t rows[BAD_BLOCK_SIZE] = {0U,0U,0U,0U,0U,0U,0U,0U};
-    uint8_t outer;
-    for (outer = 0U; outer < BAD_BLOCK_SIZE; outer++) {
-        uint8_t inner;
-        for (inner = 0U; inner < BAD_BLOCK_SIZE; inner++) {
-            uint8_t px, py;
-            if (scan_dir == 0U) {
-                py = (uint8_t)(sy + (int8_t)outer * dy);
-                px = (uint8_t)(sx + (int8_t)inner * dx);
-            } else {
-                px = (uint8_t)(sx + (int8_t)outer * dx);
-                py = (uint8_t)(sy + (int8_t)inner * dy);
-            }
-            if (color) rows[py] |= (uint8_t)(1U << px);
-
-            if (remain > 0U) remain--;
-            if (remain == 0U) {
+    /* 走査順 (p = 0..63) の色。元の処理と同じく、長さ 0 のランは 1 画素になり、
+     * ランを使い切った後は 1 画素ごとに色が入れ替わる */
+    uint64_t m = 0U;
+    uint8_t p = 0U;
+    for (;;) {
+        uint8_t len = remain ? remain : 1U;
+        if (len > 64U - p) len = (uint8_t)(64U - p);
+        if (color) m |= (len >= 64U ? ~0ULL : ((1ULL << len) - 1ULL)) << p;
+        p = (uint8_t)(p + len);
+        if (p >= 64U) break;
+        color ^= 1U;
+        ri++;
+        if (ri < n_runs) {
+            remain = runs[ri];
+        } else {
+            for (; p < 64U; p++) {
+                if (color) m |= 1ULL << p;
                 color ^= 1U;
-                ri++;
-                if (ri < n_runs) remain = runs[ri];
             }
+            break;
         }
     }
-    for (outer = 0U; outer < BAD_BLOCK_SIZE; outer++)
-        ctx->gram[blk_row(ctx, bx, by, outer)] = rows[outer];
+    if (scan_dir) m = transpose8(m);  /* 縦に走査: 外側 = 列、内側 = 行 */
+
+    uint8_t o;
+    for (o = 0U; o < BAD_BLOCK_SIZE; o++) {
+        uint8_t b = (uint8_t)(m >> (8U * o));
+        uint8_t py = flip_y ? (uint8_t)(7U - o) : o;
+        ctx->gram[blk_row(ctx, bx, by, py)] = flip_x ? rev8(b) : b;
+    }
 }
 
 /* ============================================================

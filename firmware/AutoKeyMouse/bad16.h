@@ -94,20 +94,22 @@ inline void makeHeader() {
 
 namespace detail {
 // 1 バイト (8 画素ぶんの 1 ビット面) → 8 バイト (各画素 0/1, LSB = 左)。2KB の定数表 (ESP32 ではフラッシュに置かれる)
-struct Spread {
-  uint64_t t[256];
-  constexpr Spread() : t() {
+// 1 バイトの 8 ビットを 8 バイトに広げる表 (bit k → バイト k の bit 0)。2KB。
+// const にすると ESP32 ではフラッシュに置かれ、読むたびに Wi-Fi の処理とキャッシュを取り合うので、
+// 内部 RAM に置いて最初の 1 回だけ作る
+inline const uint64_t* spread() {
+  static uint64_t t[256];
+  static bool done = false;
+  if (!done) {
     for (int v = 0; v < 256; v++) {
       uint64_t x = 0;
       for (int k = 0; k < 8; k++)
         if (v >> k & 1) x |= (uint64_t)1 << (8 * k);
       t[v] = x;
     }
+    done = true;
   }
-};
-inline const uint64_t* spread() {
-  static constexpr Spread s;
-  return s.t;
+  return t;
 }
 }  // namespace detail
 

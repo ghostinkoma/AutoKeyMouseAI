@@ -142,7 +142,8 @@ String uploadEnd() {
   return "";
 }
 
-void feedBlock(int x, int y, int w, int h, const uint16_t* px, int stride) {
+// 液晶ミラーの 1 フレームで数百回呼ばれるので IRAM に置く (フラッシュのキャッシュを Wi-Fi と取り合わない)
+IRAM_ATTR void feedBlock(int x, int y, int w, int h, const uint16_t* px, int stride) {
   if (!gGray) return;
   edge_win::feedBlock(gGray, x, y, w, h, px, stride);
   gDirty = true;
