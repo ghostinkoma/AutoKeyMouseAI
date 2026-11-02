@@ -21,6 +21,15 @@
 #include "bad_decode.h"
 #include <string.h>
 
+/* [AutoKeyMouse 高速化] 液晶ミラーで 1 フレームに数千回呼ばれる関数は ESP32 の内部 RAM (IRAM) に置く。
+ * フラッシュから実行すると Wi-Fi の処理とキャッシュを取り合って遅くなる。PC のテストでは何もしない */
+#ifdef ESP_PLATFORM
+#include <esp_attr.h>
+#define BAD_HOT IRAM_ATTR
+#else
+#define BAD_HOT
+#endif
+
 /* ============================================================
  * Internal: memset / memcpy  (no <string.h>)
  * ============================================================ */
@@ -61,7 +70,7 @@ static uint8_t bad_read1(bad_ctx_t *ctx)
     return b;
 }
 
-static uint16_t bad_readn(bad_ctx_t *ctx, uint8_t *buf, uint16_t len)
+BAD_HOT static uint16_t bad_readn(bad_ctx_t *ctx, uint8_t *buf, uint16_t len)
 {
     uint16_t n = ctx->read(ctx->stream_offset, buf, len);
     ctx->stream_offset += n;
@@ -115,7 +124,7 @@ BAD_STATIC_INLINE uint16_t blk_row(const bad_ctx_t *ctx, uint8_t bx, uint8_t by,
  * p_idx bits: bit2=scan_dir  bit1=start_y  bit0=start_x
  * ============================================================ */
 
-static void apply_rle_runs(bad_ctx_t *ctx,
+BAD_HOT static void apply_rle_runs(bad_ctx_t *ctx,
                             uint8_t bx, uint8_t by,
                             uint8_t p_idx, uint8_t start_color,
                             const uint8_t *runs, uint8_t n_runs)
@@ -186,7 +195,7 @@ static void swap_to_prev(bad_ctx_t *ctx)
  * Internal: MASTER_BLOCK decode  (SPEC.md 6-8)
  * ============================================================ */
 
-static bad_result_t decode_master_block(bad_ctx_t *ctx,
+BAD_HOT static bad_result_t decode_master_block(bad_ctx_t *ctx,
                                          uint8_t bx, uint8_t by)
 {
     uint8_t row, col, byte_buf;
@@ -204,7 +213,7 @@ static bad_result_t decode_master_block(bad_ctx_t *ctx,
  * Internal: RLE_BLOCK_4 decode  (SPEC.md 6-5)
  * ============================================================ */
 
-static bad_result_t decode_rle4(bad_ctx_t *ctx,
+BAD_HOT static bad_result_t decode_rle4(bad_ctx_t *ctx,
                                   uint8_t bx, uint8_t by,
                                   uint8_t op)
 {
@@ -228,7 +237,7 @@ static bad_result_t decode_rle4(bad_ctx_t *ctx,
  * Internal: RLE_BLOCK_8 decode  (SPEC.md 6-6)
  * ============================================================ */
 
-static bad_result_t decode_rle8(bad_ctx_t *ctx,
+BAD_HOT static bad_result_t decode_rle8(bad_ctx_t *ctx,
                                   uint8_t bx, uint8_t by,
                                   uint8_t op)
 {
@@ -581,7 +590,7 @@ static uint8_t read_frame_op(bad_ctx_t *ctx)
  * 8x8 だけの gram (width = height = 8) に、上の内部関数そのものを使って展開する
  * ============================================================ */
 
-uint8_t bad_block_abs_len(uint8_t op)
+BAD_HOT uint8_t bad_block_abs_len(uint8_t op)
 {
     if (BAD_IS_SKIP(op) || BAD_IS_INVERT(op) || BAD_IS_SHIFT(op) || BAD_IS_FOR(op)) return 0U;
     if (BAD_IS_FILL(op)) return 1U;
@@ -594,14 +603,14 @@ uint8_t bad_block_abs_len(uint8_t op)
 typedef struct { const uint8_t *p; uint8_t n; } abs_src_t;
 static abs_src_t s_abs_src;
 
-static uint16_t abs_read(bad_addr_t off, uint8_t *buf, uint16_t len)
+BAD_HOT static uint16_t abs_read(bad_addr_t off, uint8_t *buf, uint16_t len)
 {
     if (off + len > s_abs_src.n) return 0U;
     memcpy(buf, s_abs_src.p + off, len);
     return len;
 }
 
-bad_result_t bad_block_abs_rows(const uint8_t *data, uint8_t rows[8])
+BAD_HOT bad_result_t bad_block_abs_rows(const uint8_t *data, uint8_t rows[8])
 {
     uint8_t op = data[0];
     uint8_t n  = bad_block_abs_len(op);

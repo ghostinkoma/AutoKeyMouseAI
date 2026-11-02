@@ -13,7 +13,25 @@
 
 #include "bad_decode.h"
 
+#ifdef ESP_PLATFORM
+#include <esp_cpu.h>
+#define BAD16_CYCLES() ((uint32_t)esp_cpu_get_cycle_count())
+#else
+#define BAD16_CYCLES() 0U
+#endif
+
 namespace bad16 {
+
+// decodeAbs の中の時間 (CPU サイクル)。ESP32 で展開のどこが重いかを見る (PC のテストでは常に 0)
+//   parse    : 各面の命令を読んで 8x8 のビットにする (受信バッファからの読み出しを含む)
+//   assemble : 16 面のビットから RGB565 の画素を組む (Gray 符号・下位ビットの複製を含む)
+struct Prof {
+  uint32_t parse = 0, assemble = 0;
+};
+inline Prof& prof() {
+  static Prof p;
+  return p;
+}
 
 constexpr int W = 240, H = 136, ROWS = 135;
 constexpr uint16_t PLANE = W * H / 8;  // 4080
@@ -232,6 +250,7 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       continue;
     }
     uint8_t rowsAll[16][8];  // 面ごとの 8 行 (1 行 1 バイト)
+    uint32_t c0 = BAD16_CYCLES();
     bool first = true;
     for (int b = 0; b < 16; b++) {
       if (!(h.mask >> b & 1)) continue;
@@ -244,8 +263,16 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       }
       uint8_t n = bad_block_abs_len(d[0]);
       if (n == 0 || (n > 1 && !read(ctx, d + 1, n - 1))) return -1;
-      if (bad_block_abs_rows(d, rowsAll[b]) != BAD_OK) return -1;
+      // よく出る 2 つは直接 (公式の命令処理を通すと 1 面ごとに作業領域の初期化と 1 バイトずつの読み出しが入る)
+      if (BAD_IS_FILL(d[0])) {
+        memset(rowsAll[b], BAD_FILL_COLOR(d[0]) ? 0xFF : 0x00, 8);  // 全面 0 / 1
+      } else if (d[0] == BAD_OP_MASTER_BLOCK) {
+        memcpy(rowsAll[b], d + 1, 8);  // 8 行をそのまま (1 行 1 バイト, LSB = 左)
+      } else if (bad_block_abs_rows(d, rowsAll[b]) != BAD_OK) {
+        return -1;
+      }
     }
+    uint32_t c1 = BAD16_CYCLES();
     if (h.gray) {
       // Gray 符号 → 2 進: 各色の上の桁から「1 つ上の桁 (2 進に戻した後) と XOR」。面の 1 行 = 1 バイトのまま計算できる
       // (B = bit0-4, G = bit5-10, R = bit11-15。送られていない下位の面は 0 のまま)
@@ -268,17 +295,36 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       }
       present = 0xFFFF;
     }
-    // 16 面の 1 行 (各 1 バイト) から 8 画素を表引きでまとめて組む (ビットの数に関係なく一定の速さ)
+    // 16 面の 1 行 (各 1 バイト) から 8 画素を表引きでまとめて組む (ビットの数に関係なく一定の速さ)。
+    // 表は 1 バイトの 8 ビットを 8 バイトに広げたもの。32 ビットの CPU なので 64 ビットの演算は使わず、
+    // 前半 4 画素 (表の下位 32 ビット) と後半 4 画素 (上位 32 ビット) に分けて組む
     const uint64_t* sp = detail::spread();
+    uint8_t planes[16];
+    int np = 0;
+    for (int b = 0; b < 16; b++)
+      if (present >> b & 1) planes[np++] = (uint8_t)b;
     for (int y = 0; y < 8; y++) {
-      uint64_t lo = 0, hi = 0;
-      for (int b = 0; b < 8; b++)
-        if (present >> b & 1) lo |= sp[rowsAll[b][y]] << b;
-      for (int b = 8; b < 16; b++)
-        if (present >> b & 1) hi |= sp[rowsAll[b][y]] << (b - 8);
+      uint32_t lo0 = 0, lo1 = 0, hi0 = 0, hi1 = 0;  // 下位バイト (bit0-7) / 上位バイト (bit8-15) の、前半・後半
+      for (int i = 0; i < np; i++) {
+        int b = planes[i];
+        const uint32_t* w = (const uint32_t*)&sp[rowsAll[b][y]];  // [0] = 画素 0-3, [1] = 画素 4-7 (リトルエンディアン)
+        if (b < 8) {
+          lo0 |= w[0] << b;
+          lo1 |= w[1] << b;
+        } else {
+          hi0 |= w[0] << (b - 8);
+          hi1 |= w[1] << (b - 8);
+        }
+      }
       uint16_t* p = px + y * 8;
-      for (int k = 0; k < 8; k++) p[k] = (uint16_t)((lo >> (8 * k)) & 0xFF) | (uint16_t)(((hi >> (8 * k)) & 0xFF) << 8);
+      for (int k = 0; k < 4; k++) {
+        p[k] = (uint16_t)((lo0 >> (8 * k)) & 0xFF) | (uint16_t)(((hi0 >> (8 * k)) & 0xFF) << 8);
+        p[k + 4] = (uint16_t)((lo1 >> (8 * k)) & 0xFF) | (uint16_t)(((hi1 >> (8 * k)) & 0xFF) << 8);
+      }
     }
+    uint32_t c2 = BAD16_CYCLES();
+    prof().parse += c1 - c0;
+    prof().assemble += c2 - c1;
     int bx = ptr % NBX, by = ptr / NBX;
     int rows = ROWS - by * 8;
     sink(bx, by, rows > 8 ? 8 : rows, px);

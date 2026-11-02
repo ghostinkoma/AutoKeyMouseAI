@@ -7,7 +7,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
+#include <driver/gpio.h>
 #include <driver/spi_master.h>
+#include <esp_rom_gpio.h>
+#include <soc/spi_periph.h>
 
 #include "akm_tjpgd.h"
 #include "bc_decode.h"
@@ -66,6 +69,9 @@ uint32_t gSpiHz = 40000000;  // 今の液晶の SPI クロック (setSpiHz)
 // 状態画面・JPEG などを Adafruit で描くときは dmaEnd() で VSPI に戻す (TftLock が自動で行う)。
 bool gDmaOn = TFT_DMA;          // 使うか (シリアルの tft dma on / off)
 bool gDmaActive = false;        // 今 HSPI につなぎ替えてある
+// HSPI のドライバー (DMA の記述子など) は最初に 1 回だけ用意して、使い終わっても返さない。
+// 毎回用意・解放するとヒープが細切れになり、Wi-Fi の受信に使える大きな塊が無くなる
+bool gDmaReady = false;
 spi_device_handle_t gDmaDev = nullptr;
 uint32_t gDmaHz = 0;
 bool gDmaPending = false;       // 送信中の DMA がある
@@ -103,9 +109,44 @@ void dmaCmd(uint8_t c, uint16_t a, uint16_t b) {
   dmaSend(d, 4);
 }
 
+// HSPI の液晶用の設定 (速さ) を作る。80MHz を受け付けなければ 40MHz で
+esp_err_t dmaAddDevice() {
+  spi_device_interface_config_t dc = {};
+  dc.mode = 3;
+  dc.spics_io_num = -1;  // CS は GPIO で持つ
+  dc.queue_size = 2;
+  dc.flags = SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_NO_DUMMY;
+  dc.clock_speed_hz = (int)gSpiHz;
+  esp_err_t e = spi_bus_add_device(SPI2_HOST, &dc, &gDmaDev);
+  if (e != ESP_OK && gSpiHz > 40000000) {
+    dc.clock_speed_hz = 40000000;
+    e = spi_bus_add_device(SPI2_HOST, &dc, &gDmaDev);
+  }
+  gDmaHz = dc.clock_speed_hz;
+  return e;
+}
+
+// SCLK / MOSI を HSPI の信号につなぐ (2 回目からはドライバーを作り直さず、ピンのつなぎ先だけ変える)
+void dmaRoutePins() {
+  const int pins[2] = {TFT_PIN_SCLK, TFT_PIN_MOSI};
+  const uint32_t sigs[2] = {spi_periph_signal[SPI2_HOST].spiclk_out, spi_periph_signal[SPI2_HOST].spid_out};
+  for (int i = 0; i < 2; i++) {
+    esp_rom_gpio_pad_select_gpio(pins[i]);
+    gpio_set_direction((gpio_num_t)pins[i], GPIO_MODE_OUTPUT);
+    esp_rom_gpio_connect_out_signal(pins[i], sigs[i], false, false);
+  }
+}
+
 bool dmaBegin() {
   if (gDmaActive) return true;
   SPI.end();  // Arduino の SPI からピンを外す
+  if (gDmaReady) {
+    dmaRoutePins();
+    digitalWrite(TFT_PIN_CS, LOW);
+    gDmaActive = true;
+    gRunX = -1;
+    return true;
+  }
   spi_bus_config_t bc = {};
   bc.mosi_io_num = TFT_PIN_MOSI;
   bc.miso_io_num = -1;
@@ -115,18 +156,7 @@ bool dmaBegin() {
   bc.max_transfer_sz = kStrip * 2;
   esp_err_t e = spi_bus_initialize(SPI2_HOST, &bc, SPI_DMA_CH_AUTO);
   if (e == ESP_OK) {
-    spi_device_interface_config_t dc = {};
-    dc.mode = 3;
-    dc.spics_io_num = -1;  // CS は GPIO で持つ
-    dc.queue_size = 2;
-    dc.flags = SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_NO_DUMMY;
-    dc.clock_speed_hz = (int)gSpiHz;
-    e = spi_bus_add_device(SPI2_HOST, &dc, &gDmaDev);
-    if (e != ESP_OK && gSpiHz > 40000000) {  // 80MHz を受け付けなければ 40MHz で
-      dc.clock_speed_hz = 40000000;
-      e = spi_bus_add_device(SPI2_HOST, &dc, &gDmaDev);
-    }
-    gDmaHz = dc.clock_speed_hz;
+    e = dmaAddDevice();
     if (e != ESP_OK) spi_bus_free(SPI2_HOST);
   }
   if (e != ESP_OK) {
@@ -135,11 +165,9 @@ bool dmaBegin() {
     SPI.begin(TFT_PIN_SCLK, -1, TFT_PIN_MOSI, TFT_PIN_CS);
     return false;
   }
-  static bool once = false;
-  if (!once) {
-    once = true;
-    Serial.printf("[TFT] DMA drawing on (HSPI %lu Hz)\n", (unsigned long)gDmaHz);
-  }
+  gDmaReady = true;
+  Serial.printf("[TFT] DMA drawing on (HSPI %lu Hz, free heap %u)\n", (unsigned long)gDmaHz,
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
   digitalWrite(TFT_PIN_CS, LOW);
   gDmaActive = true;
   gRunX = -1;
@@ -191,11 +219,9 @@ void dmaEnd() {
   dmaFlush();
   dmaWait();
   digitalWrite(TFT_PIN_CS, HIGH);
-  spi_bus_remove_device(gDmaDev);
-  spi_bus_free(SPI2_HOST);
-  gDmaDev = nullptr;
   gDmaActive = false;
-  SPI.begin(TFT_PIN_SCLK, -1, TFT_PIN_MOSI, TFT_PIN_CS);  // Adafruit (Arduino の SPI) に戻す
+  // HSPI のドライバーはそのまま (次に使うときはピンをつなぎ替えるだけ)。ピンは Arduino の SPI に戻す
+  SPI.begin(TFT_PIN_SCLK, -1, TFT_PIN_MOSI, TFT_PIN_CS);
 }
 
 // 液晶の内蔵フォントは ASCII のみなので、それ以外は '?' にする
@@ -253,9 +279,16 @@ void setDma(bool on) {
 bool dmaOn() { return gDmaOn; }
 
 void setSpiHz(uint32_t hz) {
-  TftLock lock;  // DMA をやめるので、次に始めるときは新しい速さで
+  TftLock lock;  // DMA をやめてから
   gTft.setSPISpeed(hz);
   gSpiHz = hz;
+  if (gDmaReady) {  // HSPI の速さも変える (液晶の設定だけ作り直す。滅多に無いので細切れは気にしない)
+    spi_bus_remove_device(gDmaDev);
+    if (dmaAddDevice() != ESP_OK) {
+      spi_bus_free(SPI2_HOST);
+      gDmaReady = false;
+    }
+  }
   gNeedKey = true;  // 全体を描き直してもらう (乱れていてもすぐ分かるように)
   Serial.printf("[TFT] SPI clock %lu Hz\n", (unsigned long)hz);
 }
@@ -304,6 +337,8 @@ size_t jpegIn(JDEC* jd, uint8_t* buf, size_t n) {
 struct Stats {
   uint32_t frames = 0;
   uint64_t recvUs = 0, decodeUs = 0, drawUs = 0, bytes = 0;
+  // 展開の内訳 (BadCodec 16bit ver 3)。命令の読み取り / 画素の組み立て / 窓認識への受け渡し
+  uint64_t parseUs = 0, asmUs = 0, edgeUs = 0;
 };
 Stats gCur, gLast;
 uint32_t gWinStart = 0, gLastWinMs = 0;
@@ -514,7 +549,8 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
   if (h.abs) {
     // ver 3: 前フレーム不要。変わったブロックだけ液晶へ (面のメモリは使わないので返しておく)
     if (gB16.ready || gB16HasBuf) b16Free();
-    uint32_t drawUs = 0;
+    uint32_t drawUs = 0, edgeUs = 0;
+    bad16::Prof p0 = bad16::prof();
     int n;
     // DMA: 共用バッファを帯に使うので借りる (JPEG の受信中などで借りられなければ今まで通り)
     bool dma = gDmaOn && acquireFrameBuffer(0) != nullptr;
@@ -526,8 +562,10 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
       n = bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) {
         uint32_t d0 = micros();
         edge_win::feedBlock(bx * 8, by * 8, 8, rows, px, 8);
+        uint32_t d1 = micros();
         dmaBlock(bx * 8, by * 8, rows, px);  // 帯がつながらなくなったら前の帯を DMA で送る
-        drawUs += micros() - d0;
+        edgeUs += d1 - d0;
+        drawUs += micros() - d1;
       });
       uint32_t d0 = micros();
       dmaFlush();
@@ -549,11 +587,17 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
     uint32_t waited = recvUs ? *recvUs - recv0 : 0;
     uint32_t total = micros() - t0;
     rollStats();
+    const uint32_t mhz = getCpuFrequencyMhz();
     gCur.frames++;
     gCur.bytes += len;
     gCur.recvUs += waited;
     gCur.drawUs += drawUs;
     gCur.decodeUs += total > waited + drawUs ? total - waited - drawUs : 0;
+    // 命令の読み取りの中には受信待ち (データがまだ来ていない) も入っているので、その分を引く
+    uint32_t parseUs = (bad16::prof().parse - p0.parse) / mhz;
+    gCur.parseUs += parseUs > waited ? parseUs - waited : 0;
+    gCur.asmUs += (bad16::prof().assemble - p0.assemble) / mhz;
+    gCur.edgeUs += edgeUs;
     if (n < 0) {
       gNeedKey = true;
       return 0;
@@ -623,7 +667,8 @@ void noteReceive(uint32_t us, size_t bytes) {
 }
 
 namespace {
-void statsValues(float& fps, float& recv, float& dec, float& draw, float& cpu, float& kbps) {
+void statsValues(float& fps, float& recv, float& dec, float& draw, float& cpu, float& kbps, float* parse = nullptr,
+                 float* assemble = nullptr, float* edge = nullptr) {
   rollStats();
   const Stats& s = gLast;
   uint32_t win = gLastWinMs ? gLastWinMs : 1;
@@ -634,17 +679,20 @@ void statsValues(float& fps, float& recv, float& dec, float& draw, float& cpu, f
   draw = s.drawUs / 1000.0f / n;
   cpu = (s.decodeUs + s.drawUs) / 10.0f / win;  // % (展開 + 描画が 1 コアの時間に占める割合)
   kbps = s.bytes * 8.0f / win;
+  if (parse) *parse = s.parseUs / 1000.0f / n;
+  if (assemble) *assemble = s.asmUs / 1000.0f / n;
+  if (edge) *edge = s.edgeUs / 1000.0f / n;
 }
 }  // namespace
 
 String frameStatsJson() {
-  float fps, recv, dec, draw, cpu, kbps;
-  statsValues(fps, recv, dec, draw, cpu, kbps);
-  char b[200];
+  float fps, recv, dec, draw, cpu, kbps, parse, assemble, edge;
+  statsValues(fps, recv, dec, draw, cpu, kbps, &parse, &assemble, &edge);
+  char b[300];
   snprintf(b, sizeof(b),
            "{\"fps\":%.1f,\"recv_ms\":%.1f,\"decode_ms\":%.1f,\"draw_ms\":%.1f,\"cpu_pct\":%.1f,\"kbps\":%.0f,"
-           "\"spi_mhz\":%.1f,\"dma\":%s}",
-           fps, recv, dec, draw, cpu, kbps, gSpiHz / 1e6, gDmaOn ? "true" : "false");
+           "\"spi_mhz\":%.1f,\"dma\":%s,\"parse_ms\":%.1f,\"asm_ms\":%.1f,\"edge_ms\":%.1f}",
+           fps, recv, dec, draw, cpu, kbps, gSpiHz / 1e6, gDmaOn ? "true" : "false", parse, assemble, edge);
   return String(b);
 }
 
