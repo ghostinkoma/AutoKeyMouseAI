@@ -155,6 +155,14 @@ def foreground_hwnd(windows: list[GameWindow]) -> int | None:
 # ---------------------------------------------------------------------------
 # リボン (Excel のようなタブ + グループ)
 # ---------------------------------------------------------------------------
+def window_title(hwnd) -> str:
+    if not IS_WINDOWS or not hwnd:
+        return ""
+    buf = ctypes.create_unicode_buffer(256)
+    _user32.GetWindowTextW(hwnd, buf, 256)
+    return buf.value
+
+
 def is_admin() -> bool:
     if not IS_WINDOWS:
         return True
@@ -402,6 +410,8 @@ class GateApp:
         self.town_button.grid(row=0, column=2, rowspan=2, sticky="w", padx=(6, 0))
 
         # 試験: 往復テスト (上へ N マス → Home → 待つ → 元 → Home → 待つ → 下へ … の繰り返し)
+        # (ホーム タブは横に収まらないので、別のタブにする)
+        t = rb.tab("試験")
         g = rb.group(t, "試験 (往復)")
         rb.button(g, "往復テスト\n開始", row=0, column=0, rowspan=2, command=self.start_shuttle)
         rb.button(g, "停止", row=0, column=1, command=self.stop_shuttle)
@@ -789,12 +799,14 @@ class GateApp:
                 self.snap = None
                 self.draw_map()
 
-    def arm(self):
+    def arm(self, activate: bool = True):
         if not self.target():
             self.log("WARN", "送信先のウィンドウを一覧から選んでください")
             return
         self.armed.set(True)
         self._armed = True
+        if activate and IS_WINDOWS:  # 送信先の窓 (ミラーで映している窓) を前面にする
+            threading.Thread(target=self._activate_and_report, daemon=True).start()
         self.log("GATE", f"ARM: {self.target_name} が前面にあるときだけキー操作を通します")
 
     def disarm(self):
@@ -845,6 +857,27 @@ class GateApp:
     def user_busy_ms(self) -> float:
         """人がこの PC を操作していれば、あと何 ms で「止まった」とみなすか (0 = 操作していない)"""
         return self.vhid.user.busy_left_ms() if self.vhid is not None else 0.0
+
+    def _activate_and_report(self):
+        t = self.target()
+        if t is None:
+            return
+        why = self.input_blocked_reason(t.pid)
+        if why:
+            self.log_threadsafe("ERR", why)
+            return
+        self.get_hid()
+        if self._hid_allowed():
+            self.log_threadsafe("INFO", f"{t.name} の窓 (hwnd {t.hwnd:#010x}) はもう前面です")
+            return
+        pt = title_bar_point(t.hwnd)
+        self.log_threadsafe("INFO", f"{t.name} の窓 (hwnd {t.hwnd:#010x}) を前面にします: " +
+                            (f"タイトルバー {pt} をクリック" if pt else "タイトルバーが見えないので Windows の機能で"))
+        ok = self.activate_target()
+        fg = _user32.GetForegroundWindow()
+        self.log_threadsafe("INFO" if ok else "WARN",
+                            f"{t.name} が前面になりました" if ok else
+                            f"{t.name} を前面にできませんでした (今の前面 hwnd {fg or 0:#010x} '{window_title(fg)}')")
 
     def restart_as_admin(self):
         if not IS_WINDOWS:
@@ -955,7 +988,7 @@ class GateApp:
             self.log_threadsafe("ERR", why)
             return None
         if not self._armed:
-            self.root.after(0, self.arm)
+            self.root.after(0, lambda: self.arm(activate=False))
             for _ in range(20):
                 if self._armed:
                     break
