@@ -112,6 +112,13 @@ if IS_WINDOWS:
     _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     _user32.IsWindowVisible.argtypes = [wintypes.HWND]
     _user32.GetForegroundWindow.restype = wintypes.HWND
+    _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    _user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    _user32.WindowFromPoint.argtypes = [wintypes.POINT]
+    _user32.WindowFromPoint.restype = wintypes.HWND
+    _user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    _user32.GetAncestor.restype = wintypes.HWND
+    _user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
 
 
 def list_game_windows() -> list[GameWindow]:
@@ -147,6 +154,29 @@ def foreground_hwnd(windows: list[GameWindow]) -> int | None:
 # ---------------------------------------------------------------------------
 # リボン (Excel のようなタブ + グループ)
 # ---------------------------------------------------------------------------
+def title_bar_point(hwnd: int) -> tuple[int, int] | None:
+    """ウィンドウのタイトルバーで、ほかの窓に隠れていない点 (画面の画素)。無ければ None
+    (タイトルバーが無い窓・全部隠れている・別の仮想デスクトップにある)。ゲームの中 (クライアント) はクリックしない"""
+    if not IS_WINDOWS:
+        return None
+    wr = wintypes.RECT()
+    _user32.GetWindowRect(hwnd, ctypes.byref(wr))
+    pt = wintypes.POINT(0, 0)
+    _user32.ClientToScreen(hwnd, ctypes.byref(pt))
+    cap_top, cap_bottom = wr.top + 4, pt.y - 4  # 外枠とクライアントの間 = タイトルバー
+    if cap_bottom - cap_top < 8:
+        return None
+    y = (cap_top + cap_bottom) // 2
+    left, right = wr.left + 40, wr.right - 160  # 左のアイコン (メニュー) と右のボタン (最小化・閉じる) を避ける
+    for i in range(1, 12):
+        x = left + (right - left) * i // 12
+        p = wintypes.POINT(x, y)
+        under = _user32.WindowFromPoint(p)
+        if under and _user32.GetAncestor(under, 2) == hwnd:  # GA_ROOT
+            return x, y
+    return None
+
+
 class Ribbon(ttk.Notebook):
     def __init__(self, master, on_action):
         super().__init__(master)
@@ -191,12 +221,16 @@ class GateApp:
         self.target_name: str | None = None
         self.target_hwnd: int | None = None  # 送信先のウィンドウ (キャラクターを変えても同じ)
         self.armed = tk.BooleanVar(value=False)
-        self.bring_front = tk.BooleanVar(value=False)
+        self.bring_front = tk.BooleanVar(value=True)  # 送信先が前面でなければ、仲介アプリが前面に出す
         self.hid_out = tk.StringVar(value="virtual")   # キー・マウスの出口: virtual (この PC) / esp32
         self.shuttle_tiles = tk.IntVar(value=5)
         self.shuttle_wait = tk.IntVar(value=5)
         self._armed = False        # 別のスレッド (往復テスト) から読む用 (tk の変数はスレッドをまたいで読まない)
-        self._bring_front = False
+        self._bring_front = True
+        self.shuttle_map = tk.StringVar(value="Crywolf")   # 往復テストのマップ名 (OCR のマップ名は使わない)
+        self.mouse_mode = tk.StringVar(value="abs")         # カーソルの動かし方 (akm/pointer.py)
+        self._user_paused = False
+        self._last_activate = 0.0
         self.bring_front.trace_add("write", lambda *_: setattr(self, "_bring_front", bool(self.bring_front.get())))
         self.vhid = None           # 仮想 HID (akm.virtual_hid.VirtualHid)。初めて使うときに作る
         self.shuttle = None        # 往復テスト (akm.shuttle_test.ShuttleTest)
@@ -327,6 +361,11 @@ class GateApp:
         ttk.Spinbox(g, from_=1, to=15, textvariable=self.shuttle_tiles, width=4).grid(row=0, column=3)
         ttk.Label(g, text="待つ秒").grid(row=1, column=2, sticky="e", padx=(6, 2))
         ttk.Spinbox(g, from_=1, to=120, textvariable=self.shuttle_wait, width=4).grid(row=1, column=3)
+        ttk.Label(g, text="マップ").grid(row=0, column=4, sticky="e", padx=(6, 2))
+        ttk.Entry(g, textvariable=self.shuttle_map, width=10).grid(row=0, column=5)
+        ttk.Label(g, text="マウス").grid(row=1, column=4, sticky="e", padx=(6, 2))
+        ttk.Combobox(g, textvariable=self.mouse_mode, values=["abs", "absrel", "rel"], width=8,
+                     state="readonly").grid(row=1, column=5)
 
         # ミラー: ESP32 へ送る画面
         t = rb.tab("ミラー")
@@ -754,30 +793,87 @@ class GateApp:
                              f"±{p.jitter * 1000:g} ms / 区切り {p.interval * 1000:g} ms。config.yaml の virtual_hid)")
         return self.vhid
 
-    def _hid_run(self, script: str, stopped) -> str:
-        """前面になるまで待って (「前面に出して実行する」なら出して) 送る。途中で前面が変わったら、前面に戻ってから送り直す"""
+    def user_busy_ms(self) -> float:
+        """人がこの PC を操作していれば、あと何 ms で「止まった」とみなすか (0 = 操作していない)"""
+        return self.vhid.user.busy_left_ms() if self.vhid is not None else 0.0
+
+    def activate_target(self) -> bool:
+        """送信先を前面に出す。まずキー・マウスの出口からタイトルバーをクリックし (人が操作するのと同じ)、
+        だめなら Windows の機能で出す (別の仮想デスクトップにあるときはこちら。デスクトップが切り替わる)"""
+        hwnd = self.target_hwnd
+        if not hwnd or not IS_WINDOWS:
+            return False
         from akm.screen import bring_to_front
 
+        pt = title_bar_point(hwnd)
+        if pt is not None and self.vhid is not None:
+            try:
+                b = self.vhid.backend
+                hx, hy = self._screen_to_hid(*pt)
+                b.move_abs(hx, hy)
+                time.sleep(0.05)
+                b.buttons(1)
+                time.sleep(0.06)
+                b.buttons(0)
+                self.vhid.user.note_sent()
+                for _ in range(10):
+                    time.sleep(0.05)
+                    if _user32.GetForegroundWindow() == hwnd:
+                        return True
+            except Exception as e:  # noqa: BLE001
+                self.log_threadsafe("WARN", f"タイトルバーをクリックできません: {e}")
+        return bring_to_front(hwnd, 1.0)
+
+    def _screen_to_hid(self, sx: float, sy: float) -> tuple[int, int]:
+        from akm.device import AbsMap
+        from akm.screen import primary_screen_size
+
+        amap = AbsMap.for_screen(*primary_screen_size())  # SendInput の絶対座標はプライマリモニタ全体
+        if not amap.reachable(sx, sy):
+            raise RuntimeError("ゲームの窓がプライマリモニタの外にあります (絶対座標のクリックが届きません)")
+        return amap.to_hid(sx, sy)
+
+    def _cursor(self) -> tuple[int, int]:
+        pt = wintypes.POINT()
+        _user32.GetCursorPos(ctypes.byref(pt))
+        return pt.x, pt.y
+
+    def _hid_run(self, script: str, stopped) -> str:
+        """送る。人がこの PC を操作している間は送らずに待つ (操作が user_idle_ms 止まったら続ける)。
+        送信先が前面でなければ、「前面に出して実行する」なら出してから送る。途中で止められたら送り直す"""
         hid = self.get_hid()
-        waited = False
+        waited = ""
         while True:
             if stopped() or not self._armed:
                 raise InterruptedError("stopped")
+            busy = self.user_busy_ms()
+            if busy > 0:
+                if waited != "user":
+                    waited = "user"
+                    self._user_paused = True
+                    self.log_threadsafe("GATE", f"人の操作を検知: 送るのを止めています (操作が "
+                                                f"{hid.user.idle_ms / 1000:g} 秒止まったら続けます。完全に止めるのは Pause キー)")
+                time.sleep(min(0.2, busy / 1000 + 0.01))
+                continue
+            self._user_paused = False
             if not self._hid_allowed():
-                if self._bring_front and self.target_hwnd:
-                    bring_to_front(self.target_hwnd)
-                if not self._hid_allowed():
-                    if not waited:
-                        waited = True
-                        self.log_threadsafe("GATE", "送信先が前面にないので待っています (前面にすると続けます)")
-                    time.sleep(0.2)
-                    continue
+                now = time.monotonic()
+                if self._bring_front and now - self._last_activate > 2.0:  # 前面に出すのは 2 秒に 1 回まで
+                    self._last_activate = now
+                    if self.activate_target():
+                        continue
+                if waited != "front":
+                    waited = "front"
+                    self.log_threadsafe("GATE", "送信先が前面にないので待っています (前面にすると続けます)")
+                time.sleep(0.3)
+                continue
             try:
                 return hid.run(script)
-            except InterruptedError:
+            except InterruptedError as e:
                 if stopped() or not self._armed:
                     raise
-                self.log_threadsafe("GATE", f"送っている途中で前面が変わりました。前面に戻ったら送り直します: {script}")
+                if str(e) != "user input":
+                    self.log_threadsafe("GATE", f"送っている途中で前面が変わりました。前面に戻ったら送り直します: {script}")
 
     def start_shuttle(self):
         t = self.target()
@@ -796,9 +892,9 @@ class GateApp:
         try:
             self.get_hid()
             from akm.config import PC_DIR
-            from akm.device import AbsMap
             from akm.maploc import LocationReader, make_ocr
-            from akm.screen import client_rect, primary_screen_size
+            from akm.pointer import Pointer
+            from akm.screen import client_rect
             from akm.shuttle_test import ShuttleTest
 
             lcfg = self.cfg.get("maplog") or {}
@@ -807,31 +903,31 @@ class GateApp:
             self.log("ERR", f"往復テストを始められません: {e}")
             return
         hwnd = t.hwnd
-        offset = (self.cfg.get("elf") or {}).get("character_offset", [0.0, -0.08])
-        amap = AbsMap.for_screen(*primary_screen_size())  # SendInput の絶対座標はプライマリモニタ全体
 
         def grab():
             return self.live._grab(hwnd, full=True)[0]
 
-        def client_to_hid(x, y):
+        def client_to_screen(x, y):
             r = client_rect(hwnd)
-            sx, sy = r.left + x, r.top + y
-            if not amap.reachable(sx, sy):
-                raise RuntimeError("ゲームの窓がプライマリモニタの外にあります (絶対座標のクリックが届きません)")
-            return amap.to_hid(sx, sy)
-
-        def char_pos(img):
-            h, w = img.shape[:2]
-            return w / 2 + offset[0] * h, h / 2 + offset[1] * h
+            return r.left + x, r.top + y
 
         holder = {}
-        st = ShuttleTest(lambda s: self._hid_run(s, lambda: holder["t"]._stop.is_set()), grab, reader.read_raw,
-                         client_to_hid, char_pos, log=self.log_threadsafe,
+
+        def run(script):
+            return self._hid_run(script, lambda: holder["t"]._stop.is_set())
+
+        pcfg = self.cfg.get("virtual_hid") or {}
+        ptr = Pointer(run, self._screen_to_hid, cursor=self._cursor if IS_WINDOWS else None,
+                      mode=self.mouse_mode.get(), settle_ms=int(pcfg.get("click_settle_ms", 100)),
+                      hold_ms=int(pcfg.get("click_hold_ms", 80)), log=self.log_threadsafe)
+        st = ShuttleTest(run, grab, reader.read_raw, client_to_screen, ptr, log=self.log_threadsafe,
                          calib_path=PC_DIR / "models" / "home_nav.json",
-                         tiles=int(self.shuttle_tiles.get()), wait_s=float(self.shuttle_wait.get()))
+                         tiles=int(self.shuttle_tiles.get()), wait_s=float(self.shuttle_wait.get()),
+                         map_name=self.shuttle_map.get().strip() or "Crywolf")
         holder["t"] = st
         self.shuttle = st
-        self.log("INFO", f"往復テストを始めます: {t.name}  {st.tiles} マス / {st.wait_s:g} 秒 (止めるときは「停止」か DISARM)")
+        self.log("INFO", f"往復テストを始めます: {t.name}  {st.tiles} マス / {st.wait_s:g} 秒 / マップ {st.map_name} / "
+                         f"マウス {ptr.mode} (止めるときは「停止」・DISARM・Pause キー。人が操作すると一時停止)")
         st.start()
 
     def stop_shuttle(self):
@@ -844,6 +940,10 @@ class GateApp:
     # ---- 定期処理 -----------------------------------------------------------
     def _tick_fast(self):
         """0.2 秒ごと: ゲート・ステータス・HP/MP"""
+        if IS_WINDOWS and self.armed.get() and _user32.GetAsyncKeyState(0x13) & 0x8000:  # Pause キー: 非常停止
+            self.log("GATE", "Pause キーが押されました: 止めます")
+            self.stop_shuttle()
+            self.disarm()
         fg = foreground_hwnd(self.windows)
         fg_w = next((w for w in self.windows if w.hwnd == fg), None)
         gate, color = self.gate_state()
@@ -854,8 +954,9 @@ class GateApp:
             loc = self.current_loc()
             vals = {
                 "loc": (f"{loc[0]} {loc[1]},{loc[2]}" if loc else "?", None),
-                "helper": ((f"往復: {self.shuttle.status}", "#1565c0") if self.shuttle is not None and self.shuttle.running
-                           else ("(未実装)", "#888888")),
+                "helper": ((("人の操作で一時停止" if self._user_paused else f"往復: {self.shuttle.status}"),
+                            "#e09000" if self._user_paused else "#1565c0")
+                           if self.shuttle is not None and self.shuttle.running else ("(未実装)", "#888888")),
                 "mob": ("(未実装)", "#888888"),
                 "send": (f"{snap.fps:4.1f} fps" if snap and not snap.error else "-", None),
             }

@@ -512,13 +512,71 @@ class LatencyPipe:
                 then()
 
 
+# ---------------------------------------------------------------- 人の操作の見張り --
+class UserActivity:
+    """人 (この PC のキーボード・マウス) が操作したかを見る。人が操作している間は送らないため
+    (送り続けると OS の操作ができなくなる)。
+
+    Windows の「最後に入力があった時刻」(GetLastInputInfo) は、こちらが送った入力でも更新される。
+    そこで、こちらが最後に送った時刻より margin_ms 以上あとに入力があれば、人の操作とみなす。
+    注意: ESP32 (本物の HID) から送る入力も「人の入力」と区別できないので、ESP32 のときは別の見分け方が要る。"""
+
+    def __init__(self, idle_ms: float = 3000, margin_ms: float = 60):
+        self.idle_ms = float(idle_ms)
+        self.margin_ms = float(margin_ms)
+        self._sent = 0  # こちらが最後に送った時刻 (GetTickCount)
+        self._k32 = self._u32 = None
+        if IS_WINDOWS and self.idle_ms > 0:
+            import ctypes
+            from ctypes import wintypes
+
+            class LASTINPUTINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+            self._ct, self._LII = ctypes, LASTINPUTINFO
+            self._u32 = ctypes.WinDLL("user32")
+            self._k32 = ctypes.WinDLL("kernel32")
+            self._k32.GetTickCount.restype = wintypes.DWORD
+
+    def _now(self) -> int:
+        return int(self._k32.GetTickCount())
+
+    def note_sent(self) -> None:
+        if self._k32 is not None:
+            self._sent = self._now()
+
+    def last_user_ms_ago(self) -> float | None:
+        """人が最後に操作してから何 ms か。こちらが送ったあと操作が無ければ None"""
+        if self._k32 is None:
+            return None
+        li = self._LII()
+        li.cbSize = self._ct.sizeof(li)
+        if not self._u32.GetLastInputInfo(self._ct.byref(li)):
+            return None
+        last = int(li.dwTime)
+        if ((last - self._sent) & 0xFFFFFFFF) > 0x7FFFFFFF:  # 送った時刻より前 (32 ビットの一周も考える)
+            return None
+        if ((last - self._sent) & 0xFFFFFFFF) <= self.margin_ms:
+            return None  # こちらが送った入力
+        return float((self._now() - last) & 0xFFFFFFFF)
+
+    def busy_left_ms(self) -> float:
+        """人が操作中なら、あと何 ms 待てば「操作が止まった」とみなすか (0 = 操作していない)"""
+        ago = self.last_user_ms_ago()
+        return 0.0 if ago is None or ago >= self.idle_ms else self.idle_ms - ago
+
+    def active(self) -> bool:
+        return self.busy_left_ms() > 0
+
+
 # ---------------------------------------------------------------- 実行 (macro.cpp と同じ動き) --
 class VirtualHid:
     """スクリプトを ESP32 と同じ手順で実行する。allow() が False になったら (送信先が前面でなくなった等)
     その場で止めて、押しているキー・ボタンをすべて離す (ESP32 のゲートと同じ考え方)。"""
 
     def __init__(self, backend: HidBackend | None = None, event_delay_ms: float = 10, latency_ms: float = 0,
-                 jitter_ms: float = 0, report_interval_ms: float = 0, layout: str = "jp", allow=None, seed=None):
+                 jitter_ms: float = 0, report_interval_ms: float = 0, layout: str = "jp", allow=None, seed=None,
+                 user_idle_ms: float = 0):
         if backend is None:
             backend = SendInputBackend() if IS_WINDOWS else RecordingBackend()
         self.backend = backend
@@ -526,6 +584,8 @@ class VirtualHid:
         self.layout = layout
         self.allow = allow  # () -> bool。None なら常に送る
         self.pipe = LatencyPipe(latency_ms, jitter_ms, report_interval_ms, seed)
+        # 人が操作したら止める (user_idle_ms の間、操作が無くなるまで送らない。0 = 見ない)
+        self.user = UserActivity(user_idle_ms)
         self._stop = threading.Event()
         self._lock = threading.Lock()  # 1 度に 1 つのスクリプト
         self._down: list[int] = []
@@ -543,14 +603,25 @@ class VirtualHid:
         c = cfg or {}
         return cls(backend, float(c.get("event_delay_ms", 10)), float(c.get("latency_ms", 0)),
                    float(c.get("jitter_ms", 0)), float(c.get("report_interval_ms", 0)), str(c.get("layout", "jp")),
-                   allow)
+                   allow, user_idle_ms=float(c.get("user_idle_ms", 3000)))
 
     # -- 操作の送り出し (遅れの模擬を通す)
     def _emit(self, fn, *args) -> None:
-        self.pipe.put(lambda: fn(*args))
+        def send():
+            fn(*args)
+            self.user.note_sent()
+
+        self.pipe.put(send)
 
     def _ok(self) -> bool:
-        return not self._stop.is_set() and (self.allow is None or self.allow())
+        return not self._stop.is_set() and not self.user.active() and (self.allow is None or self.allow())
+
+    def _why(self) -> str:
+        if self._stop.is_set():
+            return "stopped"
+        if self.user.active():
+            return "user input"
+        return "not allowed (gate)"
 
     def _ev(self, delay: float) -> bool:
         """1 つの操作の後の間隔。止められたら False"""
@@ -587,16 +658,16 @@ class VirtualHid:
             try:
                 for op in ops:
                     if not self._ok():
-                        raise InterruptedError("stopped" if self._stop.is_set() else "not allowed (gate)")
+                        raise InterruptedError(self._why())
                     if op.kind == "delay":
                         delay = op.a / 1000
                         continue
                     if not self._exec(op, delay):
-                        raise InterruptedError("stopped" if self._stop.is_set() else "not allowed (gate)")
+                        raise InterruptedError(self._why())
                 self.pipe.flush()
                 return "ok"
             finally:
-                if self._stop.is_set() or (self.allow is not None and not self.allow()):
+                if not self._ok():
                     self.release_all()  # 止められたら押しっぱなしを残さない (ESP32 と同じ)
 
     def _exec(self, op: Op, delay: float) -> bool:

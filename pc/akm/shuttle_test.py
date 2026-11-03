@@ -7,6 +7,10 @@
     最初に右・下へ少し歩いて調べる
   * 「上へ N マス」は、画面の真上の方向に N 歩 (斜めの 1 歩も 1 マス) 進んだマス
   * キー・マウスは run(script) で送る (ESP32 と同じマクロ書式。仮想 HID でも ESP32 でもよい)
+  * キャラクターは常にゲーム画面の真ん中。歩くときはそこから離れた所 (画面の高さの 6% 以上) をクリックする
+  * 現在地は座標だけを使う (マップ名の OCR は読み違えて、無いマップ名になることがあるため。マップ名は
+    map_name で決める)。座標の読み違い (1 回だけ大きく飛ぶ) は捨て、2 回続けて同じ所なら本当に動いたとみなす。
+    元の座標から far_tiles より離れたら (死んで飛ばされたなど) 止める
 
 画面・入力・前面の扱いは呼び出し側から関数で渡す (テストでは偽物を渡す)。
 """
@@ -18,6 +22,7 @@ import time
 from pathlib import Path
 
 from .home_return import HomeReturn, Settings
+from .maploc import Location
 
 
 class _Walker(HomeReturn):
@@ -28,38 +33,74 @@ class _Walker(HomeReturn):
 
 
 class ShuttleTest:
-    def __init__(self, run, grab, read_loc, client_to_hid, char_pos, log=print, calib_path: Path | None = None,
-                 tiles: int = 5, wait_s: float = 5.0, helper_key: str = "home", max_walk_s: float = 20.0,
-                 arrive_tiles: float = 0.5):
+    def __init__(self, run, grab, read_loc, client_to_screen, pointer, log=print, calib_path: Path | None = None,
+                 tiles: int = 5, wait_s: float = 5.0, helper_key: str = "home", max_walk_s: float = 30.0,
+                 arrive_tiles: float = 0.5, map_name: str = "Crywolf", max_jump: int = 15, far_tiles: int = 40):
         """run(script): マクロを送る (前面でなければ待つ・止められたら InterruptedError)
-        grab(): ゲーム画面 (原寸)。read_loc(img): 現在地 (map, x, y を持つもの) か None
-        client_to_hid(x, y): ゲーム画面の座標 → HID の絶対座標 (0..32767)
-        char_pos(img): キャラクターの画面上の位置"""
-        self._run, self.grab, self.read_loc, self.log = run, grab, read_loc, log
-        self.client_to_hid = client_to_hid
+        grab(): ゲーム画面 (原寸)。read_loc(img): 現在地 (x, y を持つもの。マップ名は使わない) か None
+        client_to_screen(x, y): ゲーム画面の座標 → 画面の画素
+        pointer: カーソルを動かしてクリックするもの (akm.pointer.Pointer。run は同じものを使う)"""
+        self._run, self.grab, self._read_loc, self.log = run, grab, read_loc, log
+        self.client_to_screen, self.pointer = client_to_screen, pointer
+        self.map_name, self.max_jump, self.far_tiles = map_name, int(max_jump), int(far_tiles)
+        self._last = None      # 最後に採用した座標
+        self._pending = None   # 大きく飛んだ読み (もう 1 回同じ所なら採用)
         self.tiles, self.wait_s, self.helper_key = int(tiles), float(wait_s), helper_key
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.origin = None
         self.status = "停止中"
         self.laps = 0
-        self.walker = _Walker(self.run, grab, read_loc, lambda img: None, lambda: None, self._click_at, char_pos,
-                              calib_path=calib_path, log=self._log_walker, sleep=self._sleep)
+        self.walker = _Walker(self.run, grab, self.read_loc, lambda img: None, lambda: None, self._click_at,
+                              self.char_pos, calib_path=calib_path, log=self._log_walker, sleep=self._sleep)
         self.walker.settings = Settings(arrive_tiles=arrive_tiles, max_walk_s=max_walk_s)
 
     # ---- 部品 ---------------------------------------------------------------
     def run(self, script: str) -> str:
         if self._stop.is_set():
             raise InterruptedError("stopped")
+        if not script:
+            return "ok"
         return self._run(script)
+
+    @staticmethod
+    def char_pos(img):
+        """キャラクターは常にゲーム画面の真ん中"""
+        h, w = img.shape[:2]
+        return w / 2, h / 2
+
+    def read_loc(self, img):
+        """座標だけを読む (マップ名は map_name に置き換える)。1 回だけ大きく飛んだ読みは捨てる"""
+        raw = self._read_loc(img)
+        if raw is None:
+            return None
+        loc = Location(self.map_name, int(raw.x), int(raw.y))
+
+        def near(a, b, d):
+            return abs(a.x - b.x) <= d and abs(a.y - b.y) <= d
+
+        if self._last is None or near(loc, self._last, self.max_jump):
+            self._last, self._pending = loc, None
+        elif self._pending is not None and near(loc, self._pending, 2):
+            self.log("WARN", f"[往復] 座標が大きく変わりました ({self._last.x}, {self._last.y}) → ({loc.x}, {loc.y})")
+            self._last, self._pending = loc, None
+        else:
+            self._pending = loc  # 読み違いかもしれない: 次も同じ所なら採用
+            return None
+        if self.origin is not None and not near(loc, Location(self.map_name, self.origin[1], self.origin[2]),
+                                                self.far_tiles):
+            raise RuntimeError(f"元の座標 ({self.origin[1]}, {self.origin[2]}) から {self.far_tiles} マスより離れました "
+                               f"(今 ({loc.x}, {loc.y}))。死んで飛ばされた・ワープしたなど。往復テストを止めます")
+        return loc
 
     def _sleep(self, s: float) -> None:
         if self._stop.wait(s):
             raise InterruptedError("stopped")
 
     def _click_at(self, x: float, y: float) -> str:
-        hx, hy = self.client_to_hid(x, y)
-        return f"a:{hx},{hy};w:30;c:L"
+        """ゲーム画面の (x, y) をクリックする (ここで送り終える。歩く側には空のマクロを返す)"""
+        self.pointer.click(*self.client_to_screen(x, y))
+        return ""
 
     def _log_walker(self, msg: str) -> None:
         self.log("INFO", msg.replace("[home] ", "[往復] "))
