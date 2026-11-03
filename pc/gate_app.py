@@ -281,6 +281,7 @@ class GateApp:
         self._bring_front = True
         self.shuttle_map = tk.StringVar(value="Crywolf")   # 往復テストのマップ名 (OCR のマップ名は使わない)
         self.mouse_mode = tk.StringVar(value="abs")         # カーソルの動かし方 (akm/pointer.py)
+        self.arm_runs = tk.StringVar(value="shuttle")       # ▶ 開始 (ARM) で続けて始めるもの: none / check / shuttle
         self.bring_front.trace_add("write", lambda *_: setattr(self, "_bring_front", bool(self.bring_front.get())))
         self.vhid = None           # 仮想 HID (akm.virtual_hid.VirtualHid)。初めて使うときに作る
         self.shuttle = None        # 往復テスト (akm.shuttle_test.ShuttleTest)
@@ -425,6 +426,10 @@ class GateApp:
         ttk.Label(g, text="マウス").grid(row=1, column=4, sticky="e", padx=(6, 2))
         ttk.Combobox(g, textvariable=self.mouse_mode, values=["abs", "absrel", "rel"], width=8,
                      state="readonly").grid(row=1, column=5)
+        g = rb.group(t, "▶ 開始 (ARM) を押したら")
+        for i, (v, text) in enumerate((("shuttle", "往復テストを始める"), ("check", "マウス診断をする"),
+                                       ("none", "前面に出すだけ"))):
+            ttk.Radiobutton(g, text=text, value=v, variable=self.arm_runs).grid(row=i, column=0, sticky="w")
 
         # ミラー: ESP32 へ送る画面
         t = rb.tab("ミラー")
@@ -805,8 +810,9 @@ class GateApp:
             return
         self.armed.set(True)
         self._armed = True
-        if activate and IS_WINDOWS:  # 送信先の窓 (ミラーで映している窓) を前面にする
-            threading.Thread(target=self._activate_and_report, daemon=True).start()
+        if activate and IS_WINDOWS:  # 送信先の窓 (ミラーで映している窓) を前面にし、選んでおいた試験を始める
+            then = self.arm_runs.get()
+            threading.Thread(target=self._activate_and_report, args=(then,), daemon=True).start()
         self.log("GATE", f"ARM: {self.target_name} が前面にあるときだけキー操作を通します")
 
     def disarm(self):
@@ -858,18 +864,25 @@ class GateApp:
         """人がこの PC を操作していれば、あと何 ms で「止まった」とみなすか (0 = 操作していない)"""
         return self.vhid.user.busy_left_ms() if self.vhid is not None else 0.0
 
-    def _activate_and_report(self):
+    def _activate_and_report(self, then: str = "none"):
+        if self._activate_once():
+            if then == "shuttle":
+                self.root.after(0, self.start_shuttle)
+            elif then == "check":
+                self.root.after(0, self.start_mouse_check)
+
+    def _activate_once(self) -> bool:
         t = self.target()
         if t is None:
-            return
+            return False
         why = self.input_blocked_reason(t.pid)
         if why:
             self.log_threadsafe("ERR", why)
-            return
+            return False
         self.get_hid()
         if self._hid_allowed():
             self.log_threadsafe("INFO", f"{t.name} の窓 (hwnd {t.hwnd:#010x}) はもう前面です")
-            return
+            return True
         pt = title_bar_point(t.hwnd)
         self.log_threadsafe("INFO", f"{t.name} の窓 (hwnd {t.hwnd:#010x}) を前面にします: " +
                             (f"タイトルバー {pt} をクリック" if pt else "タイトルバーが見えないので Windows の機能で"))
@@ -878,6 +891,7 @@ class GateApp:
         self.log_threadsafe("INFO" if ok else "WARN",
                             f"{t.name} が前面になりました" if ok else
                             f"{t.name} を前面にできませんでした (今の前面 hwnd {fg or 0:#010x} '{window_title(fg)}')")
+        return ok
 
     def restart_as_admin(self):
         if not IS_WINDOWS:
@@ -1004,6 +1018,27 @@ class GateApp:
                 return None
         self.log_threadsafe("INFO", f"{t.name} が前面になりました")
         time.sleep(0.3)
+        # まずカーソルをゲーム画面の真ん中 (キャラクターの位置) へ動かし、届いているか確かめる (クリックはしない)
+        from akm.screen import client_rect
+
+        r = client_rect(t.hwnd)
+        cx, cy = r.left + r.width // 2, r.top + r.height // 2
+        try:
+            hx, hy = self._screen_to_hid(cx, cy)
+            self._hid_run(f"a:{hx},{hy};w:100", lambda: False)
+        except InterruptedError:
+            self.log_threadsafe("WARN", f"{t.name} からフォーカスが外れたので止めます")
+            return None
+        except Exception as e:  # noqa: BLE001
+            self.log_threadsafe("ERR", f"カーソルを動かせません: {e}")
+            return None
+        ax, ay = self._cursor()
+        if max(abs(ax - cx), abs(ay - cy)) > 3:
+            self.log_threadsafe("ERR", f"カーソルがゲーム画面の真ん中 ({cx}, {cy}) に来ません (実際 ({ax}, {ay}))。"
+                                       "Windows がこのアプリの入力を受け付けていません")
+            return None
+        self.log_threadsafe("INFO", f"カーソルをゲーム画面の真ん中 ({cx}, {cy}) へ動かしました "
+                                    f"(表示範囲 {r.left},{r.top} {r.width}x{r.height})")
         return t.hwnd
 
     def start_shuttle(self):
