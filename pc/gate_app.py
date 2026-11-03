@@ -1000,14 +1000,38 @@ class GateApp:
         return grab, reader, (lambda: client_rect(hwnd))
 
     def _coord_reader(self):
-        """座標だけを確実に読む関数 (img) -> Location か None。閉じ括弧まで見えているものだけ・2 通りの読みが同じとき
-        だけ (マップ名が長いと表示が切れる)。読む範囲は maplog.coord_roi (無ければ maplog.roi を左へ広げたもの)"""
-        from akm.maploc import LocationReader, make_ocr, read_xy_strict, widen_roi
+        """座標を読む関数 (img) -> 候補の Location のリスト (空 = 読めない)。閉じ括弧まで見えているものだけ
+        (マップ名が長いと表示が切れる)。2 通りの読みが違えば両方を候補にし、使う側が前の位置に近い方を選ぶ。
+        読む範囲は maplog.coord_roi (無ければ maplog.roi を左へ広げたもの)。
+        続けて読めないときは、読んだ範囲の画像を debug/coord_*.png に保存し、OCR の文字をログに出す"""
+        from akm.config import PC_DIR
+        from akm.maploc import Location, LocationReader, make_ocr, read_xy_candidates, widen_roi
 
         lcfg = self.cfg.get("maplog") or {}
         reader = LocationReader(lcfg, make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd")))
         roi = lcfg.get("coord_roi") or widen_roi(reader.roi)
-        return lambda img: read_xy_strict(reader, img, roi)
+        state = {"fails": 0, "saved": 0.0}
+
+        def read(img):
+            got = read_xy_candidates(reader, img, roi)
+            if got:
+                state["fails"] = 0
+                return [Location("", x, y) for x, y in got]
+            state["fails"] += 1
+            if state["fails"] >= 8 and time.monotonic() - state["saved"] > 30:
+                state["saved"] = time.monotonic()
+                path = PC_DIR / "debug" / f"coord_{time.strftime('%H%M%S')}.png"
+                try:
+                    path.parent.mkdir(exist_ok=True)
+                    cv2.imwrite(str(path), reader.last_crop)
+                    where = f"。読んだ範囲の画像: {path}"
+                except Exception:  # noqa: BLE001
+                    where = ""
+                self.log_threadsafe("WARN", f"座標を {state['fails']} 回続けて読めません。OCR の文字: "
+                                            f"'{reader.last_text}'{where}")
+            return []
+
+        return read
 
     def _begin_on_target(self, what: str):
         """開始ボタンの共通の手順: 送信先を確かめ、ARM し、送信先を前面に出す (別のスレッドで呼ぶ)。
@@ -1071,8 +1095,7 @@ class GateApp:
                 self._base_reader = self._coord_reader()
             seen: dict[tuple[int, int], int] = {}
             for _ in range(8):
-                loc = self._base_reader(self.live._grab(hwnd, full=True)[0])
-                if loc is not None:
+                for loc in self._base_reader(self.live._grab(hwnd, full=True)[0]):
                     xy = (int(loc.x), int(loc.y))
                     seen[xy] = seen.get(xy, 0) + 1
                     if seen[xy] >= 2:

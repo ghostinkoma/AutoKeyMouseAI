@@ -452,6 +452,24 @@ def widen_roi(roi, left: float = 0.06) -> list[float]:
     return [x0, y, w + (x - x0), h]
 
 
+def read_xy_candidates(reader: "LocationReader", img: np.ndarray, roi=None) -> list[tuple[int, int]]:
+    """座標の候補: 2 通りの前処理で読み、閉じ括弧まで見えているもの (同じなら 1 つ)。どれが正しいかは使う側が
+    前の位置などから決める。reader.last_text / reader.last_crop に読んだ文字と切り出した画像を残す"""
+    x0, y0, x1, y1 = roi_px(img.shape, roi if roi is not None else widen_roi(reader.roi))
+    crop = img[y0:y1, x0:x1]
+    reader.last_crop = crop
+    got: list[tuple[int, int]] = []
+    texts = []
+    for method in ("bright", "otsu"):
+        t = reader.ocr(preprocess(crop, reader.scale, method, reader.threshold)).strip()
+        texts.append(t)
+        xy = parse_xy_strict(t)
+        if xy is not None and xy not in got:
+            got.append(xy)
+    reader.last_text = " | ".join(texts)
+    return got
+
+
 def read_xy_strict(reader: "LocationReader", img: np.ndarray, roi=None) -> Location | None:
     """座標だけを確実に読む: 2 通りの前処理で読み、閉じ括弧まで見えていて、両方読めたら同じ値のときだけ採用。
     マップ名は使わない (Location.map は空)。"""

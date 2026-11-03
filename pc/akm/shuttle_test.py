@@ -50,7 +50,7 @@ class ShuttleTest:
                  arrive_tiles: float = 0.5, map_name: str = "Crywolf", max_jump: int = 15, far_tiles: int = 40,
                  helper_probe=None, alive=None, max_speed: float = 8.0, base_tiles: int = 3, jump_reads: int = 5,
                  jump_s: float = 2.0, clock=time.monotonic, base_xy: tuple[int, int] | None = None,
-                 exact_s: float = 8.0, tolerance: int = 2, axis: str = "y", helper_wait_s: float = 3.0):
+                 exact_s: float = 3.0, tolerance: int = 2, axis: str = "y", helper_wait_s: float = 3.0):
         """run(script): マクロを送る (前面でなければ待つ・止められたら InterruptedError)
         grab(): ゲーム画面 (原寸)。read_loc(img): 現在地 (x, y を持つもの。マップ名は使わない) か None
         client_to_screen(x, y): ゲーム画面の座標 → 画面の画素
@@ -121,9 +121,14 @@ class ShuttleTest:
         そこで歩ける速さで判定する: 前に採用した座標から「base_tiles + 速さ (8 マス/秒) × 経った秒数」より離れた読みは捨てる。
         離れた読みが jump_reads 回以上・jump_s 秒以上続けて同じ所なら、本当に飛んだ (死んだ・ワープ) とみなす"""
         raw = self._read_loc(img)
-        if raw is None:
+        if raw is None or raw == []:
             return None
         now = self.clock()
+        cands = raw if isinstance(raw, (list, tuple)) else [raw]  # 読みの候補 (2 通りの読みが違ったとき)
+        if self._last is not None:  # 前に採用した座標に一番近いもの
+            raw = min(cands, key=lambda r: max(abs(r.x - self._last.x), abs(r.y - self._last.y)))
+        else:
+            raw = cands[0]
         loc = Location(self.map_name, int(raw.x), int(raw.y))
 
         def near(a, b, d):
@@ -195,8 +200,10 @@ class ShuttleTest:
 
         o = np.array([s[0] for s in self._samples], float)
         d = np.array([s[1] for s in self._samples], float)
-        if abs(np.linalg.det(o.T @ o)) < 1e-6 * max(1.0, float((o ** 2).sum())) ** 2:
-            return  # 同じ向きばかり: 2 次元の向きが決まらない
+        u = o / np.linalg.norm(o, axis=1, keepdims=True)
+        sv = np.linalg.svd(u, compute_uv=False)
+        if len(sv) < 2 or sv[1] < 0.35 * sv[0]:
+            return  # ほぼ同じ向き (縦) ばかり: 横の向きが決まらないので直さない
         at, *_ = np.linalg.lstsq(o, d, rcond=None)  # d = o @ A^T
         A = at.T.tolist()
         (a, b), (c, e) = A
@@ -243,20 +250,21 @@ class ShuttleTest:
         return here is not None and abs(here.x - target[1]) <= d and abs(here.y - target[2]) <= d
 
     def walk_to(self, target, label: str) -> str:
-        """target へ歩く。まず exact_s 秒はちょうどのマスを狙い、着けなければ上下左右 tolerance マスまでで良しとする"""
+        """target へ歩く。隣のマス (斜めを含む) まで来たら着いたことにする。exact_s 秒で着けなければ、
+        上下左右 tolerance マスまでで良しとする (着いたらすぐ MU Helper を入れるため、粘りすぎない)"""
         self.status = f"{label} ({target[1]}, {target[2]}) へ"
         self.walker.home = target
         st = self.walker.settings
-        st.arrive_tiles, st.max_walk_s = 0.5, self.exact_s
+        st.arrive_tiles, st.max_walk_s = 1.5, self.exact_s
         res = self.walker.walk_home()
-        _, here = self.walker._loc()
+        here = self._last
         ok = res.startswith("着いた")
         if not ok and not self._within(here, target, self.tolerance):
-            # ちょうどには着けない (障害物・アイテム・ほかのキャラクターなど): 近くまででよい
+            # 近くまで来ていない (障害物・アイテム・ほかのキャラクターなど): 残りの時間、近くまで歩く
             st.arrive_tiles = self.tolerance * 1.42  # 斜めに tolerance マス離れていても着いたことにする
             st.max_walk_s = max(2.0, self.max_walk_s - self.exact_s)
             res = self.walker.walk_home()
-            _, here = self.walker._loc()
+            here = self._last
         if not ok:
             ok = self._within(here, target, self.tolerance)
             if ok:
@@ -290,10 +298,10 @@ class ShuttleTest:
             t0 = time.monotonic()
             on = 0
             while time.monotonic() - t0 < self.helper_wait_s:
-                self._sleep(0.15)
+                self._sleep(0.1)
                 r = probe()
                 on = on + 1 if r.get("state") is True else 0
-                if on >= 2:
+                if on >= 2 or (on and float(r.get("p", 0)) >= 0.95):  # はっきり動作中なら 1 回でよい
                     self.walker.helper_seen = f"動作中 ({float(r.get('p', 0)):.2f})"
                     self.log("INFO", f"[往復] MU Helper 動作中を確認 ({key} {attempt} 回 / "
                                      f"{time.monotonic() - t_all:.1f} 秒)")

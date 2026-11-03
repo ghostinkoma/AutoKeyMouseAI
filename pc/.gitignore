@@ -8,3 +8,4 @@ runs/
 !models/edge_ocr.npz
 !models/edge_obj.npz
 !models/record_filter.npz
+debug/

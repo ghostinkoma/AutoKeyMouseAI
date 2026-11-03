@@ -43,6 +43,11 @@ def use_clock(t):
     return c
 
 
+def near_all(log, want, d=1):
+    """押した場所 (home の記録) が、それぞれ want の d マス以内か"""
+    return len(log) == len(want) and all(abs(h[1] - x) <= d and abs(h[2] - y) <= d for h, (x, y) in zip(log, want))
+
+
 class FakeGame:
     def __init__(self):
         self.x, self.y = 100, 100
@@ -82,7 +87,7 @@ def test_shuttle_order(tmp_path):
     g.test = t
     t._main()
     assert t.origin == ("Crywolf", 100, 100)
-    assert g.log == [("home", 105, 105), ("home", 100, 100), ("home", 95, 95), ("home", 100, 100)]
+    assert near_all(g.log, [(105, 105), (100, 100), (95, 95), (100, 100)])
     assert any("止めました" in m for _, m in logs)
 
 
@@ -165,7 +170,7 @@ def test_helper_is_ensured_on_after_each_move(tmp_path):
     use_clock(t)
     g.test = t
     t._main()
-    assert g.log == [("home", 105, 105), ("home", 100, 100), ("home", 95, 95), ("home", 100, 100)]
+    assert near_all(g.log, [(105, 105), (100, 100), (95, 95), (100, 100)])
     assert g.helper is True
 
 
@@ -220,7 +225,7 @@ def test_base_point_and_tolerance(tmp_path):
     first = g.log[0]
     assert abs(first[1] - 105) <= 2 and abs(first[2] - 105) <= 2  # 上 (105, 105) の近く
     assert any("近くに着いた" in m for m in logs)
-    assert g.log[1][1:] == (100, 100)
+    assert near_all(g.log[1:2], [(100, 100)])
 
 
 # 本物の MU: 座標は画面から見て 45 度傾いている (画面の右 = X が増え Y が減る / 画面の下 = X も Y も増える)
@@ -258,7 +263,7 @@ def test_y_axis_round_trip_recalibrates_wrong_record(tmp_path):
     use_clock(t)
     t._main()
     assert any("調べ直します" in m for m in logs)
-    assert [h[1:] for h in g.log] == [(100, 90), (100, 100), (100, 110), (100, 100)]
+    assert near_all(g.log, [(100, 90), (100, 100), (100, 110), (100, 100)])
     (a, b), (c, d) = json.loads(calib.read_text(encoding="utf-8"))["A"]
     assert 0.5 <= abs(b) / abs(d) <= 2 and 0.5 <= abs(a) / abs(c) <= 2  # 測り直した 45 度の記録が保存されている
 
@@ -319,3 +324,14 @@ def test_helper_press_waits_for_lagging_screen(tmp_path):
                     helper_probe=probe)
     t.press_helper(moved=True)
     assert state["presses"] == 1 and state["on"] is True
+
+
+def test_read_loc_picks_candidate_near_last(tmp_path):
+    """2 通りの読みが違うとき (候補が 2 つ)、前の座標に近い方を使う"""
+    reads = iter([[Loc("", 152, 160)], [Loc("", 155, 15), Loc("", 155, 157)], []])
+    t = ShuttleTest(lambda s: "ok", lambda: None, lambda img: next(reads), lambda x, y: (x, y), None,
+                    calib_path=tmp_path / "none.json", clock=lambda: 0.0)
+    a = t.read_loc(None)
+    b = t.read_loc(None)
+    assert (a.x, a.y) == (152, 160) and (b.x, b.y) == (155, 157)
+    assert t.read_loc(None) is None  # 読めない
