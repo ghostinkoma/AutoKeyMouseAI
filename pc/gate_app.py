@@ -155,6 +155,10 @@ def foreground_hwnd(windows: list[GameWindow]) -> int | None:
 # ---------------------------------------------------------------------------
 # リボン (Excel のようなタブ + グループ)
 # ---------------------------------------------------------------------------
+# 往復テストの上下の決め方 (表示 → akm.shuttle_test の axis)
+AXES = {"Y (座標)": "y", "X (座標)": "x", "画面の上下": "screen"}
+
+
 def window_title(hwnd) -> str:
     if not IS_WINDOWS or not hwnd:
         return ""
@@ -275,7 +279,8 @@ class GateApp:
         self.armed = tk.BooleanVar(value=False)
         self.bring_front = tk.BooleanVar(value=True)  # 送信先が前面でなければ、仲介アプリが前面に出す
         self.hid_out = tk.StringVar(value="virtual")   # キー・マウスの出口: virtual (この PC) / esp32
-        self.shuttle_tiles = tk.IntVar(value=5)
+        self.shuttle_tiles = tk.IntVar(value=10)
+        self.shuttle_axis = tk.StringVar(value="Y (座標)")  # 上下の決め方
         self.shuttle_wait = tk.IntVar(value=5)
         self._armed = False        # 別のスレッド (往復テスト) から読む用 (tk の変数はスレッドをまたいで読まない)
         self._bring_front = True
@@ -418,7 +423,7 @@ class GateApp:
         rb.button(g, "停止", row=0, column=1, command=self.stop_shuttle)
         rb.button(g, "マウス診断", row=1, column=1, command=self.start_mouse_check)
         ttk.Label(g, text="マス").grid(row=0, column=2, sticky="e", padx=(6, 2))
-        ttk.Spinbox(g, from_=1, to=15, textvariable=self.shuttle_tiles, width=4).grid(row=0, column=3)
+        ttk.Spinbox(g, from_=1, to=20, textvariable=self.shuttle_tiles, width=4).grid(row=0, column=3)
         ttk.Label(g, text="待つ秒").grid(row=1, column=2, sticky="e", padx=(6, 2))
         ttk.Spinbox(g, from_=1, to=120, textvariable=self.shuttle_wait, width=4).grid(row=1, column=3)
         ttk.Label(g, text="マップ").grid(row=0, column=4, sticky="e", padx=(6, 2))
@@ -426,6 +431,9 @@ class GateApp:
         ttk.Label(g, text="マウス").grid(row=1, column=4, sticky="e", padx=(6, 2))
         ttk.Combobox(g, textvariable=self.mouse_mode, values=["abs", "absrel", "rel"], width=8,
                      state="readonly").grid(row=1, column=5)
+        ttk.Label(g, text="方向").grid(row=0, column=6, sticky="e", padx=(6, 2))
+        ttk.Combobox(g, textvariable=self.shuttle_axis, values=list(AXES), width=10,
+                     state="readonly").grid(row=0, column=7)
         g = rb.group(t, "▶ 開始 (ARM) を押したら")
         for i, (v, text) in enumerate((("shuttle", "往復テストを始める"), ("check", "マウス診断をする"),
                                        ("none", "前面に出すだけ"))):
@@ -1082,6 +1090,7 @@ class GateApp:
             self.stop_shuttle()
         tiles, wait = int(self.shuttle_tiles.get()), float(self.shuttle_wait.get())
         map_name, mode = self.shuttle_map.get().strip() or "Crywolf", self.mouse_mode.get()
+        axis = AXES.get(self.shuttle_axis.get(), "y")
         pcfg = self.cfg.get("virtual_hid") or {}
 
         def go():
@@ -1127,7 +1136,8 @@ class GateApp:
                               hold_ms=int(pcfg.get("click_hold_ms", 80)), log=self.log_threadsafe)
                 st = ShuttleTest(run, grab, read_loc, client_to_screen, ptr, log=self.log_threadsafe,
                                  calib_path=PC_DIR / "models" / "home_nav.json", tiles=tiles, wait_s=wait,
-                                 map_name=map_name, helper_probe=probe, alive=self._hid_allowed, base_xy=base_xy)
+                                 map_name=map_name, helper_probe=probe, alive=self._hid_allowed, base_xy=base_xy,
+                                 axis=axis)
                 holder["t"] = st
                 self.shuttle = st
                 self.log_threadsafe("INFO", f"往復テストを始めます: {tiles} マス / {wait:g} 秒 / マップ {map_name} / "

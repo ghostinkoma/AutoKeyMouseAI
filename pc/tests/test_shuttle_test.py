@@ -76,7 +76,7 @@ def test_shuttle_order(tmp_path):
     ptr = Pointer(lambda s: box["t"].run(s), lambda sx, sy: (int(round(sx)), int(round(sy))), settle_ms=0, hold_ms=0)
     t = ShuttleTest(g.run, lambda: np.zeros((600, 800, 3), np.uint8), lambda img: Loc("N0isyMap", g.x, g.y),
                     lambda x, y: (x, y), ptr, log=lambda lv, m: logs.append((lv, m)), calib_path=calib, tiles=5,
-                    wait_s=0, map_name="Crywolf")
+                    wait_s=0, map_name="Crywolf", axis="screen")
     box["t"] = t
     use_clock(t)
     g.test = t
@@ -90,7 +90,7 @@ def test_offset_is_five_steps(tmp_path):
     calib = tmp_path / "home_nav.json"
     calib.write_text(json.dumps({"A": A}), encoding="utf-8")
     t = ShuttleTest(lambda s: "ok", lambda: None, lambda img: None, lambda x, y: (0, 0), None,
-                    calib_path=calib, tiles=5)
+                    calib_path=calib, tiles=5, axis="screen")
     t.origin = ("Atlans", 50, 60)
     assert t.offset_target(-1) == ("Atlans", 55, 65)
     assert t.offset_target(+1) == ("Atlans", 45, 55)
@@ -160,7 +160,7 @@ def test_helper_is_ensured_on_after_each_move(tmp_path):
     ptr = Pointer(lambda s: box["t"].run(s), lambda sx, sy: (int(round(sx)), int(round(sy))), settle_ms=0, hold_ms=0)
     t = ShuttleTest(run, lambda: np.zeros((600, 800, 3), np.uint8), lambda img: Loc("m", g.x, g.y),
                     lambda x, y: (x, y), ptr, log=lambda lv, m: None, calib_path=calib, wait_s=0,
-                    helper_probe=lambda: {"state": g.helper, "p": 0.9, "click": None})
+                    helper_probe=lambda: {"state": g.helper, "p": 0.9, "click": None}, axis="screen")
     box["t"] = t
     use_clock(t)
     g.test = t
@@ -185,7 +185,7 @@ def test_focus_lost_stops(tmp_path):
 
     t = ShuttleTest(run, lambda: np.zeros((600, 800, 3), np.uint8), lambda img: Loc("m", g.x, g.y),
                     lambda x, y: (x, y), ptr, log=lambda lv, m: logs.append(m), calib_path=calib, wait_s=0,
-                    alive=lambda: alive["v"])
+                    alive=lambda: alive["v"], axis="screen")
     box["t"] = t
     use_clock(t)
     t._main()
@@ -211,7 +211,7 @@ def test_base_point_and_tolerance(tmp_path):
     ptr = Pointer(lambda s: box["t"].run(s), lambda sx, sy: (int(round(sx)), int(round(sy))), settle_ms=0, hold_ms=0)
     t = ShuttleTest(run, lambda: np.zeros((600, 800, 3), np.uint8), lambda img: Loc("m", g.x, g.y),
                     lambda x, y: (x, y), ptr, log=lambda lv, m: logs.append(m), calib_path=calib, wait_s=0,
-                    base_xy=(100, 100), exact_s=0.2, max_walk_s=0.6)
+                    base_xy=(100, 100), exact_s=0.2, max_walk_s=0.6, axis="screen")
     box["t"] = t
     use_clock(t)
     g.test = t
@@ -221,3 +221,42 @@ def test_base_point_and_tolerance(tmp_path):
     assert abs(first[1] - 105) <= 2 and abs(first[2] - 105) <= 2  # 上 (105, 105) の近く
     assert any("近くに着いた" in m for m in logs)
     assert g.log[1][1:] == (100, 100)
+
+
+# 本物の MU: 画面の右 = X が増える / 画面の下 = Y が増える (Y は Windows の縦と同じ向き)
+A_Y = [[0.035, 0.0], [0.0, 0.037]]
+
+
+def test_y_axis_round_trip_recalibrates_wrong_record(tmp_path):
+    """上下は座標の Y ±10。向きの記録が「画面の縦 = Y」と合わなければ、歩いて調べ直してから往復する"""
+    calib = tmp_path / "home_nav.json"
+    calib.write_text(json.dumps({"A": A}), encoding="utf-8")  # 古い (合わない) 記録
+    g = FakeGame()
+
+    def run(script):
+        for cmd in script.split(";"):
+            if cmd.startswith("a:"):
+                g.click = tuple(int(v) for v in cmd[2:].split(","))
+            elif cmd == "bu:L":
+                ox, oy = g.click[0] - 400, g.click[1] - 300
+                g.x += round(A_Y[0][0] * ox + A_Y[0][1] * oy)
+                g.y += round(A_Y[1][0] * ox + A_Y[1][1] * oy)
+            elif cmd == "k:home":
+                g.homes += 1
+                g.log.append(("home", g.x, g.y))
+                if g.homes >= 4:
+                    t.stop()
+        return "ok"
+
+    box, logs = {}, []
+    ptr = Pointer(lambda s: box["t"].run(s), lambda sx, sy: (int(round(sx)), int(round(sy))), settle_ms=0, hold_ms=0)
+    t = ShuttleTest(run, lambda: np.zeros((600, 800, 3), np.uint8), lambda img: Loc("m", g.x, g.y),
+                    lambda x, y: (x, y), ptr, log=lambda lv, m: logs.append(m), calib_path=calib, wait_s=0,
+                    tiles=10, base_xy=(100, 100))
+    box["t"] = t
+    use_clock(t)
+    t._main()
+    assert any("調べ直します" in m for m in logs)
+    assert [h[1:] for h in g.log] == [(100, 90), (100, 100), (100, 110), (100, 100)]
+    (a, b), (c, d) = json.loads(calib.read_text(encoding="utf-8"))["A"]
+    assert d > 0 and abs(d) > 1.5 * abs(b)  # 測り直した記録が保存されている

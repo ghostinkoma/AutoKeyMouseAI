@@ -50,7 +50,7 @@ class ShuttleTest:
                  arrive_tiles: float = 0.5, map_name: str = "Crywolf", max_jump: int = 15, far_tiles: int = 40,
                  helper_probe=None, alive=None, max_speed: float = 8.0, base_tiles: int = 3, jump_reads: int = 5,
                  jump_s: float = 2.0, clock=time.monotonic, base_xy: tuple[int, int] | None = None,
-                 exact_s: float = 8.0, tolerance: int = 2):
+                 exact_s: float = 8.0, tolerance: int = 2, axis: str = "y"):
         """run(script): マクロを送る (前面でなければ待つ・止められたら InterruptedError)
         grab(): ゲーム画面 (原寸)。read_loc(img): 現在地 (x, y を持つもの。マップ名は使わない) か None
         client_to_screen(x, y): ゲーム画面の座標 → 画面の画素
@@ -59,6 +59,10 @@ class ShuttleTest:
                         「停止中なら Home → 動作中になったか確かめる」。無ければ Home を押すだけ
         alive(): 続けてよいか (送信先が前面か)。False になったらその場で止める (InterruptedError)"""
         self.alive = alive
+        # 上下の決め方: "y" = 座標の Y (画面の縦と同じ向き: 上 = Y が減る) / "x" = 座標の X / "screen" = 画面の上下
+        if axis not in ("y", "x", "screen"):
+            raise ValueError(f"axis: {axis}")
+        self.axis = axis
         self.base_xy = base_xy        # 開始ボタンを押したときの座標 (基準点)。None なら始めに読む
         self.exact_s = float(exact_s)  # まずこの秒数はちょうどのマスを狙う
         self.tolerance = int(tolerance)  # 着けないときは上下左右にこのマス数までずれてよい
@@ -168,13 +172,17 @@ class ShuttleTest:
             self._sleep(0.3)
 
     def offset_target(self, direction: int):
-        """画面の上 (direction=-1) / 下 (+1) へ tiles 歩いたマス"""
+        """上 (direction=-1) / 下 (+1) へ tiles 進んだマス。axis が y なら Y だけ、x なら X だけ変える"""
+        m, x, y = self.origin
+        if self.axis == "y":
+            return m, x, y + direction * self.tiles
+        if self.axis == "x":
+            return m, x + direction * self.tiles, y
         (a, b), (c, d) = self.walker.calib.A
         vx, vy = b * direction, d * direction  # 画面の縦 1 ピクセルで変わるマス (x, y)
         n = max(abs(vx), abs(vy))
         if n < 1e-9:
             raise RuntimeError("画面の向きの記録がおかしい (models/home_nav.json を消して調べ直してください)")
-        m, x, y = self.origin
         return m, int(round(x + vx / n * self.tiles)), int(round(y + vy / n * self.tiles))
 
     def _within(self, here, target, d: int) -> bool:
@@ -267,19 +275,31 @@ class ShuttleTest:
             self.log("INFO", f"[往復] MU Helper の今の状態 (学習済みの AI): {self.walker.helper_seen}")
         self.log("INFO", f"[往復] 基準点 ({src}): {here.map} ({here.x}, {here.y})  {self.tiles} マス / "
                          f"{self.wait_s:g} 秒 / 着けないときは ±{self.tolerance} マスまで")
-        if not self.walker.calib.ok():
+        need = not self.walker.calib.ok()
+        if not need and self.axis == "y":
+            # Y は画面の縦と同じ向き (上 = Y が減る)。記録がそうなっていなければ (古い・読み違いで測った) 調べ直す
+            (a, b), (c, d) = self.walker.calib.A
+            if not (d > 0 and abs(d) > 1.5 * abs(b)):
+                need = True
+                self.log("WARN", f"[往復] 画面の向きの記録 (models/home_nav.json) が「画面の縦 = Y」と合いません "
+                                 f"(画面の下へ 100px で X {b * 100:+.1f} / Y {d * 100:+.1f} マス)。調べ直します")
+        if need:
             self.status = "画面の向きを調べています"
-            self.log("INFO", "[往復] 画面の向き (何ピクセルで何マス) を調べます。右・下へ少し歩きます")
+            self.log("INFO", "[往復] 画面の向き (何ピクセルで何マス) を調べます。右・下などへ少し歩きます")
             if not self.walker.calibrate(self.grab()):
                 raise RuntimeError("画面の向きを調べられません (壁際? 少し開けた所で始めてください)")
+            (a, b), (c, d) = self.walker.calib.A
+            self.log("INFO", f"[往復] 測った向き: 画面の右へ 100px で X {a * 100:+.1f} / Y {c * 100:+.1f} マス、"
+                             f"下へ 100px で X {b * 100:+.1f} / Y {d * 100:+.1f} マス")
             self.walk_to(self.origin, "基準点")
         (a, b), (c, d) = self.walker.calib.A
         px = 1 / max(1e-6, math.hypot(b, d))
         up, down = self.offset_target(-1), self.offset_target(+1)
-        self.log("INFO", f"[往復] 上 (北) = ({up[1]}, {up[2]})  下 (南) = ({down[1]}, {down[2]})  "
+        self.log("INFO", f"[往復] 上 = ({up[1]}, {up[2]})  下 = ({down[1]}, {down[2]})  "
+                         f"[{ {'y': '座標の Y', 'x': '座標の X', 'screen': '画面の上下'}[self.axis]} ±{self.tiles}]  "
                          f"画面の縦 1 マス ≒ {px:.0f} px")
         while True:
-            for label, target in (("上 (北)", up), ("下 (南)", down)):
+            for label, target in (("上", up), ("下", down)):
                 self.walk_to(target, label)
                 self.press_helper()
                 self.status = f"{label} で待機 {self.wait_s:g} 秒"
