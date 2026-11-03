@@ -192,6 +192,14 @@ class GateApp:
         self.target_hwnd: int | None = None  # 送信先のウィンドウ (キャラクターを変えても同じ)
         self.armed = tk.BooleanVar(value=False)
         self.bring_front = tk.BooleanVar(value=False)
+        self.hid_out = tk.StringVar(value="virtual")   # キー・マウスの出口: virtual (この PC) / esp32
+        self.shuttle_tiles = tk.IntVar(value=5)
+        self.shuttle_wait = tk.IntVar(value=5)
+        self._armed = False        # 別のスレッド (往復テスト) から読む用 (tk の変数はスレッドをまたいで読まない)
+        self._bring_front = False
+        self.bring_front.trace_add("write", lambda *_: setattr(self, "_bring_front", bool(self.bring_front.get())))
+        self.vhid = None           # 仮想 HID (akm.virtual_hid.VirtualHid)。初めて使うときに作る
+        self.shuttle = None        # 往復テスト (akm.shuttle_test.ShuttleTest)
         self.auto_refresh = tk.BooleanVar(value=True)
         self.mirror_fmt = tk.StringVar(value="BadCodec 343")  # 既定はカラー。config の mirror.color で変わる
         self.threshold = tk.IntVar(value=100)
@@ -311,6 +319,15 @@ class GateApp:
             on_click=lambda t: self.log("INFO", f"(モック) 帰還 {t.label}: {move_script(t)}"))
         self.town_button.grid(row=0, column=2, rowspan=2, sticky="w", padx=(6, 0))
 
+        # 試験: 往復テスト (上へ N マス → Home → 待つ → 元 → Home → 待つ → 下へ … の繰り返し)
+        g = rb.group(t, "試験 (往復)")
+        rb.button(g, "往復テスト\n開始", row=0, column=0, rowspan=2, command=self.start_shuttle)
+        rb.button(g, "停止", row=0, column=1, rowspan=2, command=self.stop_shuttle)
+        ttk.Label(g, text="マス").grid(row=0, column=2, sticky="e", padx=(6, 2))
+        ttk.Spinbox(g, from_=1, to=15, textvariable=self.shuttle_tiles, width=4).grid(row=0, column=3)
+        ttk.Label(g, text="待つ秒").grid(row=1, column=2, sticky="e", padx=(6, 2))
+        ttk.Spinbox(g, from_=1, to=120, textvariable=self.shuttle_wait, width=4).grid(row=1, column=3)
+
         # ミラー: ESP32 へ送る画面
         t = rb.tab("ミラー")
         g = rb.group(t, "撮影方式")
@@ -343,8 +360,13 @@ class GateApp:
         rb.button(g, "画面全体")
         rb.button(g, "範囲を\n指定...")
 
-        # デバイス: ESP32
+        # デバイス: キー・マウスの出口 / ESP32
         t = rb.tab("デバイス")
+        g = rb.group(t, "キー・マウスの出口")
+        for i, (v, text) in enumerate((("virtual", "仮想 HID (この PC から送る)"), ("esp32", "ESP32 (BLE HID)"))):
+            ttk.Radiobutton(g, text=text, value=v, variable=self.hid_out,
+                            command=lambda t=text: self.log("INFO", f"キー・マウスの出口: {t}")).grid(
+                row=i, column=0, sticky="w")
         g = rb.group(t, "シリアル")
         ttk.Label(g, text="ポート").grid(row=0, column=0, sticky="w")
         ttk.Combobox(g, textvariable=self.com, values=["COM18", "COM14"], width=8).grid(row=0, column=1)
@@ -684,11 +706,21 @@ class GateApp:
             self.log("WARN", "送信先のウィンドウを一覧から選んでください")
             return
         self.armed.set(True)
+        self._armed = True
         self.log("GATE", f"ARM: {self.target_name} が前面にあるときだけキー操作を通します")
 
     def disarm(self):
         was = self.armed.get()
         self.armed.set(False)
+        self._armed = False
+        if self.shuttle is not None and self.shuttle.running:
+            self.shuttle.stop()
+        if self.vhid is not None:
+            self.vhid.stop()
+            try:
+                self.vhid.release_all()
+            except Exception as e:  # noqa: BLE001
+                self.log("ERR", f"キー・ボタンを離せません: {e}")
         if was:
             self.log("GATE", "DISARM: 全キー・ボタンを離して停止しました")
 
@@ -701,6 +733,113 @@ class GateApp:
         if foreground_hwnd(self.windows) == t.hwnd:
             return "● 許可中", "#2e7d32"
         return "待機 (前面が別)", "#e09000"
+
+    # ---- キー・マウス (仮想 HID) と往復テスト -------------------------------------------
+    def _hid_allowed(self) -> bool:
+        """ゲート: ARM 中で、送信先のウィンドウが前面のときだけ送る (別のスレッドから呼ばれる)"""
+        hwnd = self.target_hwnd
+        if not (self._armed and hwnd):
+            return False
+        return not IS_WINDOWS or _user32.GetForegroundWindow() == hwnd
+
+    def get_hid(self):
+        if self.hid_out.get() != "virtual":
+            raise RuntimeError("ESP32 の出口はまだつないでいません (デバイス タブで「仮想 HID」を選んでください)")
+        if self.vhid is None:
+            from akm.virtual_hid import VirtualHid
+
+            self.vhid = VirtualHid.from_config(self.cfg.get("virtual_hid"), allow=self._hid_allowed)
+            p = self.vhid.pipe
+            self.log("INFO", f"仮想 HID を使います (間隔 {self.vhid.event_delay * 1000:g} ms / 遅れ {p.latency * 1000:g}"
+                             f"±{p.jitter * 1000:g} ms / 区切り {p.interval * 1000:g} ms。config.yaml の virtual_hid)")
+        return self.vhid
+
+    def _hid_run(self, script: str, stopped) -> str:
+        """前面になるまで待って (「前面に出して実行する」なら出して) 送る。途中で前面が変わったら、前面に戻ってから送り直す"""
+        from akm.screen import bring_to_front
+
+        hid = self.get_hid()
+        waited = False
+        while True:
+            if stopped() or not self._armed:
+                raise InterruptedError("stopped")
+            if not self._hid_allowed():
+                if self._bring_front and self.target_hwnd:
+                    bring_to_front(self.target_hwnd)
+                if not self._hid_allowed():
+                    if not waited:
+                        waited = True
+                        self.log_threadsafe("GATE", "送信先が前面にないので待っています (前面にすると続けます)")
+                    time.sleep(0.2)
+                    continue
+            try:
+                return hid.run(script)
+            except InterruptedError:
+                if stopped() or not self._armed:
+                    raise
+                self.log_threadsafe("GATE", f"送っている途中で前面が変わりました。前面に戻ったら送り直します: {script}")
+
+    def start_shuttle(self):
+        t = self.target()
+        if t is None:
+            self.log("WARN", "送信先のウィンドウ (例 Thanatos) を一覧から選んでください")
+            return
+        if not self.armed.get():
+            self.log("WARN", "先に「▶ 開始 (ARM)」を押してください (ARM 中で、送信先が前面のときだけ送ります)")
+            return
+        if self.live is None:
+            self.log("ERR", "画面の撮影が動いていないので、現在地を読めません")
+            return
+        if self.shuttle is not None and self.shuttle.running:
+            self.log("INFO", "往復テストはもう動いています")
+            return
+        try:
+            self.get_hid()
+            from akm.config import PC_DIR
+            from akm.device import AbsMap
+            from akm.maploc import LocationReader, make_ocr
+            from akm.screen import client_rect, primary_screen_size
+            from akm.shuttle_test import ShuttleTest
+
+            lcfg = self.cfg.get("maplog") or {}
+            reader = LocationReader(lcfg, make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd")))
+        except Exception as e:  # noqa: BLE001
+            self.log("ERR", f"往復テストを始められません: {e}")
+            return
+        hwnd = t.hwnd
+        offset = (self.cfg.get("elf") or {}).get("character_offset", [0.0, -0.08])
+        amap = AbsMap.for_screen(*primary_screen_size())  # SendInput の絶対座標はプライマリモニタ全体
+
+        def grab():
+            return self.live._grab(hwnd, full=True)[0]
+
+        def client_to_hid(x, y):
+            r = client_rect(hwnd)
+            sx, sy = r.left + x, r.top + y
+            if not amap.reachable(sx, sy):
+                raise RuntimeError("ゲームの窓がプライマリモニタの外にあります (絶対座標のクリックが届きません)")
+            return amap.to_hid(sx, sy)
+
+        def char_pos(img):
+            h, w = img.shape[:2]
+            return w / 2 + offset[0] * h, h / 2 + offset[1] * h
+
+        holder = {}
+        st = ShuttleTest(lambda s: self._hid_run(s, lambda: holder["t"]._stop.is_set()), grab, reader.read_raw,
+                         client_to_hid, char_pos, log=self.log_threadsafe,
+                         calib_path=PC_DIR / "models" / "home_nav.json",
+                         tiles=int(self.shuttle_tiles.get()), wait_s=float(self.shuttle_wait.get()))
+        holder["t"] = st
+        self.shuttle = st
+        self.log("INFO", f"往復テストを始めます: {t.name}  {st.tiles} マス / {st.wait_s:g} 秒 (止めるときは「停止」か DISARM)")
+        st.start()
+
+    def stop_shuttle(self):
+        if self.shuttle is not None and self.shuttle.running:
+            self.shuttle.stop()
+            if self.vhid is not None:
+                self.vhid.stop()
+            self.log("INFO", "往復テストを止めます")
 
     # ---- 定期処理 -----------------------------------------------------------
     def _tick_fast(self):
@@ -715,7 +854,8 @@ class GateApp:
             loc = self.current_loc()
             vals = {
                 "loc": (f"{loc[0]} {loc[1]},{loc[2]}" if loc else "?", None),
-                "helper": ("(未実装)", "#888888"),
+                "helper": ((f"往復: {self.shuttle.status}", "#1565c0") if self.shuttle is not None and self.shuttle.running
+                           else ("(未実装)", "#888888")),
                 "mob": ("(未実装)", "#888888"),
                 "send": (f"{snap.fps:4.1f} fps" if snap and not snap.error else "-", None),
             }
