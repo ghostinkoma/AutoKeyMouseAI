@@ -59,6 +59,11 @@ class ShuttleTest:
                         「停止中なら Home → 動作中になったか確かめる」。無ければ Home を押すだけ
         alive(): 続けてよいか (送信先が前面か)。False になったらその場で止める (InterruptedError)"""
         self.alive = alive
+        self.calib_path = calib_path
+        self._center = (0.0, 0.0)
+        self._click = None     # 最後のクリック (その時の座標, キャラからの向き px, 時刻)
+        self._samples = []     # 歩いた結果 [(クリックの向き px, 変わった座標)]
+        self.clicks = 0
         # 上下の決め方: "y" = 座標の Y (上 = Y が減る。画面では斜めに歩く: 座標は画面から 45 度傾いている)
         #               "x" = 座標の X / "screen" = 画面の上下
         if axis not in ("y", "x", "screen"):
@@ -102,11 +107,11 @@ class ShuttleTest:
             return "ok"
         return self._run(script)
 
-    @staticmethod
-    def char_pos(img):
+    def char_pos(self, img):
         """キャラクターは常にゲーム画面の真ん中"""
         h, w = img.shape[:2]
-        return w / 2, h / 2
+        self._center = (w / 2, h / 2)
+        return self._center
 
     def read_loc(self, img):
         """座標だけを読む (マップ名は map_name に置き換える)。
@@ -129,6 +134,7 @@ class ShuttleTest:
             ok = near(loc, self._last, self.base_tiles + self.max_speed * max(0.0, now - self._last_t))
         if ok:
             self._last, self._last_t, self._odd = loc, now, []
+            self._learn(loc, now)
         else:
             self._odd = [(lo, t) for lo, t in self._odd if near(lo, loc, 2)] + [(loc, now)]
             if len(self._odd) >= self.jump_reads and now - self._odd[0][1] >= self.jump_s:
@@ -157,9 +163,55 @@ class ShuttleTest:
             self._stop.wait(min(0.1, left))
 
     def _click_at(self, x: float, y: float) -> str:
-        """ゲーム画面の (x, y) をクリックする (ここで送り終える。歩く側には空のマクロを返す)"""
+        """ゲーム画面の (x, y) をクリックする (ここで送り終える。歩く側には空のマクロを返す)。
+        クリックした向きと、そのあと座標がどう変わったかを覚えて、画面の向きの記録を直すのに使う"""
+        cx, cy = self._center
+        ox, oy = x - cx, y - cy
+        here, goal = self._last, self.walker.home
+        self.clicks += 1
+        self.log("INFO", f"[往復] 歩く {self.clicks}: 今 " + (f"({here.x}, {here.y})" if here else "(?)") +
+                 (f" → 目標 ({goal[1]}, {goal[2]})" if goal else "") + f"  キャラから ({ox:+.0f}, {oy:+.0f})px をクリック")
+        self._click = (here, (ox, oy), self.clock())
         self.pointer.click(*self.client_to_screen(x, y))
         return ""
+
+    def _learn(self, loc, now) -> None:
+        """前のクリックのあと座標がどう変わったか (歩いた結果) を覚え、何回か分たまったら画面の向きの記録を直す"""
+        c = self._click
+        if c is None or c[0] is None or now - c[2] < 0.25:
+            return
+        before, (ox, oy), _t = c
+        self._click = None
+        dx, dy = loc.x - before.x, loc.y - before.y
+        if abs(dx) + abs(dy) < 1 or math.hypot(ox, oy) < 1:
+            return
+        self._samples = (self._samples + [((ox, oy), (dx, dy))])[-12:]
+        if len(self._samples) >= 3:
+            self._refit()
+
+    def _refit(self) -> None:
+        import numpy as np
+
+        o = np.array([s[0] for s in self._samples], float)
+        d = np.array([s[1] for s in self._samples], float)
+        if abs(np.linalg.det(o.T @ o)) < 1e-6 * max(1.0, float((o ** 2).sum())) ** 2:
+            return  # 同じ向きばかり: 2 次元の向きが決まらない
+        at, *_ = np.linalg.lstsq(o, d, rcond=None)  # d = o @ A^T
+        A = at.T.tolist()
+        (a, b), (c, e) = A
+        if abs(a * e - b * c) < 1e-9:
+            return
+        old = self.walker.calib.A
+        self.walker.calib.A = A
+        if old is None or max(abs(A[i][j] - old[i][j]) for i in range(2) for j in range(2)) > 0.004:
+            self.log("INFO", f"[往復] 歩いた結果から画面の向きを直しました: 右へ 100px で X {a * 100:+.1f} / "
+                             f"Y {c * 100:+.1f}、下へ 100px で X {b * 100:+.1f} / Y {e * 100:+.1f} マス "
+                             f"({len(self._samples)} 回分)")
+            if self.calib_path:
+                try:
+                    self.walker.calib.save(self.calib_path)
+                except OSError:
+                    pass
 
     def _log_walker(self, msg: str) -> None:
         self.log("INFO", msg.replace("[home] ", "[往復] "))

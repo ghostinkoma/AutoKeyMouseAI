@@ -261,3 +261,37 @@ def test_y_axis_round_trip_recalibrates_wrong_record(tmp_path):
     assert [h[1:] for h in g.log] == [(100, 90), (100, 100), (100, 110), (100, 100)]
     (a, b), (c, d) = json.loads(calib.read_text(encoding="utf-8"))["A"]
     assert 0.5 <= abs(b) / abs(d) <= 2 and 0.5 <= abs(a) / abs(c) <= 2  # 測り直した 45 度の記録が保存されている
+
+
+def test_learns_direction_while_walking(tmp_path):
+    """向きの記録が 45 度だが左右が逆 (確認は通ってしまう) でも、歩いた結果から直して着く"""
+    calib = tmp_path / "home_nav.json"
+    calib.write_text(json.dumps({"A": [[0.025, -0.025], [0.025, 0.025]]}), encoding="utf-8")
+    g = FakeGame()
+
+    def run(script):
+        for cmd in script.split(";"):
+            if cmd.startswith("a:"):
+                g.click = tuple(int(v) for v in cmd[2:].split(","))
+            elif cmd == "bu:L":
+                ox, oy = g.click[0] - 400, g.click[1] - 300
+                g.x += round(A_Y[0][0] * ox + A_Y[0][1] * oy)
+                g.y += round(A_Y[1][0] * ox + A_Y[1][1] * oy)
+            elif cmd == "k:home":
+                g.homes += 1
+                g.log.append(("home", g.x, g.y))
+                if g.homes >= 2:
+                    t.stop()
+        return "ok"
+
+    box, logs = {}, []
+    ptr = Pointer(lambda s: box["t"].run(s), lambda sx, sy: (int(round(sx)), int(round(sy))), settle_ms=0, hold_ms=0)
+    t = ShuttleTest(run, lambda: np.zeros((600, 800, 3), np.uint8), lambda img: Loc("m", g.x, g.y),
+                    lambda x, y: (x, y), ptr, log=lambda lv, m: logs.append(m), calib_path=calib, wait_s=0,
+                    tiles=10, base_xy=(100, 100))
+    box["t"] = t
+    use_clock(t)
+    t._main()
+    assert any("歩いた結果から画面の向きを直しました" in m for m in logs)
+    assert abs(g.log[0][1] - 100) <= 2 and abs(g.log[0][2] - 90) <= 2   # 上 (100, 90) の近く
+    assert abs(g.log[1][1] - 100) <= 2 and abs(g.log[1][2] - 100) <= 2  # 基準点の近く
