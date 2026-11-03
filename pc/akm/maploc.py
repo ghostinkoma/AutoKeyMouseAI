@@ -430,9 +430,30 @@ class MapDB:
 _XY_STRICT = re.compile(r"[\(\[\{]\s*([0-9OoIl|]{1,3})\s*[,.\s]\s*([0-9OoIl|]{1,3})\s*[\)\]\}]")
 
 
+# 日本語の OCR が数字・括弧を似た文字に読んだもの ("7)" → "刀" など)。英語の OCR が無い PC では日本語で読まれる
+_JP_LOOKALIKE = {"刀": "7)", "力": "7)", "カ": "7)", "ク": "7", "了": "7", "口": "0", "〇": "0", "ロ": "0",
+                 "、": ",", "，": ",", "。": ".", "ノ": "/", "｜": "1", "l": "1", "I": "1"}
+
+
+def normalize_ocr_digits(text: str) -> str:
+    """全角 → 半角 (NFKC) にし、数字・括弧に似た日本語の文字を戻す"""
+    import unicodedata
+
+    out = ""
+    for c in unicodedata.normalize("NFKC", text):
+        rep = _JP_LOOKALIKE.get(c)
+        if rep is None:
+            out += c
+            continue
+        if rep[0].isdigit() and out.rstrip() != out and out.rstrip()[-1:].isdigit():
+            out = out.rstrip()  # "13 刀" → "137)" (読み違えた字の前に入った空白を詰める)
+        out += rep
+    return out
+
+
 def parse_xy_strict(text: str) -> tuple[int, int] | None:
     """OCR の文字から "(x, y)" を取り出す。閉じ括弧が無い (表示が切れている) ものは None"""
-    t = text.replace("\n", " ").replace("（", "(").replace("）", ")").replace("，", ",")
+    t = normalize_ocr_digits(text.replace("\n", " "))
     m = None
     for m in _XY_STRICT.finditer(t):
         pass  # 最後のもの (座標は表示の最後)

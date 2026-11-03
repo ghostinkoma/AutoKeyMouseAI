@@ -13,6 +13,9 @@ def test_parse_xy_strict():
     assert parse_xy_strict("Lost Tower (12 , 7)") == (12, 7)
     assert parse_xy_strict("x (1O, l8)") == (10, 18)              # O → 0, l → 1
     assert parse_xy_strict("(300, 5)") is None                    # 0〜255 の外
+    # 英語の OCR が無い PC (日本語で読む): "7)" → "刀"、全角
+    assert parse_xy_strict("Noria ( 55 , 13 刀") == (55, 137)
+    assert parse_xy_strict("Noria （５５，１３７）") == (55, 137)
 
 
 def test_widen_roi():

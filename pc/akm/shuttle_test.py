@@ -26,6 +26,23 @@ from .home_return import HomeReturn, Settings
 from .maploc import Location
 
 
+def digit_slip(a, b) -> bool:
+    """b が a の座標の桁を 1〜2 つ落とした / 足しただけの読みか (x・y それぞれ、同じか桁違いだけ。少なくとも 1 つは違う)"""
+
+    def sub(short: str, long: str) -> bool:  # short が long から 1〜2 文字落としたものか
+        if not 1 <= len(long) - len(short) <= 2 or not short:
+            return False
+        it = iter(long)
+        return all(c in it for c in short)
+
+    def slip(p: int, q: int) -> bool:
+        s, t = str(int(p)), str(int(q))
+        return sub(t, s) or sub(s, t)
+
+    same_or_slip = [(p == q) or slip(p, q) for p, q in ((a.x, b.x), (a.y, b.y))]
+    return all(same_or_slip) and (a.x, a.y) != (b.x, b.y)
+
+
 class _Walker(HomeReturn):
     """HomeReturn の歩き方だけを使う (待つ間に画面を撮ってポーションを見る処理は省く)"""
 
@@ -48,8 +65,8 @@ class ShuttleTest:
     def __init__(self, run, grab, read_loc, client_to_screen, pointer, log=print, calib_path: Path | None = None,
                  tiles: int = 5, wait_s: float = 5.0, helper_key: str = "home", max_walk_s: float = 30.0,
                  arrive_tiles: float = 0.5, map_name: str = "Crywolf", max_jump: int = 15, far_tiles: int = 40,
-                 helper_probe=None, alive=None, max_speed: float = 8.0, base_tiles: int = 3, jump_reads: int = 5,
-                 jump_s: float = 2.0, clock=time.monotonic, base_xy: tuple[int, int] | None = None,
+                 helper_probe=None, alive=None, max_speed: float = 8.0, base_tiles: int = 3, jump_reads: int = 8,
+                 jump_s: float = 4.0, clock=time.monotonic, base_xy: tuple[int, int] | None = None,
                  exact_s: float = 3.0, tolerance: int = 2, axis: str = "y", helper_wait_s: float = 3.0):
         """run(script): マクロを送る (前面でなければ待つ・止められたら InterruptedError)
         grab(): ゲーム画面 (原寸)。read_loc(img): 現在地 (x, y を持つもの。マップ名は使わない) か None
@@ -137,7 +154,15 @@ class ShuttleTest:
         if self._last is None:
             ok = True
         else:
-            ok = near(loc, self._last, self.base_tiles + self.max_speed * max(0.0, now - self._last_t))
+            # 経った秒数は 3 秒まで (読めない間が長いと、どんな読み違いでも通ってしまうので)
+            ok = near(loc, self._last, self.base_tiles + self.max_speed * min(3.0, max(0.0, now - self._last_t)))
+            if not ok and digit_slip(self._last, loc):
+                # 前の座標の桁が 1 つ抜けた / 増えただけ (137 → 37 / 13 など): OCR の読み違い。飛んだとは数えない
+                self.rejected += 1
+                if self.rejected <= 3 or self.rejected % 20 == 0:
+                    self.log("INFO", f"[往復] 座標の読み違い (桁の抜け) として捨てました: ({loc.x}, {loc.y}) "
+                                     f"(前 ({self._last.x}, {self._last.y}))")
+                return None
         if ok:
             self._last, self._last_t, self._odd = loc, now, []
             self._learn(loc, now)

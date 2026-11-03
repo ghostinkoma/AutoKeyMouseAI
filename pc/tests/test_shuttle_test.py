@@ -109,7 +109,7 @@ def test_read_loc_filters_misread_and_far_jump(tmp_path):
     logs = []
     t = ShuttleTest(lambda s: "ok", lambda: None, lambda img: Loc("x", *next(reads)), lambda x, y: (x, y), None,
                     log=lambda lv, m: logs.append(m), calib_path=tmp_path / "none.json", far_tiles=40,
-                    clock=lambda: now["t"])
+                    clock=lambda: now["t"], jump_reads=5, jump_s=2.0)
     xy = lambda r: None if r is None else (r.map, r.x, r.y)  # noqa: E731
 
     def step(dt=0.5):
@@ -335,3 +335,20 @@ def test_read_loc_picks_candidate_near_last(tmp_path):
     b = t.read_loc(None)
     assert (a.x, a.y) == (152, 160) and (b.x, b.y) == (155, 157)
     assert t.read_loc(None) is None  # 読めない
+
+
+def test_digit_slip_is_never_a_jump(tmp_path):
+    """立ち止まっている (55, 137) を (55, 37) と何回読み違えても、飛んだとはみなさない (桁の抜け)"""
+    from akm.shuttle_test import digit_slip
+
+    assert digit_slip(Loc("", 55, 137), Loc("", 55, 37)) and digit_slip(Loc("", 96, 131), Loc("", 96, 1))
+    assert digit_slip(Loc("", 55, 13), Loc("", 55, 137))
+    assert not digit_slip(Loc("", 99, 100), Loc("", 100, 100)) and not digit_slip(Loc("", 5, 5), Loc("", 5, 5))
+    now = {"t": 0.0}
+    t = ShuttleTest(lambda s: "ok", lambda: None, lambda img: Loc("", 55, 37), lambda x, y: (x, y), None,
+                    calib_path=tmp_path / "none.json", clock=lambda: now["t"], base_xy=(55, 137))
+    t.origin = ("Crywolf", 55, 137)
+    t._last, t._last_t = Loc("Crywolf", 55, 137), 0.0
+    for _ in range(30):
+        now["t"] += 0.5
+        assert t.read_loc(None) is None
