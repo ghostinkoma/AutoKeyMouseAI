@@ -812,8 +812,8 @@ class GateApp:
         self._armed = True
         if activate and IS_WINDOWS:  # 送信先の窓 (ミラーで映している窓) を前面にし、選んでおいた試験を始める
             then = self.arm_runs.get()
-            if then == "shuttle":
-                self._take_base()
+            if then == "shuttle" and self.shuttle is not None and self.shuttle.running:
+                self.stop_shuttle()  # 押し直し: 前の往復テストを止め、新しい基準点でやり直す
             threading.Thread(target=self._activate_and_report, args=(then,), daemon=True).start()
         self.log("GATE", f"ARM: {self.target_name} が前面にあるときだけキー操作を通します")
 
@@ -867,9 +867,13 @@ class GateApp:
         return self.vhid.user.busy_left_ms() if self.vhid is not None else 0.0
 
     def _activate_and_report(self, then: str = "none"):
+        base = None
+        t = self.target()
+        if then == "shuttle" and t is not None:  # 押した瞬間の座標を、前面に出す前に読む (基準点)
+            base = self._read_base(t.hwnd)
         if self._activate_once():
             if then == "shuttle":
-                self.root.after(0, self.start_shuttle)
+                self.root.after(0, lambda: self.start_shuttle(base=base, have_base=True))
             elif then == "check":
                 self.root.after(0, self.start_mouse_check)
 
@@ -1043,26 +1047,39 @@ class GateApp:
                                     f"(表示範囲 {r.left},{r.top} {r.width}x{r.height})")
         return t.hwnd
 
-    def _take_base(self):
-        """押した瞬間の座標を基準点として覚える (ミラーの画面で読んでいる現在地)。読めていなければ None"""
-        snap = self.snap
-        loc = snap.loc if snap is not None else None
-        if loc is None:
-            self._base = None
-            self.log("WARN", "今の座標が読めていません。往復テストを始めるときの座標を基準点にします")
-        else:
-            self._base = ((int(loc.x), int(loc.y)), time.monotonic())
-            self.log("INFO", f"基準点を記録しました: ({loc.x}, {loc.y})")
+    def _read_base(self, hwnd: int):
+        """基準点: 押した瞬間のゲーム画面から座標を読み直す (前に読んだ値・前回の基準点は使わない)。
+        読み違いを避けるため、何回か読んで同じになった座標を使う。読めなければ None"""
+        try:
+            from akm.maploc import LocationReader, make_ocr
 
-    def start_shuttle(self):
-        if (self.shuttle is not None and self.shuttle.running) or getattr(self, "_busy", False):
-            self.log("INFO", "往復テスト / マウス診断はもう動いています")
+            if getattr(self, "_base_reader", None) is None:
+                lcfg = self.cfg.get("maplog") or {}
+                self._base_reader = LocationReader(lcfg, make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd")))
+            seen: dict[tuple[int, int], int] = {}
+            for _ in range(6):
+                loc = self._base_reader.read_raw(self.live._grab(hwnd, full=True)[0])
+                if loc is not None:
+                    xy = (int(loc.x), int(loc.y))
+                    seen[xy] = seen.get(xy, 0) + 1
+                    if seen[xy] >= 2:
+                        self.log_threadsafe("INFO", f"基準点 (押したときの座標): {xy}")
+                        return xy
+                time.sleep(0.1)
+        except Exception as e:  # noqa: BLE001
+            self.log_threadsafe("WARN", f"基準点の座標を読めません: {e}")
+            return None
+        self.log_threadsafe("WARN", "基準点の座標を読めませんでした (読みがそろわない)")
+        return None
+
+    def start_shuttle(self, base=None, have_base: bool = False):
+        """往復テストを始める。押すたびに、その瞬間の座標を基準点にする (動いていれば止めてやり直す)"""
+        if getattr(self, "_busy", False):
+            self.log("INFO", "往復テスト / マウス診断を準備しています")
             return
-        b = getattr(self, "_base", None)
-        if b is None or time.monotonic() - b[1] > 15:  # ARM で記録したものが無い・古い: いま押した瞬間の座標
-            self._take_base()
-        base_xy = self._base[0] if self._base else None
-        self._base = None
+        old = self.shuttle if (self.shuttle is not None and self.shuttle.running) else None
+        if old is not None:
+            self.stop_shuttle()
         tiles, wait = int(self.shuttle_tiles.get()), float(self.shuttle_wait.get())
         map_name, mode = self.shuttle_map.get().strip() or "Crywolf", self.mouse_mode.get()
         pcfg = self.cfg.get("virtual_hid") or {}
@@ -1070,6 +1087,17 @@ class GateApp:
         def go():
             self._busy = True
             try:
+                base_xy = base
+                if old is not None:  # 前の往復テストが止まるのを待つ
+                    for _ in range(100):
+                        if not old.running:
+                            break
+                        time.sleep(0.05)
+                t0 = self.target()
+                if not have_base and t0 is not None:
+                    base_xy = self._read_base(t0.hwnd)
+                if base_xy is None:
+                    self.log_threadsafe("WARN", "基準点を読めなかったので、往復テストを始めるときの座標を使います")
                 hwnd = self._begin_on_target("往復テスト")
                 if hwnd is None:
                     return
