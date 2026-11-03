@@ -22,6 +22,27 @@ class Loc:
     y: int
 
 
+class Clock:
+    """偽の時計: 待つと進む (歩く側の待ち時間で、ゲームの時間も進んだことにする)"""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+def use_clock(t):
+    c = Clock()
+    t.clock = t.walker.clock = c
+    t.walker.sleep = c.sleep
+    t.max_speed = 100.0  # 偽のゲームは一瞬で歩くので、速さの判定はゆるめる
+    return c
+
+
 class FakeGame:
     def __init__(self):
         self.x, self.y = 100, 100
@@ -57,7 +78,7 @@ def test_shuttle_order(tmp_path):
                     lambda x, y: (x, y), ptr, log=lambda lv, m: logs.append((lv, m)), calib_path=calib, tiles=5,
                     wait_s=0, map_name="Crywolf")
     box["t"] = t
-    t.walker.sleep = lambda s: None
+    use_clock(t)
     g.test = t
     t._main()
     assert t.origin == ("Crywolf", 100, 100)
@@ -141,7 +162,7 @@ def test_helper_is_ensured_on_after_each_move(tmp_path):
                     lambda x, y: (x, y), ptr, log=lambda lv, m: None, calib_path=calib, wait_s=0,
                     helper_probe=lambda: {"state": g.helper, "p": 0.9, "click": None})
     box["t"] = t
-    t.walker.sleep = lambda s: None
+    use_clock(t)
     g.test = t
     t._main()
     assert g.log == [("home", 105, 105), ("home", 100, 100), ("home", 95, 95), ("home", 100, 100)]
@@ -166,8 +187,37 @@ def test_focus_lost_stops(tmp_path):
                     lambda x, y: (x, y), ptr, log=lambda lv, m: logs.append(m), calib_path=calib, wait_s=0,
                     alive=lambda: alive["v"])
     box["t"] = t
-    t.walker.sleep = lambda s: None
+    use_clock(t)
     t._main()
     assert t.stop_reason == "focus lost"
     assert any("フォーカスが外れた" in m for m in logs)
     assert g.homes == 0
+
+
+def test_base_point_and_tolerance(tmp_path):
+    """開始ボタンを押したときの座標が基準点。壁で目的のマスに着けないときは ±2 マスまでで良しとする"""
+    calib = tmp_path / "home_nav.json"
+    calib.write_text(json.dumps({"A": A}), encoding="utf-8")
+    g = FakeGame()
+    g.x, g.y = 101, 100  # MU Helper がアイテムを拾って、押したときから 1 マス動いた
+
+    def run(script):
+        r = g.run(script)
+        g.x = min(g.x, 103)  # 壁: x は 103 より先へ行けない
+        return r
+
+    box = {}
+    logs = []
+    ptr = Pointer(lambda s: box["t"].run(s), lambda sx, sy: (int(round(sx)), int(round(sy))), settle_ms=0, hold_ms=0)
+    t = ShuttleTest(run, lambda: np.zeros((600, 800, 3), np.uint8), lambda img: Loc("m", g.x, g.y),
+                    lambda x, y: (x, y), ptr, log=lambda lv, m: logs.append(m), calib_path=calib, wait_s=0,
+                    base_xy=(100, 100), exact_s=0.2, max_walk_s=0.6)
+    box["t"] = t
+    use_clock(t)
+    g.test = t
+    t._main()
+    assert t.origin[1:] == (100, 100)
+    first = g.log[0]
+    assert abs(first[1] - 105) <= 2 and abs(first[2] - 105) <= 2  # 上 (105, 105) の近く
+    assert any("近くに着いた" in m for m in logs)
+    assert g.log[1][1:] == (100, 100)

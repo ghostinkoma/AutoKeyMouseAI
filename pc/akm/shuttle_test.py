@@ -1,5 +1,6 @@
-"""往復の試験: 今いる場所を基準に、画面の上 (北) へ N マス → Home → 待つ → 元の座標 → Home → 待つ →
-画面の下 (南) へ N マス → Home → 待つ → 元の座標 → Home → 待つ、を止めるまで繰り返す。
+"""往復の試験: 開始ボタンを押したときの座標を基準点に、画面の上 (北) へ N マス → Home → 待つ → 基準点 → Home →
+待つ → 画面の下 (南) へ N マス → Home → 待つ → 基準点 → Home → 待つ、を止めるまで繰り返す。
+(MU Helper はアイテムを拾うたびに動くので、行き先はいつも基準点から決める。着けないときは ±2 マスまで許す)
 
   * Home で MU Helper が入る。自分で歩くと MU Helper は切れるので、着くたびに Home で入れ直す
   * 歩くのは MU Helper の帰還 (akm/home_return.py) と同じ方法: 行き先の方向をクリックし、現在地 (OCR) を
@@ -47,8 +48,9 @@ class ShuttleTest:
     def __init__(self, run, grab, read_loc, client_to_screen, pointer, log=print, calib_path: Path | None = None,
                  tiles: int = 5, wait_s: float = 5.0, helper_key: str = "home", max_walk_s: float = 30.0,
                  arrive_tiles: float = 0.5, map_name: str = "Crywolf", max_jump: int = 15, far_tiles: int = 40,
-                 helper_probe=None, alive=None, max_speed: float = 6.0, base_tiles: int = 3, jump_reads: int = 5,
-                 jump_s: float = 2.0, clock=time.monotonic):
+                 helper_probe=None, alive=None, max_speed: float = 8.0, base_tiles: int = 3, jump_reads: int = 5,
+                 jump_s: float = 2.0, clock=time.monotonic, base_xy: tuple[int, int] | None = None,
+                 exact_s: float = 8.0, tolerance: int = 2):
         """run(script): マクロを送る (前面でなければ待つ・止められたら InterruptedError)
         grab(): ゲーム画面 (原寸)。read_loc(img): 現在地 (x, y を持つもの。マップ名は使わない) か None
         client_to_screen(x, y): ゲーム画面の座標 → 画面の画素
@@ -57,6 +59,10 @@ class ShuttleTest:
                         「停止中なら Home → 動作中になったか確かめる」。無ければ Home を押すだけ
         alive(): 続けてよいか (送信先が前面か)。False になったらその場で止める (InterruptedError)"""
         self.alive = alive
+        self.base_xy = base_xy        # 開始ボタンを押したときの座標 (基準点)。None なら始めに読む
+        self.exact_s = float(exact_s)  # まずこの秒数はちょうどのマスを狙う
+        self.tolerance = int(tolerance)  # 着けないときは上下左右にこのマス数までずれてよい
+        self.max_walk_s = float(max_walk_s)
         self.stop_reason = ""
         self._run, self.grab, self._read_loc, self.log = run, grab, read_loc, log
         self.client_to_screen, self.pointer = client_to_screen, pointer
@@ -101,7 +107,7 @@ class ShuttleTest:
         """座標だけを読む (マップ名は map_name に置き換える)。
 
         OCR は同じ読み違いを続けることがある (立ち止まっている間は同じ画像なので、18 を 1 や 191 と何度も読む)。
-        そこで歩ける速さで判定する: 前に採用した座標から「base_tiles + 速さ × 経った秒数」より離れた読みは捨てる。
+        そこで歩ける速さで判定する: 前に採用した座標から「base_tiles + 速さ (8 マス/秒) × 経った秒数」より離れた読みは捨てる。
         離れた読みが jump_reads 回以上・jump_s 秒以上続けて同じ所なら、本当に飛んだ (死んだ・ワープ) とみなす"""
         raw = self._read_loc(img)
         if raw is None:
@@ -132,7 +138,7 @@ class ShuttleTest:
                 return None
         if self.origin is not None and not near(loc, Location(self.map_name, self.origin[1], self.origin[2]),
                                                 self.far_tiles):
-            raise RuntimeError(f"元の座標 ({self.origin[1]}, {self.origin[2]}) から {self.far_tiles} マスより離れました "
+            raise RuntimeError(f"基準点 ({self.origin[1]}, {self.origin[2]}) から {self.far_tiles} マスより離れました "
                                f"(今 ({loc.x}, {loc.y}))。死んで飛ばされた・ワープしたなど。往復テストを止めます")
         return loc
 
@@ -171,13 +177,30 @@ class ShuttleTest:
         m, x, y = self.origin
         return m, int(round(x + vx / n * self.tiles)), int(round(y + vy / n * self.tiles))
 
+    def _within(self, here, target, d: int) -> bool:
+        return here is not None and abs(here.x - target[1]) <= d and abs(here.y - target[2]) <= d
+
     def walk_to(self, target, label: str) -> str:
+        """target へ歩く。まず exact_s 秒はちょうどのマスを狙い、着けなければ上下左右 tolerance マスまでで良しとする"""
         self.status = f"{label} ({target[1]}, {target[2]}) へ"
         self.walker.home = target
+        st = self.walker.settings
+        st.arrive_tiles, st.max_walk_s = 0.5, self.exact_s
         res = self.walker.walk_home()
-        here = self.read_loc(self.grab())
-        where = f"({here.x}, {here.y})" if here is not None else "(現在地不明)"
+        _, here = self.walker._loc()
         ok = res.startswith("着いた")
+        if not ok and not self._within(here, target, self.tolerance):
+            # ちょうどには着けない (障害物・アイテム・ほかのキャラクターなど): 近くまででよい
+            st.arrive_tiles = self.tolerance * 1.42  # 斜めに tolerance マス離れていても着いたことにする
+            st.max_walk_s = max(2.0, self.max_walk_s - self.exact_s)
+            res = self.walker.walk_home()
+            _, here = self.walker._loc()
+        if not ok:
+            ok = self._within(here, target, self.tolerance)
+            if ok:
+                res = f"近くに着いた (許容 ±{self.tolerance})"
+        st.arrive_tiles, st.max_walk_s = 0.5, self.max_walk_s
+        where = f"({here.x}, {here.y})" if here is not None else "(現在地不明)"
         self.log("INFO" if ok else "WARN", f"[往復] {label} ({target[1]}, {target[2]}): {res}  今 {where}")
         return res
 
@@ -227,21 +250,29 @@ class ShuttleTest:
             self.status = "停止中"
 
     def _loop(self) -> None:
-        self.status = "現在地を読んでいます"
-        here = self.read_here()
-        if here is None:
-            raise RuntimeError("現在地が読めません (画面右下の座標。OCR が使えるか確認してください)")
+        if self.base_xy is not None:  # 開始ボタンを押したときの座標を基準点にする
+            bx, by = self.base_xy
+            here = Location(self.map_name, int(bx), int(by))
+            self._last, self._last_t = here, self.clock()  # 読み違いの判定もここから
+            src = "開始ボタンを押したときの座標"
+        else:
+            self.status = "現在地を読んでいます"
+            here = self.read_here()
+            if here is None:
+                raise RuntimeError("現在地が読めません (画面右下の座標。OCR が使えるか確認してください)")
+            src = "今の座標"
         self.origin = (here.map, int(here.x), int(here.y))
         if self.walker.helper_probe is not None:
             st, p, _ = self.walker.confirm(2)
             self.log("INFO", f"[往復] MU Helper の今の状態 (学習済みの AI): {self.walker.helper_seen}")
-        self.log("INFO", f"[往復] 元の座標: {here.map} ({here.x}, {here.y})  {self.tiles} マス / {self.wait_s:g} 秒")
+        self.log("INFO", f"[往復] 基準点 ({src}): {here.map} ({here.x}, {here.y})  {self.tiles} マス / "
+                         f"{self.wait_s:g} 秒 / 着けないときは ±{self.tolerance} マスまで")
         if not self.walker.calib.ok():
             self.status = "画面の向きを調べています"
             self.log("INFO", "[往復] 画面の向き (何ピクセルで何マス) を調べます。右・下へ少し歩きます")
             if not self.walker.calibrate(self.grab()):
                 raise RuntimeError("画面の向きを調べられません (壁際? 少し開けた所で始めてください)")
-            self.walk_to(self.origin, "元の座標")
+            self.walk_to(self.origin, "基準点")
         (a, b), (c, d) = self.walker.calib.A
         px = 1 / max(1e-6, math.hypot(b, d))
         up, down = self.offset_target(-1), self.offset_target(+1)
@@ -253,9 +284,9 @@ class ShuttleTest:
                 self.press_helper()
                 self.status = f"{label} で待機 {self.wait_s:g} 秒"
                 self._sleep(self.wait_s)
-                self.walk_to(self.origin, "元の座標")
+                self.walk_to(self.origin, "基準点")
                 self.press_helper()
-                self.status = f"元の座標で待機 {self.wait_s:g} 秒"
+                self.status = f"基準点で待機 {self.wait_s:g} 秒"
                 self._sleep(self.wait_s)
             self.laps += 1
             self.log("INFO", f"[往復] {self.laps} 周しました")

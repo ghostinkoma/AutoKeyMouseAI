@@ -812,6 +812,8 @@ class GateApp:
         self._armed = True
         if activate and IS_WINDOWS:  # 送信先の窓 (ミラーで映している窓) を前面にし、選んでおいた試験を始める
             then = self.arm_runs.get()
+            if then == "shuttle":
+                self._take_base()
             threading.Thread(target=self._activate_and_report, args=(then,), daemon=True).start()
         self.log("GATE", f"ARM: {self.target_name} が前面にあるときだけキー操作を通します")
 
@@ -1041,10 +1043,26 @@ class GateApp:
                                     f"(表示範囲 {r.left},{r.top} {r.width}x{r.height})")
         return t.hwnd
 
+    def _take_base(self):
+        """押した瞬間の座標を基準点として覚える (ミラーの画面で読んでいる現在地)。読めていなければ None"""
+        snap = self.snap
+        loc = snap.loc if snap is not None else None
+        if loc is None:
+            self._base = None
+            self.log("WARN", "今の座標が読めていません。往復テストを始めるときの座標を基準点にします")
+        else:
+            self._base = ((int(loc.x), int(loc.y)), time.monotonic())
+            self.log("INFO", f"基準点を記録しました: ({loc.x}, {loc.y})")
+
     def start_shuttle(self):
         if (self.shuttle is not None and self.shuttle.running) or getattr(self, "_busy", False):
             self.log("INFO", "往復テスト / マウス診断はもう動いています")
             return
+        b = getattr(self, "_base", None)
+        if b is None or time.monotonic() - b[1] > 15:  # ARM で記録したものが無い・古い: いま押した瞬間の座標
+            self._take_base()
+        base_xy = self._base[0] if self._base else None
+        self._base = None
         tiles, wait = int(self.shuttle_tiles.get()), float(self.shuttle_wait.get())
         map_name, mode = self.shuttle_map.get().strip() or "Crywolf", self.mouse_mode.get()
         pcfg = self.cfg.get("virtual_hid") or {}
@@ -1081,7 +1099,7 @@ class GateApp:
                               hold_ms=int(pcfg.get("click_hold_ms", 80)), log=self.log_threadsafe)
                 st = ShuttleTest(run, grab, read_loc, client_to_screen, ptr, log=self.log_threadsafe,
                                  calib_path=PC_DIR / "models" / "home_nav.json", tiles=tiles, wait_s=wait,
-                                 map_name=map_name, helper_probe=probe, alive=self._hid_allowed)
+                                 map_name=map_name, helper_probe=probe, alive=self._hid_allowed, base_xy=base_xy)
                 holder["t"] = st
                 self.shuttle = st
                 self.log_threadsafe("INFO", f"往復テストを始めます: {tiles} マス / {wait:g} 秒 / マップ {map_name} / "
