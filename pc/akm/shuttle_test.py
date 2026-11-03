@@ -31,12 +31,24 @@ class _Walker(HomeReturn):
     def _wait(self, ms: int) -> None:
         self.sleep(ms / 1000)
 
+    def _loc(self):
+        """現在地を読む。読めない・読み違いとして捨てたときは、少し待って読み直す (最大 2 秒ほど)"""
+        img = None
+        for _ in range(10):
+            img = self.grab()
+            loc = self.read_loc(img)
+            if loc is not None:
+                return img, loc
+            self.sleep(0.2)
+        return img, None
+
 
 class ShuttleTest:
     def __init__(self, run, grab, read_loc, client_to_screen, pointer, log=print, calib_path: Path | None = None,
                  tiles: int = 5, wait_s: float = 5.0, helper_key: str = "home", max_walk_s: float = 30.0,
                  arrive_tiles: float = 0.5, map_name: str = "Crywolf", max_jump: int = 15, far_tiles: int = 40,
-                 helper_probe=None, alive=None):
+                 helper_probe=None, alive=None, max_speed: float = 6.0, base_tiles: int = 3, jump_reads: int = 5,
+                 jump_s: float = 2.0, clock=time.monotonic):
         """run(script): マクロを送る (前面でなければ待つ・止められたら InterruptedError)
         grab(): ゲーム画面 (原寸)。read_loc(img): 現在地 (x, y を持つもの。マップ名は使わない) か None
         client_to_screen(x, y): ゲーム画面の座標 → 画面の画素
@@ -50,7 +62,11 @@ class ShuttleTest:
         self.client_to_screen, self.pointer = client_to_screen, pointer
         self.map_name, self.max_jump, self.far_tiles = map_name, int(max_jump), int(far_tiles)
         self._last = None      # 最後に採用した座標
-        self._pending = None   # 大きく飛んだ読み (もう 1 回同じ所なら採用)
+        self._last_t = 0.0
+        self._odd = []         # 離れすぎて捨てた読み (同じ所が続けば本当に飛んだ)
+        self.rejected = 0
+        self.max_speed, self.base_tiles = float(max_speed), int(base_tiles)
+        self.jump_reads, self.jump_s, self.clock = int(jump_reads), float(jump_s), clock
         self.tiles, self.wait_s, self.helper_key = int(tiles), float(wait_s), helper_key
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -82,23 +98,38 @@ class ShuttleTest:
         return w / 2, h / 2
 
     def read_loc(self, img):
-        """座標だけを読む (マップ名は map_name に置き換える)。1 回だけ大きく飛んだ読みは捨てる"""
+        """座標だけを読む (マップ名は map_name に置き換える)。
+
+        OCR は同じ読み違いを続けることがある (立ち止まっている間は同じ画像なので、18 を 1 や 191 と何度も読む)。
+        そこで歩ける速さで判定する: 前に採用した座標から「base_tiles + 速さ × 経った秒数」より離れた読みは捨てる。
+        離れた読みが jump_reads 回以上・jump_s 秒以上続けて同じ所なら、本当に飛んだ (死んだ・ワープ) とみなす"""
         raw = self._read_loc(img)
         if raw is None:
             return None
+        now = self.clock()
         loc = Location(self.map_name, int(raw.x), int(raw.y))
 
         def near(a, b, d):
             return abs(a.x - b.x) <= d and abs(a.y - b.y) <= d
 
-        if self._last is None or near(loc, self._last, self.max_jump):
-            self._last, self._pending = loc, None
-        elif self._pending is not None and near(loc, self._pending, 2):
-            self.log("WARN", f"[往復] 座標が大きく変わりました ({self._last.x}, {self._last.y}) → ({loc.x}, {loc.y})")
-            self._last, self._pending = loc, None
+        if self._last is None:
+            ok = True
         else:
-            self._pending = loc  # 読み違いかもしれない: 次も同じ所なら採用
-            return None
+            ok = near(loc, self._last, self.base_tiles + self.max_speed * max(0.0, now - self._last_t))
+        if ok:
+            self._last, self._last_t, self._odd = loc, now, []
+        else:
+            self._odd = [(lo, t) for lo, t in self._odd if near(lo, loc, 2)] + [(loc, now)]
+            if len(self._odd) >= self.jump_reads and now - self._odd[0][1] >= self.jump_s:
+                self.log("WARN", f"[往復] 座標が大きく変わりました ({self._last.x}, {self._last.y}) → ({loc.x}, {loc.y})"
+                                 f" ({len(self._odd)} 回続けて同じ読み)")
+                self._last, self._last_t, self._odd = loc, now, []
+            else:
+                self.rejected += 1
+                if self.rejected <= 3 or self.rejected % 20 == 0:
+                    self.log("INFO", f"[往復] 座標の読み違いとして捨てました: ({loc.x}, {loc.y}) "
+                                     f"(前 ({self._last.x}, {self._last.y}))")
+                return None
         if self.origin is not None and not near(loc, Location(self.map_name, self.origin[1], self.origin[2]),
                                                 self.far_tiles):
             raise RuntimeError(f"元の座標 ({self.origin[1]}, {self.origin[2]}) から {self.far_tiles} マスより離れました "
@@ -188,6 +219,10 @@ class ShuttleTest:
             self.log("INFO", f"[往復] {why}")
         except Exception as e:  # noqa: BLE001
             self.log("ERR", f"[往復] 止まりました: {type(e).__name__}: {e}")
+            try:  # 止まるときも MU Helper は入れておく (ゲームが前面のままなら)
+                self.press_helper()
+            except Exception as e2:  # noqa: BLE001
+                self.log("WARN", f"[往復] 止まるときに MU Helper を確かめられませんでした: {e2}")
         finally:
             self.status = "停止中"
 
@@ -197,6 +232,9 @@ class ShuttleTest:
         if here is None:
             raise RuntimeError("現在地が読めません (画面右下の座標。OCR が使えるか確認してください)")
         self.origin = (here.map, int(here.x), int(here.y))
+        if self.walker.helper_probe is not None:
+            st, p, _ = self.walker.confirm(2)
+            self.log("INFO", f"[往復] MU Helper の今の状態 (学習済みの AI): {self.walker.helper_seen}")
         self.log("INFO", f"[往復] 元の座標: {here.map} ({here.x}, {here.y})  {self.tiles} マス / {self.wait_s:g} 秒")
         if not self.walker.calib.ok():
             self.status = "画面の向きを調べています"

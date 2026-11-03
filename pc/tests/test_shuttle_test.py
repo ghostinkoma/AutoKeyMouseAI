@@ -76,19 +76,31 @@ def test_offset_is_five_steps(tmp_path):
 
 
 def test_read_loc_filters_misread_and_far_jump(tmp_path):
-    reads = iter([(100, 100), (180, 100), (101, 100), (150, 150), (151, 150)])
+    """立ち止まっている間に同じ読み違い (18 → 1 / 191) が続いても捨てる。本当に飛んだときは何回も・何秒も続く"""
+    reads = iter([(225, 18), (222, 1), (222, 1), (224, 18), (222, 191), (222, 191),
+                  (150, 150), (150, 150), (151, 150), (150, 150), (150, 151)])
+    now = {"t": 0.0}
     logs = []
     t = ShuttleTest(lambda s: "ok", lambda: None, lambda img: Loc("x", *next(reads)), lambda x, y: (x, y), None,
-                    log=lambda lv, m: logs.append(m), calib_path=tmp_path / "none.json", far_tiles=40)
-    assert (lambda r: (r.map, r.x, r.y))(t.read_loc(None)) == ("Crywolf", 100, 100)
-    t.origin = ("Crywolf", 100, 100)
-    assert t.read_loc(None) is None            # 1 回だけ大きく飛んだ: 読み違いとして捨てる
-    assert (lambda r: (r.map, r.x, r.y))(t.read_loc(None)) == ("Crywolf", 101, 100)
-    assert t.read_loc(None) is None            # 大きく飛んだ (1 回目)
+                    log=lambda lv, m: logs.append(m), calib_path=tmp_path / "none.json", far_tiles=40,
+                    clock=lambda: now["t"])
+    xy = lambda r: None if r is None else (r.map, r.x, r.y)  # noqa: E731
+
+    def step(dt=0.5):
+        now["t"] += dt
+        return xy(t.read_loc(None))
+
+    assert step() == ("Crywolf", 225, 18)
+    t.origin = ("Crywolf", 225, 18)
+    assert step() is None and step() is None      # (222, 1) が 2 回続いても捨てる
+    assert step() == ("Crywolf", 224, 18)
+    assert step() is None and step() is None      # (222, 191) も
     import pytest
 
+    for _ in range(4):
+        assert step() is None                      # (150, 150) 付近が続く: まだ様子を見る
     with pytest.raises(RuntimeError, match="離れました"):
-        t.read_loc(None)                       # 2 回続いた = 本当に飛んだ。元から遠いので止める
+        step()                                     # 5 回・2 秒以上続いた = 本当に飛んだ。元から遠いので止める
 
 
 def test_pointer_modes():
