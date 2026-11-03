@@ -423,3 +423,49 @@ class MapDB:
 
     def close(self) -> None:
         self.db.close()
+
+
+# ------------------------------------------------------------ 座標だけを確実に読む --
+# 閉じ括弧まで見えているものだけ (マップ名が長いと表示が切れて "(222, 1" のようになり、y を 1 と読んでしまう)
+_XY_STRICT = re.compile(r"[\(\[\{]\s*([0-9OoIl|]{1,3})\s*[,.\s]\s*([0-9OoIl|]{1,3})\s*[\)\]\}]")
+
+
+def parse_xy_strict(text: str) -> tuple[int, int] | None:
+    """OCR の文字から "(x, y)" を取り出す。閉じ括弧が無い (表示が切れている) ものは None"""
+    t = text.replace("\n", " ").replace("（", "(").replace("）", ")").replace("，", ",")
+    m = None
+    for m in _XY_STRICT.finditer(t):
+        pass  # 最後のもの (座標は表示の最後)
+    if m is None:
+        return None
+    try:
+        x, y = int(m.group(1).translate(_DIGIT_FIX)), int(m.group(2).translate(_DIGIT_FIX))
+    except ValueError:
+        return None
+    return (x, y) if 0 <= x <= 255 and 0 <= y <= 255 else None
+
+
+def widen_roi(roi, left: float = 0.06) -> list[float]:
+    """読む範囲を左へ広げる (マップ名が長いと文字列が左へはみ出す)"""
+    x, y, w, h = (float(v) for v in roi)
+    x0 = max(0.0, x - left)
+    return [x0, y, w + (x - x0), h]
+
+
+def read_xy_strict(reader: "LocationReader", img: np.ndarray, roi=None) -> Location | None:
+    """座標だけを確実に読む: 2 通りの前処理で読み、閉じ括弧まで見えていて、両方読めたら同じ値のときだけ採用。
+    マップ名は使わない (Location.map は空)。"""
+    x0, y0, x1, y1 = roi_px(img.shape, roi if roi is not None else widen_roi(reader.roi))
+    crop = img[y0:y1, x0:x1]
+    got = []
+    texts = []
+    for method in ("bright", "otsu"):
+        t = reader.ocr(preprocess(crop, reader.scale, method, reader.threshold)).strip()
+        texts.append(t)
+        xy = parse_xy_strict(t)
+        if xy is not None:
+            got.append(xy)
+    reader.last_text = " | ".join(texts)
+    if not got or (len(got) == 2 and got[0] != got[1]):
+        return None
+    return Location("", got[0][0], got[0][1])

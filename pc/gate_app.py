@@ -990,16 +990,24 @@ class GateApp:
 
     def _game_parts(self, hwnd: int):
         """往復テスト・マウス診断で使う部品: 画面・座標の読み取り・表示範囲"""
-        from akm.maploc import LocationReader, make_ocr
         from akm.screen import client_rect
 
-        lcfg = self.cfg.get("maplog") or {}
-        reader = LocationReader(lcfg, make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd")))
+        reader = self._coord_reader()
 
         def grab():
             return self.live._grab(hwnd, full=True)[0]
 
-        return grab, reader.read_raw, (lambda: client_rect(hwnd))
+        return grab, reader, (lambda: client_rect(hwnd))
+
+    def _coord_reader(self):
+        """座標だけを確実に読む関数 (img) -> Location か None。閉じ括弧まで見えているものだけ・2 通りの読みが同じとき
+        だけ (マップ名が長いと表示が切れる)。読む範囲は maplog.coord_roi (無ければ maplog.roi を左へ広げたもの)"""
+        from akm.maploc import LocationReader, make_ocr, read_xy_strict, widen_roi
+
+        lcfg = self.cfg.get("maplog") or {}
+        reader = LocationReader(lcfg, make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd")))
+        roi = lcfg.get("coord_roi") or widen_roi(reader.roi)
+        return lambda img: read_xy_strict(reader, img, roi)
 
     def _begin_on_target(self, what: str):
         """開始ボタンの共通の手順: 送信先を確かめ、ARM し、送信先を前面に出す (別のスレッドで呼ぶ)。
@@ -1059,14 +1067,11 @@ class GateApp:
         """基準点: 押した瞬間のゲーム画面から座標を読み直す (前に読んだ値・前回の基準点は使わない)。
         読み違いを避けるため、何回か読んで同じになった座標を使う。読めなければ None"""
         try:
-            from akm.maploc import LocationReader, make_ocr
-
             if getattr(self, "_base_reader", None) is None:
-                lcfg = self.cfg.get("maplog") or {}
-                self._base_reader = LocationReader(lcfg, make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd")))
+                self._base_reader = self._coord_reader()
             seen: dict[tuple[int, int], int] = {}
-            for _ in range(6):
-                loc = self._base_reader.read_raw(self.live._grab(hwnd, full=True)[0])
+            for _ in range(8):
+                loc = self._base_reader(self.live._grab(hwnd, full=True)[0])
                 if loc is not None:
                     xy = (int(loc.x), int(loc.y))
                     seen[xy] = seen.get(xy, 0) + 1

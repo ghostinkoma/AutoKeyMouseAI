@@ -59,7 +59,8 @@ class ShuttleTest:
                         「停止中なら Home → 動作中になったか確かめる」。無ければ Home を押すだけ
         alive(): 続けてよいか (送信先が前面か)。False になったらその場で止める (InterruptedError)"""
         self.alive = alive
-        # 上下の決め方: "y" = 座標の Y (画面の縦と同じ向き: 上 = Y が減る) / "x" = 座標の X / "screen" = 画面の上下
+        # 上下の決め方: "y" = 座標の Y (上 = Y が減る。画面では斜めに歩く: 座標は画面から 45 度傾いている)
+        #               "x" = 座標の X / "screen" = 画面の上下
         if axis not in ("y", "x", "screen"):
             raise ValueError(f"axis: {axis}")
         self.axis = axis
@@ -276,13 +277,19 @@ class ShuttleTest:
         self.log("INFO", f"[往復] 基準点 ({src}): {here.map} ({here.x}, {here.y})  {self.tiles} マス / "
                          f"{self.wait_s:g} 秒 / 着けないときは ±{self.tolerance} マスまで")
         need = not self.walker.calib.ok()
-        if not need and self.axis == "y":
-            # Y は画面の縦と同じ向き (上 = Y が減る)。記録がそうなっていなければ (古い・読み違いで測った) 調べ直す
+        if not need and self.axis in ("x", "y"):
+            # 座標の軸は画面から見て 45 度傾いている (画面の真下へ歩くと X も Y も同じくらい変わる)。
+            # 記録がそうなっていなければ (古い・読み違いで測った) 調べ直す
             (a, b), (c, d) = self.walker.calib.A
-            if not (d > 0 and abs(d) > 1.5 * abs(b)):
+
+            def diag(p, q):
+                return min(abs(p), abs(q)) > 0 and 0.5 <= abs(p) / abs(q) <= 2.0
+
+            if not (diag(a, c) and diag(b, d)):
                 need = True
-                self.log("WARN", f"[往復] 画面の向きの記録 (models/home_nav.json) が「画面の縦 = Y」と合いません "
-                                 f"(画面の下へ 100px で X {b * 100:+.1f} / Y {d * 100:+.1f} マス)。調べ直します")
+                self.log("WARN", f"[往復] 画面の向きの記録 (models/home_nav.json) が「座標は画面から 45 度傾いている」と"
+                                 f"合いません (画面の右へ 100px で X {a * 100:+.1f} / Y {c * 100:+.1f}、下へ 100px で "
+                                 f"X {b * 100:+.1f} / Y {d * 100:+.1f} マス)。調べ直します")
         if need:
             self.status = "画面の向きを調べています"
             self.log("INFO", "[往復] 画面の向き (何ピクセルで何マス) を調べます。右・下などへ少し歩きます")

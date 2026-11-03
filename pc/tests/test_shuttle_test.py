@@ -223,14 +223,15 @@ def test_base_point_and_tolerance(tmp_path):
     assert g.log[1][1:] == (100, 100)
 
 
-# 本物の MU: 画面の右 = X が増える / 画面の下 = Y が増える (Y は Windows の縦と同じ向き)
-A_Y = [[0.035, 0.0], [0.0, 0.037]]
+# 本物の MU: 座標は画面から見て 45 度傾いている (画面の右 = X が増え Y が減る / 画面の下 = X も Y も増える)
+A_Y = [[0.025, 0.025], [-0.025, 0.025]]
 
 
 def test_y_axis_round_trip_recalibrates_wrong_record(tmp_path):
-    """上下は座標の Y ±10。向きの記録が「画面の縦 = Y」と合わなければ、歩いて調べ直してから往復する"""
+    """上下は座標の Y ±10 (画面では斜め)。向きの記録が 45 度の傾きと合わなければ、歩いて調べ直してから往復する"""
     calib = tmp_path / "home_nav.json"
-    calib.write_text(json.dumps({"A": A}), encoding="utf-8")  # 古い (合わない) 記録
+    # 古い (合わない) 記録: 画面の上へ歩くと主に X が変わる (前に読み違いで測ったもの)
+    calib.write_text(json.dumps({"A": [[0.035, 0.037], [0.0, -0.007]]}), encoding="utf-8")
     g = FakeGame()
 
     def run(script):
@@ -259,4 +260,4 @@ def test_y_axis_round_trip_recalibrates_wrong_record(tmp_path):
     assert any("調べ直します" in m for m in logs)
     assert [h[1:] for h in g.log] == [(100, 90), (100, 100), (100, 110), (100, 100)]
     (a, b), (c, d) = json.loads(calib.read_text(encoding="utf-8"))["A"]
-    assert d > 0 and abs(d) > 1.5 * abs(b)  # 測り直した記録が保存されている
+    assert 0.5 <= abs(b) / abs(d) <= 2 and 0.5 <= abs(a) / abs(c) <= 2  # 測り直した 45 度の記録が保存されている
