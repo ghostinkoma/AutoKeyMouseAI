@@ -155,6 +155,49 @@ def foreground_hwnd(windows: list[GameWindow]) -> int | None:
 # ---------------------------------------------------------------------------
 # リボン (Excel のようなタブ + グループ)
 # ---------------------------------------------------------------------------
+def is_admin() -> bool:
+    if not IS_WINDOWS:
+        return True
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def process_elevated(pid: int) -> bool | None:
+    """そのプロセスが管理者として動いているか。調べられなければ None
+    (管理者でないこのアプリからは、管理者のプロセスを調べられないことが多い = たぶん管理者)"""
+    if not IS_WINDOWS or not pid:
+        return None
+    k32, adv = ctypes.WinDLL("kernel32"), ctypes.WinDLL("advapi32")
+    k32.OpenProcess.restype = wintypes.HANDLE
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    tok = wintypes.HANDLE()
+    try:
+        if not adv.OpenProcessToken(h, 0x0008, ctypes.byref(tok)):  # TOKEN_QUERY
+            return None
+        try:
+            val, size = wintypes.DWORD(), wintypes.DWORD()
+            if not adv.GetTokenInformation(tok, 20, ctypes.byref(val), 4, ctypes.byref(size)):  # TokenElevation
+                return None
+            return bool(val.value)
+        finally:
+            k32.CloseHandle(tok)
+    finally:
+        k32.CloseHandle(h)
+
+
+def relaunch_as_admin() -> bool:
+    """このアプリを管理者として起動し直す (UAC の確認が出る)。起動できたら True"""
+    import os
+
+    params = " ".join(f'"{a}"' for a in sys.argv)
+    r = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, os.getcwd(), 1)
+    return int(r) > 32
+
+
 def title_bar_point(hwnd: int) -> tuple[int, int] | None:
     """ウィンドウのタイトルバーで、ほかの窓に隠れていない点 (画面の画素)。無ければ None
     (タイトルバーが無い窓・全部隠れている・別の仮想デスクトップにある)。ゲームの中 (クライアント) はクリックしない"""
@@ -282,6 +325,11 @@ class GateApp:
         self.log("INFO", "起動しました。ゲートと ESP32 との接続はまだモックです (ESP32 には何も送りません)")
         self.log("INFO", "MURex のウィンドウを監視します (クラス名 '%s')" % GAME_CLASS
                  if IS_WINDOWS else "Windows 以外なのでダミーのウィンドウ・画面・マップを表示します")
+        if IS_WINDOWS:
+            self.log("INFO" if is_admin() else "WARN",
+                     "管理者として動いています" if is_admin() else
+                     "管理者として動いていません。ゲームは管理者で動くので、このままではキー・マウスが届きません"
+                     " (「ファイル」タブの「管理者で起動し直す」)")
         root.report_callback_exception = self._tk_error  # ボタンなどの中のエラーもログに出す
         self._start_live()
         self.refresh_windows()
@@ -318,6 +366,7 @@ class GateApp:
         rb.button(g, "再読み込み")
         g = rb.group(t, "アプリ")
         rb.button(g, "ログを保存")
+        rb.button(g, "管理者で\n起動し直す", command=self.restart_as_admin)
         rb.button(g, "終了", command=self.root.destroy)
 
         # ホーム: 送信先の選択とゲート
@@ -797,6 +846,27 @@ class GateApp:
         """人がこの PC を操作していれば、あと何 ms で「止まった」とみなすか (0 = 操作していない)"""
         return self.vhid.user.busy_left_ms() if self.vhid is not None else 0.0
 
+    def restart_as_admin(self):
+        if not IS_WINDOWS:
+            return
+        if is_admin():
+            self.log("INFO", "もう管理者として動いています")
+            return
+        if relaunch_as_admin():
+            self.root.destroy()
+        else:
+            self.log("ERR", "管理者として起動し直せませんでした (UAC で「いいえ」を選んだ?)")
+
+    def input_blocked_reason(self, pid: int) -> str:
+        """キー・マウスがゲームに届かない理由があれば、その説明 (無ければ空)"""
+        if not IS_WINDOWS or is_admin():
+            return ""
+        if process_elevated(pid) is False:
+            return ""
+        return ("この仲介アプリは管理者として動いていません。ゲーム (Main.exe) は管理者で動いているので、"
+                "Windows がこのアプリからのキー・マウスを捨てます (カーソルも動きません)。"
+                "「ファイル」タブの「管理者で起動し直す」を押すか、管理者の PowerShell から起動してください")
+
     def activate_target(self) -> bool:
         """送信先を前面に出す。まずキー・マウスの出口からタイトルバーをクリックし (人が操作するのと同じ)、
         だめなら Windows の機能で出す (別の仮想デスクトップにあるときはこちら。デスクトップが切り替わる)"""
@@ -812,6 +882,11 @@ class GateApp:
                 hx, hy = self._screen_to_hid(*pt)
                 b.move_abs(hx, hy)
                 time.sleep(0.05)
+                cx, cy = self._cursor()
+                if max(abs(cx - pt[0]), abs(cy - pt[1])) > 3:
+                    self.log_threadsafe("ERR", f"カーソルが動きません (狙い {pt} → 実際 ({cx}, {cy}))。"
+                                               "Windows がこのアプリの入力を受け付けていません")
+                    return bring_to_front(hwnd, 1.0)
                 b.buttons(1)
                 time.sleep(0.06)
                 b.buttons(0)
@@ -875,6 +950,10 @@ class GateApp:
         if self.live is None:
             self.log_threadsafe("ERR", "画面の撮影が動いていないので、現在地を読めません")
             return None
+        why = self.input_blocked_reason(t.pid)
+        if why:
+            self.log_threadsafe("ERR", why)
+            return None
         if not self._armed:
             self.root.after(0, self.arm)
             for _ in range(20):
@@ -883,9 +962,14 @@ class GateApp:
                 time.sleep(0.05)
         self.get_hid()
         self.log_threadsafe("INFO", f"{what}: {t.name} の窓を前面にします")
-        if not self._hid_allowed() and not self.activate_target():
-            self.log_threadsafe("WARN", f"{t.name} の窓を前面にできません。止めます")
-            return None
+        if not self._hid_allowed():
+            pt = title_bar_point(t.hwnd)
+            self.log_threadsafe("INFO", f"タイトルバーをクリックします {pt}" if pt else
+                                "タイトルバーが見えないので、Windows の機能で前面に出します")
+            if not self.activate_target():
+                self.log_threadsafe("WARN", f"{t.name} の窓を前面にできません。止めます")
+                return None
+        self.log_threadsafe("INFO", f"{t.name} が前面になりました")
         time.sleep(0.3)
         return t.hwnd
 
