@@ -603,7 +603,7 @@ class VirtualHid:
         c = cfg or {}
         return cls(backend, float(c.get("event_delay_ms", 10)), float(c.get("latency_ms", 0)),
                    float(c.get("jitter_ms", 0)), float(c.get("report_interval_ms", 0)), str(c.get("layout", "jp")),
-                   allow, user_idle_ms=float(c.get("user_idle_ms", 3000)))
+                   allow, user_idle_ms=float(c.get("user_idle_ms", 0)))
 
     # -- 操作の送り出し (遅れの模擬を通す)
     def _emit(self, fn, *args) -> None:

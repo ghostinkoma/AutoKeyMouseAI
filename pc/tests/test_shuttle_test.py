@@ -106,3 +106,56 @@ def test_pointer_modes():
     r = Pointer(run, None, cursor=lambda: tuple(pos), mode="rel")
     r.move(100, -50)
     assert abs(pos[0] - 100) <= 1 and abs(pos[1] + 50) <= 1
+
+
+def test_helper_is_ensured_on_after_each_move(tmp_path):
+    """着いたら AI で MU Helper を見て、停止中のときだけ Home を押す (歩くと切れる)。動作中なら押さない"""
+    calib = tmp_path / "home_nav.json"
+    calib.write_text(json.dumps({"A": A}), encoding="utf-8")
+    g = FakeGame()
+    g.helper = True  # 始めは動作中 (最初の移動で切れる)
+    orig_run = g.run
+
+    def run(script):
+        if "bu:L" in script:
+            g.helper = False  # 自分で歩くと MU Helper は切れる
+        if script == "k:home":
+            g.helper = not g.helper
+        return orig_run(script)
+
+    box = {}
+    ptr = Pointer(lambda s: box["t"].run(s), lambda sx, sy: (int(round(sx)), int(round(sy))), settle_ms=0, hold_ms=0)
+    t = ShuttleTest(run, lambda: np.zeros((600, 800, 3), np.uint8), lambda img: Loc("m", g.x, g.y),
+                    lambda x, y: (x, y), ptr, log=lambda lv, m: None, calib_path=calib, wait_s=0,
+                    helper_probe=lambda: {"state": g.helper, "p": 0.9, "click": None})
+    box["t"] = t
+    t.walker.sleep = lambda s: None
+    g.test = t
+    t._main()
+    assert g.log == [("home", 105, 105), ("home", 100, 100), ("home", 95, 95), ("home", 100, 100)]
+    assert g.helper is True
+
+
+def test_focus_lost_stops(tmp_path):
+    calib = tmp_path / "home_nav.json"
+    calib.write_text(json.dumps({"A": A}), encoding="utf-8")
+    g = FakeGame()
+    box = {}
+    ptr = Pointer(lambda s: box["t"].run(s), lambda sx, sy: (int(round(sx)), int(round(sy))), settle_ms=0, hold_ms=0)
+    alive = {"v": True}
+    logs = []
+
+    def run(script):
+        if "bu:L" in script:
+            alive["v"] = False  # 1 歩目のあと、人が別の窓をクリックした
+        return g.run(script)
+
+    t = ShuttleTest(run, lambda: np.zeros((600, 800, 3), np.uint8), lambda img: Loc("m", g.x, g.y),
+                    lambda x, y: (x, y), ptr, log=lambda lv, m: logs.append(m), calib_path=calib, wait_s=0,
+                    alive=lambda: alive["v"])
+    box["t"] = t
+    t.walker.sleep = lambda s: None
+    t._main()
+    assert t.stop_reason == "focus lost"
+    assert any("フォーカスが外れた" in m for m in logs)
+    assert g.homes == 0

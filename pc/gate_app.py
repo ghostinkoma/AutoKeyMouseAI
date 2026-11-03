@@ -26,6 +26,7 @@ import math
 import random
 import re
 import sys
+import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
@@ -229,8 +230,6 @@ class GateApp:
         self._bring_front = True
         self.shuttle_map = tk.StringVar(value="Crywolf")   # 往復テストのマップ名 (OCR のマップ名は使わない)
         self.mouse_mode = tk.StringVar(value="abs")         # カーソルの動かし方 (akm/pointer.py)
-        self._user_paused = False
-        self._last_activate = 0.0
         self.bring_front.trace_add("write", lambda *_: setattr(self, "_bring_front", bool(self.bring_front.get())))
         self.vhid = None           # 仮想 HID (akm.virtual_hid.VirtualHid)。初めて使うときに作る
         self.shuttle = None        # 往復テスト (akm.shuttle_test.ShuttleTest)
@@ -356,7 +355,8 @@ class GateApp:
         # 試験: 往復テスト (上へ N マス → Home → 待つ → 元 → Home → 待つ → 下へ … の繰り返し)
         g = rb.group(t, "試験 (往復)")
         rb.button(g, "往復テスト\n開始", row=0, column=0, rowspan=2, command=self.start_shuttle)
-        rb.button(g, "停止", row=0, column=1, rowspan=2, command=self.stop_shuttle)
+        rb.button(g, "停止", row=0, column=1, command=self.stop_shuttle)
+        rb.button(g, "マウス診断", row=1, column=1, command=self.start_mouse_check)
         ttk.Label(g, text="マス").grid(row=0, column=2, sticky="e", padx=(6, 2))
         ttk.Spinbox(g, from_=1, to=15, textvariable=self.shuttle_tiles, width=4).grid(row=0, column=3)
         ttk.Label(g, text="待つ秒").grid(row=1, column=2, sticky="e", padx=(6, 2))
@@ -839,96 +839,137 @@ class GateApp:
         return pt.x, pt.y
 
     def _hid_run(self, script: str, stopped) -> str:
-        """送る。人がこの PC を操作している間は送らずに待つ (操作が user_idle_ms 止まったら続ける)。
-        送信先が前面でなければ、「前面に出して実行する」なら出してから送る。途中で止められたら送り直す"""
-        hid = self.get_hid()
-        waited = ""
-        while True:
-            if stopped() or not self._armed:
-                raise InterruptedError("stopped")
-            busy = self.user_busy_ms()
-            if busy > 0:
-                if waited != "user":
-                    waited = "user"
-                    self._user_paused = True
-                    self.log_threadsafe("GATE", f"人の操作を検知: 送るのを止めています (操作が "
-                                                f"{hid.user.idle_ms / 1000:g} 秒止まったら続けます。完全に止めるのは Pause キー)")
-                time.sleep(min(0.2, busy / 1000 + 0.01))
-                continue
-            self._user_paused = False
-            if not self._hid_allowed():
-                now = time.monotonic()
-                if self._bring_front and now - self._last_activate > 2.0:  # 前面に出すのは 2 秒に 1 回まで
-                    self._last_activate = now
-                    if self.activate_target():
-                        continue
-                if waited != "front":
-                    waited = "front"
-                    self.log_threadsafe("GATE", "送信先が前面にないので待っています (前面にすると続けます)")
-                time.sleep(0.3)
-                continue
-            try:
-                return hid.run(script)
-            except InterruptedError as e:
-                if stopped() or not self._armed:
-                    raise
-                if str(e) != "user input":
-                    self.log_threadsafe("GATE", f"送っている途中で前面が変わりました。前面に戻ったら送り直します: {script}")
-
-    def start_shuttle(self):
-        t = self.target()
-        if t is None:
-            self.log("WARN", "送信先のウィンドウ (例 Thanatos) を一覧から選んでください")
-            return
-        if not self.armed.get():
-            self.log("WARN", "先に「▶ 開始 (ARM)」を押してください (ARM 中で、送信先が前面のときだけ送ります)")
-            return
-        if self.live is None:
-            self.log("ERR", "画面の撮影が動いていないので、現在地を読めません")
-            return
-        if self.shuttle is not None and self.shuttle.running:
-            self.log("INFO", "往復テストはもう動いています")
-            return
+        """送る。送信先の窓からフォーカスが外れたら止める (InterruptedError("focus lost"))。
+        OS と取り合わないように、外れた窓を取り返しには行かない (人が別の窓を使い始めたら、そこで終わり)"""
+        if stopped() or not self._armed:
+            raise InterruptedError("stopped")
+        if not self._hid_allowed():
+            raise InterruptedError("focus lost")
         try:
-            self.get_hid()
-            from akm.config import PC_DIR
-            from akm.maploc import LocationReader, make_ocr
-            from akm.pointer import Pointer
-            from akm.screen import client_rect
-            from akm.shuttle_test import ShuttleTest
+            return self.get_hid().run(script)
+        except InterruptedError as e:
+            if stopped() or not self._armed:
+                raise InterruptedError("stopped") from None
+            raise InterruptedError("focus lost" if str(e).startswith("not allowed") else str(e)) from None
 
-            lcfg = self.cfg.get("maplog") or {}
-            reader = LocationReader(lcfg, make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd")))
-        except Exception as e:  # noqa: BLE001
-            self.log("ERR", f"往復テストを始められません: {e}")
-            return
-        hwnd = t.hwnd
+    def _game_parts(self, hwnd: int):
+        """往復テスト・マウス診断で使う部品: 画面・座標の読み取り・表示範囲"""
+        from akm.maploc import LocationReader, make_ocr
+        from akm.screen import client_rect
+
+        lcfg = self.cfg.get("maplog") or {}
+        reader = LocationReader(lcfg, make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd")))
 
         def grab():
             return self.live._grab(hwnd, full=True)[0]
 
-        def client_to_screen(x, y):
-            r = client_rect(hwnd)
-            return r.left + x, r.top + y
+        return grab, reader.read_raw, (lambda: client_rect(hwnd))
 
-        holder = {}
+    def _begin_on_target(self, what: str):
+        """開始ボタンの共通の手順: 送信先を確かめ、ARM し、送信先を前面に出す (別のスレッドで呼ぶ)。
+        前面にできたら hwnd を返す。だめなら None"""
+        t = self.target()
+        if t is None:
+            self.log_threadsafe("WARN", "送信先のウィンドウ (例 Thanatos) を一覧から選んでください")
+            return None
+        if self.live is None:
+            self.log_threadsafe("ERR", "画面の撮影が動いていないので、現在地を読めません")
+            return None
+        if not self._armed:
+            self.root.after(0, self.arm)
+            for _ in range(20):
+                if self._armed:
+                    break
+                time.sleep(0.05)
+        self.get_hid()
+        self.log_threadsafe("INFO", f"{what}: {t.name} の窓を前面にします")
+        if not self._hid_allowed() and not self.activate_target():
+            self.log_threadsafe("WARN", f"{t.name} の窓を前面にできません。止めます")
+            return None
+        time.sleep(0.3)
+        return t.hwnd
 
-        def run(script):
-            return self._hid_run(script, lambda: holder["t"]._stop.is_set())
-
+    def start_shuttle(self):
+        if (self.shuttle is not None and self.shuttle.running) or getattr(self, "_busy", False):
+            self.log("INFO", "往復テスト / マウス診断はもう動いています")
+            return
+        tiles, wait = int(self.shuttle_tiles.get()), float(self.shuttle_wait.get())
+        map_name, mode = self.shuttle_map.get().strip() or "Crywolf", self.mouse_mode.get()
         pcfg = self.cfg.get("virtual_hid") or {}
-        ptr = Pointer(run, self._screen_to_hid, cursor=self._cursor if IS_WINDOWS else None,
-                      mode=self.mouse_mode.get(), settle_ms=int(pcfg.get("click_settle_ms", 100)),
-                      hold_ms=int(pcfg.get("click_hold_ms", 80)), log=self.log_threadsafe)
-        st = ShuttleTest(run, grab, reader.read_raw, client_to_screen, ptr, log=self.log_threadsafe,
-                         calib_path=PC_DIR / "models" / "home_nav.json",
-                         tiles=int(self.shuttle_tiles.get()), wait_s=float(self.shuttle_wait.get()),
-                         map_name=self.shuttle_map.get().strip() or "Crywolf")
-        holder["t"] = st
-        self.shuttle = st
-        self.log("INFO", f"往復テストを始めます: {t.name}  {st.tiles} マス / {st.wait_s:g} 秒 / マップ {st.map_name} / "
-                         f"マウス {ptr.mode} (止めるときは「停止」・DISARM・Pause キー。人が操作すると一時停止)")
-        st.start()
+
+        def go():
+            self._busy = True
+            try:
+                hwnd = self._begin_on_target("往復テスト")
+                if hwnd is None:
+                    return
+                from akm.config import PC_DIR
+                from akm.pointer import Pointer
+                from akm.shuttle_test import ShuttleTest
+
+                grab, read_loc, _rect = self._game_parts(hwnd)
+                try:
+                    from akm.helper_probe import make_helper_probe
+
+                    probe = make_helper_probe(grab)
+                except Exception as e:  # noqa: BLE001
+                    probe = None
+                    self.log_threadsafe("WARN", f"MU Helper の判定 (学習済みの AI) を使えません: {e}。Home を押すだけにします")
+                holder = {}
+
+                def run(script):
+                    return self._hid_run(script, lambda: holder["t"]._stop.is_set())
+
+                def client_to_screen(x, y):
+                    r = _rect()
+                    return r.left + x, r.top + y
+
+                ptr = Pointer(run, self._screen_to_hid, cursor=self._cursor if IS_WINDOWS else None, mode=mode,
+                              settle_ms=int(pcfg.get("click_settle_ms", 100)),
+                              hold_ms=int(pcfg.get("click_hold_ms", 80)), log=self.log_threadsafe)
+                st = ShuttleTest(run, grab, read_loc, client_to_screen, ptr, log=self.log_threadsafe,
+                                 calib_path=PC_DIR / "models" / "home_nav.json", tiles=tiles, wait_s=wait,
+                                 map_name=map_name, helper_probe=probe, alive=self._hid_allowed)
+                holder["t"] = st
+                self.shuttle = st
+                self.log_threadsafe("INFO", f"往復テストを始めます: {tiles} マス / {wait:g} 秒 / マップ {map_name} / "
+                                            f"マウス {mode} (ゲームからフォーカスが外れたら止まります。Pause キーでも止まります)")
+                st.start()
+            except Exception as e:  # noqa: BLE001
+                self.log_threadsafe("ERR", f"往復テストを始められません: {e}")
+            finally:
+                self._busy = False
+
+        threading.Thread(target=go, name="shuttle-start", daemon=True).start()
+
+    def start_mouse_check(self):
+        if (self.shuttle is not None and self.shuttle.running) or getattr(self, "_busy", False):
+            self.log("INFO", "往復テスト / マウス診断はもう動いています")
+            return
+
+        def go():
+            self._busy = True
+            try:
+                hwnd = self._begin_on_target("マウス診断")
+                if hwnd is None:
+                    return
+                from akm.mouse_check import run_mouse_check
+
+                grab, read_loc, rect = self._game_parts(hwnd)
+                res = run_mouse_check(lambda s: self._hid_run(s, lambda: False), grab, read_loc, rect,
+                                      self._screen_to_hid, self._cursor, self.log_threadsafe, alive=self._hid_allowed)
+                ok = [r for r in res if r[2]]
+                if ok:
+                    self.root.after(0, lambda: self.mouse_mode.set(ok[0][1]))
+            except InterruptedError as e:
+                self.log_threadsafe("INFO", "[マウス診断] " + ("ゲームからフォーカスが外れたので止めました"
+                                                             if str(e) == "focus lost" else f"止めました ({e})"))
+            except Exception as e:  # noqa: BLE001
+                self.log_threadsafe("ERR", f"[マウス診断] 止まりました: {e}")
+            finally:
+                self._busy = False
+
+        threading.Thread(target=go, name="mouse-check", daemon=True).start()
 
     def stop_shuttle(self):
         if self.shuttle is not None and self.shuttle.running:
@@ -954,8 +995,7 @@ class GateApp:
             loc = self.current_loc()
             vals = {
                 "loc": (f"{loc[0]} {loc[1]},{loc[2]}" if loc else "?", None),
-                "helper": ((("人の操作で一時停止" if self._user_paused else f"往復: {self.shuttle.status}"),
-                            "#e09000" if self._user_paused else "#1565c0")
+                "helper": ((f"往復: {self.shuttle.status}", "#1565c0")
                            if self.shuttle is not None and self.shuttle.running else ("(未実装)", "#888888")),
                 "mob": ("(未実装)", "#888888"),
                 "send": (f"{snap.fps:4.1f} fps" if snap and not snap.error else "-", None),

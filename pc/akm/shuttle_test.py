@@ -35,11 +35,17 @@ class _Walker(HomeReturn):
 class ShuttleTest:
     def __init__(self, run, grab, read_loc, client_to_screen, pointer, log=print, calib_path: Path | None = None,
                  tiles: int = 5, wait_s: float = 5.0, helper_key: str = "home", max_walk_s: float = 30.0,
-                 arrive_tiles: float = 0.5, map_name: str = "Crywolf", max_jump: int = 15, far_tiles: int = 40):
+                 arrive_tiles: float = 0.5, map_name: str = "Crywolf", max_jump: int = 15, far_tiles: int = 40,
+                 helper_probe=None, alive=None):
         """run(script): マクロを送る (前面でなければ待つ・止められたら InterruptedError)
         grab(): ゲーム画面 (原寸)。read_loc(img): 現在地 (x, y を持つもの。マップ名は使わない) か None
         client_to_screen(x, y): ゲーム画面の座標 → 画面の画素
-        pointer: カーソルを動かしてクリックするもの (akm.pointer.Pointer。run は同じものを使う)"""
+        pointer: カーソルを動かしてクリックするもの (akm.pointer.Pointer。run は同じものを使う)
+        helper_probe(): MU Helper の状態を学習済みの AI で見る (akm.helper_probe)。あれば、着いたら
+                        「停止中なら Home → 動作中になったか確かめる」。無ければ Home を押すだけ
+        alive(): 続けてよいか (送信先が前面か)。False になったらその場で止める (InterruptedError)"""
+        self.alive = alive
+        self.stop_reason = ""
         self._run, self.grab, self._read_loc, self.log = run, grab, read_loc, log
         self.client_to_screen, self.pointer = client_to_screen, pointer
         self.map_name, self.max_jump, self.far_tiles = map_name, int(max_jump), int(far_tiles)
@@ -53,12 +59,18 @@ class ShuttleTest:
         self.laps = 0
         self.walker = _Walker(self.run, grab, self.read_loc, lambda img: None, lambda: None, self._click_at,
                               self.char_pos, calib_path=calib_path, log=self._log_walker, sleep=self._sleep)
-        self.walker.settings = Settings(arrive_tiles=arrive_tiles, max_walk_s=max_walk_s)
+        self.walker.settings = Settings(arrive_tiles=arrive_tiles, max_walk_s=max_walk_s, helper_key=helper_key)
+        self.walker.helper_probe = helper_probe
 
     # ---- 部品 ---------------------------------------------------------------
-    def run(self, script: str) -> str:
+    def _check(self) -> None:
         if self._stop.is_set():
             raise InterruptedError("stopped")
+        if self.alive is not None and not self.alive():
+            raise InterruptedError("focus lost")
+
+    def run(self, script: str) -> str:
+        self._check()
         if not script:
             return "ok"
         return self._run(script)
@@ -94,8 +106,13 @@ class ShuttleTest:
         return loc
 
     def _sleep(self, s: float) -> None:
-        if self._stop.wait(s):
-            raise InterruptedError("stopped")
+        end = time.monotonic() + s
+        while True:
+            self._check()
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            self._stop.wait(min(0.1, left))
 
     def _click_at(self, x: float, y: float) -> str:
         """ゲーム画面の (x, y) をクリックする (ここで送り終える。歩く側には空のマクロを返す)"""
@@ -134,8 +151,17 @@ class ShuttleTest:
         return res
 
     def press_helper(self) -> None:
-        self.run(f"k:{self.helper_key}")
-        self.log("INFO", f"[往復] {self.helper_key} を押しました (MU Helper)")
+        """MU Helper を必ず入れる: 学習済みの AI で見て、停止中なら Home → 動作中になったか確かめる
+        (Home は入・切の切り替えなので、動作中のときは押さない)。AI が無ければ Home を押すだけ"""
+        if self.walker.helper_probe is None:
+            self.run(f"k:{self.helper_key}")
+            self.log("INFO", f"[往復] {self.helper_key} を押しました (MU Helper。状態の確認はしていません)")
+            return
+        self.status = "MU Helper を入れています"
+        if self.walker.ensure_on():
+            self.log("INFO", f"[往復] MU Helper 動作中を確認 ({self.walker.helper_seen})")
+        else:
+            self.log("WARN", f"[往復] MU Helper を動作中にできませんでした ({self.walker.helper_seen})")
 
     # ---- 実行 ---------------------------------------------------------------
     def start(self) -> None:
@@ -155,8 +181,11 @@ class ShuttleTest:
     def _main(self) -> None:
         try:
             self._loop()
-        except InterruptedError:
-            self.log("INFO", "[往復] 止めました")
+        except InterruptedError as e:
+            self.stop_reason = str(e)
+            why = {"stopped": "止めました", "focus lost": "送信先の窓からフォーカスが外れたので止めました"}.get(
+                str(e), f"止めました ({e})")
+            self.log("INFO", f"[往復] {why}")
         except Exception as e:  # noqa: BLE001
             self.log("ERR", f"[往復] 止まりました: {type(e).__name__}: {e}")
         finally:
