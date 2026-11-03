@@ -59,7 +59,7 @@ class FakeGame:
                 ox, oy = self.click[0] - 400, self.click[1] - 300
                 self.x += round(A[0][0] * ox + A[0][1] * oy)
                 self.y += round(A[1][0] * ox + A[1][1] * oy)
-            elif cmd == "k:home":
+            elif cmd in ("k:home", "ku:home"):
                 self.homes += 1
                 self.log.append(("home", self.x, self.y))
                 if self.homes >= 4:
@@ -152,7 +152,7 @@ def test_helper_is_ensured_on_after_each_move(tmp_path):
     def run(script):
         if "bu:L" in script:
             g.helper = False  # 自分で歩くと MU Helper は切れる
-        if script == "k:home":
+        if "ku:home" in script or script == "k:home":
             g.helper = not g.helper
         return orig_run(script)
 
@@ -242,7 +242,7 @@ def test_y_axis_round_trip_recalibrates_wrong_record(tmp_path):
                 ox, oy = g.click[0] - 400, g.click[1] - 300
                 g.x += round(A_Y[0][0] * ox + A_Y[0][1] * oy)
                 g.y += round(A_Y[1][0] * ox + A_Y[1][1] * oy)
-            elif cmd == "k:home":
+            elif cmd in ("k:home", "ku:home"):
                 g.homes += 1
                 g.log.append(("home", g.x, g.y))
                 if g.homes >= 4:
@@ -277,7 +277,7 @@ def test_learns_direction_while_walking(tmp_path):
                 ox, oy = g.click[0] - 400, g.click[1] - 300
                 g.x += round(A_Y[0][0] * ox + A_Y[0][1] * oy)
                 g.y += round(A_Y[1][0] * ox + A_Y[1][1] * oy)
-            elif cmd == "k:home":
+            elif cmd in ("k:home", "ku:home"):
                 g.homes += 1
                 g.log.append(("home", g.x, g.y))
                 if g.homes >= 2:
@@ -295,3 +295,27 @@ def test_learns_direction_while_walking(tmp_path):
     assert any("歩いた結果から画面の向きを直しました" in m for m in logs)
     assert abs(g.log[0][1] - 100) <= 2 and abs(g.log[0][2] - 90) <= 2   # 上 (100, 90) の近く
     assert abs(g.log[1][1] - 100) <= 2 and abs(g.log[1][2] - 100) <= 2  # 基準点の近く
+
+
+def test_helper_press_waits_for_lagging_screen(tmp_path):
+    """画面 (AI の判定) が少し遅れて変わっても、Home を 2 回押して切ってしまわない"""
+    calib = tmp_path / "home_nav.json"
+    calib.write_text(json.dumps({"A": A}), encoding="utf-8")
+    state = {"on": False, "presses": 0, "probes_after": 0}
+
+    def run(script):
+        if "ku:home" in script:
+            state["on"] = not state["on"]
+            state["presses"] += 1
+            state["probes_after"] = 0
+        return "ok"
+
+    def probe():
+        state["probes_after"] += 1
+        shown = state["on"] if state["probes_after"] > 4 else (not state["on"])  # 4 回 (約 0.6 秒) は前の画面
+        return {"state": shown, "p": 1.0, "click": None}
+
+    t = ShuttleTest(run, lambda: None, lambda img: None, lambda x, y: (x, y), None, calib_path=calib,
+                    helper_probe=probe)
+    t.press_helper(moved=True)
+    assert state["presses"] == 1 and state["on"] is True

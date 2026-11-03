@@ -50,7 +50,7 @@ class ShuttleTest:
                  arrive_tiles: float = 0.5, map_name: str = "Crywolf", max_jump: int = 15, far_tiles: int = 40,
                  helper_probe=None, alive=None, max_speed: float = 8.0, base_tiles: int = 3, jump_reads: int = 5,
                  jump_s: float = 2.0, clock=time.monotonic, base_xy: tuple[int, int] | None = None,
-                 exact_s: float = 8.0, tolerance: int = 2, axis: str = "y"):
+                 exact_s: float = 8.0, tolerance: int = 2, axis: str = "y", helper_wait_s: float = 3.0):
         """run(script): マクロを送る (前面でなければ待つ・止められたら InterruptedError)
         grab(): ゲーム画面 (原寸)。read_loc(img): 現在地 (x, y を持つもの。マップ名は使わない) か None
         client_to_screen(x, y): ゲーム画面の座標 → 画面の画素
@@ -60,6 +60,7 @@ class ShuttleTest:
         alive(): 続けてよいか (送信先が前面か)。False になったらその場で止める (InterruptedError)"""
         self.alive = alive
         self.calib_path = calib_path
+        self.helper_wait_s = float(helper_wait_s)  # Home を押してから動作中になるのを待つ秒数 (過ぎたら押し直す)
         self._center = (0.0, 0.0)
         self._click = None     # 最後のクリック (その時の座標, キャラからの向き px, 時刻)
         self._samples = []     # 歩いた結果 [(クリックの向き px, 変わった座標)]
@@ -265,18 +266,41 @@ class ShuttleTest:
         self.log("INFO" if ok else "WARN", f"[往復] {label} ({target[1]}, {target[2]}): {res}  今 {where}")
         return res
 
-    def press_helper(self) -> None:
-        """MU Helper を必ず入れる: 学習済みの AI で見て、停止中なら Home → 動作中になったか確かめる
-        (Home は入・切の切り替えなので、動作中のときは押さない)。AI が無ければ Home を押すだけ"""
-        if self.walker.helper_probe is None:
-            self.run(f"k:{self.helper_key}")
-            self.log("INFO", f"[往復] {self.helper_key} を押しました (MU Helper。状態の確認はしていません)")
+    def press_helper(self, moved: bool = True) -> None:
+        """MU Helper を必ず入れる。Home は入・切の切り替えなので、入ったのを確かめてから次へ進む:
+          * 歩いたあと (moved) は切れているので、見ずにすぐ Home (キーは 80ms 押したまま。短いと取りこぼす)
+          * 歩いていないときは、先に学習済みの AI で見て、動作中なら押さない
+          * 押したら 0.15 秒ごとに AI で見て、2 回続けて動作中なら終わり。helper_wait_s 秒たっても入らなければもう一度
+        AI が無ければ Home を押すだけ"""
+        key = self.helper_key
+        probe = self.walker.helper_probe
+        if probe is None:
+            self.run(f"kd:{key};w:80;ku:{key}")
+            self.log("INFO", f"[往復] {key} を押しました (MU Helper。状態の確認はしていません)")
             return
         self.status = "MU Helper を入れています"
-        if self.walker.ensure_on():
-            self.log("INFO", f"[往復] MU Helper 動作中を確認 ({self.walker.helper_seen})")
-        else:
-            self.log("WARN", f"[往復] MU Helper を動作中にできませんでした ({self.walker.helper_seen})")
+        if not moved:
+            st, _p, _ = self.walker.confirm(2, 150)
+            if st is True:
+                self.log("INFO", "[往復] MU Helper はもう動作中です")
+                return
+        t_all = time.monotonic()
+        for attempt in range(1, 4):
+            self.run(f"kd:{key};w:80;ku:{key}")
+            t0 = time.monotonic()
+            on = 0
+            while time.monotonic() - t0 < self.helper_wait_s:
+                self._sleep(0.15)
+                r = probe()
+                on = on + 1 if r.get("state") is True else 0
+                if on >= 2:
+                    self.walker.helper_seen = f"動作中 ({float(r.get('p', 0)):.2f})"
+                    self.log("INFO", f"[往復] MU Helper 動作中を確認 ({key} {attempt} 回 / "
+                                     f"{time.monotonic() - t_all:.1f} 秒)")
+                    return
+            self.log("WARN", f"[往復] {key} を押して {self.helper_wait_s:g} 秒たっても MU Helper が動作中になりません。"
+                             "もう一度押します" if attempt < 3 else
+                             f"[往復] MU Helper を動作中にできませんでした ({key} 3 回)")
 
     # ---- 実行 ---------------------------------------------------------------
     def start(self) -> None:
@@ -304,7 +328,7 @@ class ShuttleTest:
         except Exception as e:  # noqa: BLE001
             self.log("ERR", f"[往復] 止まりました: {type(e).__name__}: {e}")
             try:  # 止まるときも MU Helper は入れておく (ゲームが前面のままなら)
-                self.press_helper()
+                self.press_helper(moved=False)
             except Exception as e2:  # noqa: BLE001
                 self.log("WARN", f"[往復] 止まるときに MU Helper を確かめられませんでした: {e2}")
         finally:
@@ -329,7 +353,7 @@ class ShuttleTest:
         self.log("INFO", f"[往復] 基準点 ({src}): {here.map} ({here.x}, {here.y})  {self.tiles} マス / "
                          f"{self.wait_s:g} 秒 / 着けないときは ±{self.tolerance} マスまで")
         need = not self.walker.calib.ok()
-        if not need and self.axis in ("x", "y"):
+        if not need:
             # 座標の軸は画面から見て 45 度傾いている (画面の真下へ歩くと X も Y も同じくらい変わる)。
             # 記録がそうなっていなければ (古い・読み違いで測った) 調べ直す
             (a, b), (c, d) = self.walker.calib.A
@@ -359,12 +383,14 @@ class ShuttleTest:
                          f"画面の縦 1 マス ≒ {px:.0f} px")
         while True:
             for label, target in (("上", up), ("下", down)):
+                n = self.clicks
                 self.walk_to(target, label)
-                self.press_helper()
+                self.press_helper(moved=self.clicks > n)
                 self.status = f"{label} で待機 {self.wait_s:g} 秒"
                 self._sleep(self.wait_s)
+                n = self.clicks
                 self.walk_to(self.origin, "基準点")
-                self.press_helper()
+                self.press_helper(moved=self.clicks > n)
                 self.status = f"基準点で待機 {self.wait_s:g} 秒"
                 self._sleep(self.wait_s)
             self.laps += 1

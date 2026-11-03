@@ -156,7 +156,7 @@ def foreground_hwnd(windows: list[GameWindow]) -> int | None:
 # リボン (Excel のようなタブ + グループ)
 # ---------------------------------------------------------------------------
 # 往復テストの上下の決め方 (表示 → akm.shuttle_test の axis)
-AXES = {"Y (座標)": "y", "X (座標)": "x", "画面の上下": "screen"}
+AXES = {"画面の上下": "screen", "Y (座標)": "y", "X (座標)": "x"}
 
 
 def window_title(hwnd) -> str:
@@ -280,7 +280,7 @@ class GateApp:
         self.bring_front = tk.BooleanVar(value=True)  # 送信先が前面でなければ、仲介アプリが前面に出す
         self.hid_out = tk.StringVar(value="virtual")   # キー・マウスの出口: virtual (この PC) / esp32
         self.shuttle_tiles = tk.IntVar(value=10)
-        self.shuttle_axis = tk.StringVar(value="Y (座標)")  # 上下の決め方
+        self.shuttle_axis = tk.StringVar(value="画面の上下")  # 上下の決め方
         self.shuttle_wait = tk.IntVar(value=5)
         self._armed = False        # 別のスレッド (往復テスト) から読む用 (tk の変数はスレッドをまたいで読まない)
         self._bring_front = True
@@ -1095,7 +1095,7 @@ class GateApp:
             self.stop_shuttle()
         tiles, wait = int(self.shuttle_tiles.get()), float(self.shuttle_wait.get())
         map_name, mode = self.shuttle_map.get().strip() or "Crywolf", self.mouse_mode.get()
-        axis = AXES.get(self.shuttle_axis.get(), "y")
+        axis = AXES.get(self.shuttle_axis.get(), "screen")
         pcfg = self.cfg.get("virtual_hid") or {}
 
         def go():
