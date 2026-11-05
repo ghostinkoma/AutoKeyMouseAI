@@ -1092,10 +1092,13 @@ class GateApp:
             if state["fails"] >= 8 and time.monotonic() - state["saved"] > 30:
                 state["saved"] = time.monotonic()
                 path = PC_DIR / "debug" / f"coord_{time.strftime('%H%M%S')}.png"
+                full = path.with_name(path.stem + "_full.jpg")
                 try:
                     path.parent.mkdir(exist_ok=True)
                     cv2.imwrite(str(path), reader.last_crop)
-                    where = f"。読んだ範囲の画像: {path}"
+                    cv2.imwrite(str(full), img, [cv2.IMWRITE_JPEG_QUALITY, 85])  # 撮った画面全体 (何が写っているか)
+                    h, w = img.shape[:2]
+                    where = (f"。読んだ範囲の画像: {path} / 画面全体 ({w}x{h}, 明るさ {float(img.mean()):.0f}): {full}")
                 except Exception:  # noqa: BLE001
                     where = ""
                 self.log_threadsafe("WARN", f"座標を {state['fails']} 回続けて読めません。OCR の文字: "
