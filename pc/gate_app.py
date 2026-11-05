@@ -1080,11 +1080,35 @@ class GateApp:
 
         lcfg = self.cfg.get("maplog") or {}
         reader = LocationReader(lcfg, make_ocr(lcfg.get("ocr", "auto"), lcfg.get("tesseract_cmd")))
-        roi = lcfg.get("coord_roi") or widen_roi(reader.roi)
-        state = {"fails": 0, "saved": 0.0}
+        state = {"fails": 0, "saved": 0.0, "roi": lcfg.get("coord_roi") or widen_roi(reader.roi),
+                 "scan_at": 0.0, "found": None}
+
+        def scan(img):
+            """いつもの範囲で読めないとき: 画面の右下の広い範囲を帯に分けて座標 "(x, y)" を探す。
+            2 回続けて同じ帯で見つかったら、そこを読む範囲にする (座標の表示位置が変わったとき)"""
+            if time.monotonic() - state["scan_at"] < 3.0:
+                return []
+            state["scan_at"] = time.monotonic()
+            y = 0.62
+            while y <= 0.97:
+                band = [0.50, y, 0.50, 0.06]
+                got = read_xy_candidates(reader, img, band)
+                if got:
+                    if state["found"] == band:
+                        state["roi"], state["found"] = band, None
+                        self.log_threadsafe("WARN", f"座標の表示位置が変わったようなので、読む範囲を {band} に変えました "
+                                                    "(いつも使うなら config.yaml の maplog.coord_roi に書いてください)")
+                    else:
+                        state["found"] = band
+                    return got
+                y += 0.03
+            state["found"] = None
+            return []
 
         def read(img):
-            got = read_xy_candidates(reader, img, roi)
+            got = read_xy_candidates(reader, img, state["roi"])
+            if not got and state["fails"] >= 3:
+                got = scan(img)
             if got:
                 state["fails"] = 0
                 return [Location("", x, y) for x, y in got]
