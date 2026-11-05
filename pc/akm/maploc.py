@@ -347,6 +347,10 @@ CREATE TABLE IF NOT EXISTS cells (
     PRIMARY KEY (map, x, y));
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY, ts REAL NOT NULL, kind TEXT NOT NULL, map TEXT, x INTEGER, y INTEGER, detail TEXT);
+CREATE TABLE IF NOT EXISTS blocked (
+    map TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,
+    tries INTEGER NOT NULL DEFAULT 0, last_seen REAL,
+    PRIMARY KEY (map, x, y));
 CREATE TABLE IF NOT EXISTS spots (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, map TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,
     radius INTEGER NOT NULL DEFAULT 5, kind TEXT NOT NULL DEFAULT 'hunt', note TEXT, created REAL);
@@ -410,6 +414,14 @@ class MapDB:
         db.commit()
         self.last = loc
         return kind
+
+    def add_blocked(self, map_name: str, x: int, y: int, ts: float | None = None) -> None:
+        """歩いて行けなかったマス (壁・障害物の向こうなど)。マップ探索 (akm/map_explore.py) が書く"""
+        ts = ts or time.time()
+        self.db.execute("INSERT INTO blocked(map, x, y, tries, last_seen) VALUES (?,?,?,1,?) "
+                        "ON CONFLICT(map, x, y) DO UPDATE SET tries=tries+1, last_seen=excluded.last_seen",
+                        (map_name, int(x), int(y), ts))
+        self.db.commit()
 
     def add_spot(self, name: str, loc: Location, radius: int = 5, kind: str = "hunt", note: str = "") -> int:
         cur = self.db.execute("INSERT INTO spots(name, map, x, y, radius, kind, note, created) VALUES (?,?,?,?,?,?,?,?)",

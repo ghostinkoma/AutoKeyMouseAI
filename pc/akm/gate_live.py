@@ -344,6 +344,17 @@ class MapSource:
         self._cache[name] = (time.monotonic(), cells, spots)
         return cells, spots
 
+    def blocked(self, name: str) -> list:
+        """歩いて行けなかったマス [(x, y)] (マップ探索が書く。あとで歩けたマスは除く)"""
+        try:
+            db = self._conn()
+            if db is None:
+                return []
+            return db.execute("SELECT b.x, b.y FROM blocked b LEFT JOIN cells c ON c.map = b.map AND c.x = b.x "
+                              "AND c.y = b.y WHERE b.map = ? AND c.x IS NULL", (name,)).fetchall()
+        except sqlite3.Error:  # 前の版の DB (blocked が無い) など
+            return []
+
     def latest(self):
         """記録の最後の現在地 (map, x, y)。OCR が使えないときの代わり。"""
         try:

@@ -76,6 +76,7 @@ class ShuttleTest:
                         「停止中なら Home → 動作中になったか確かめる」。無ければ Home を押すだけ
         alive(): 続けてよいか (送信先が前面か)。False になったらその場で止める (InterruptedError)"""
         self.alive = alive
+        self.tag = "[往復]"  # ログの頭
         self.calib_path = calib_path
         self.helper_wait_s = float(helper_wait_s)  # Home を押してから動作中になるのを待つ秒数 (過ぎたら押し直す)
         self._center = (0.0, 0.0)
@@ -160,7 +161,7 @@ class ShuttleTest:
                 # 前の座標の桁が 1 つ抜けた / 増えただけ (137 → 37 / 13 など): OCR の読み違い。飛んだとは数えない
                 self.rejected += 1
                 if self.rejected <= 3 or self.rejected % 20 == 0:
-                    self.log("INFO", f"[往復] 座標の読み違い (桁の抜け) として捨てました: ({loc.x}, {loc.y}) "
+                    self.log("INFO", f"{self.tag} 座標の読み違い (桁の抜け) として捨てました: ({loc.x}, {loc.y}) "
                                      f"(前 ({self._last.x}, {self._last.y}))")
                 return None
         if ok:
@@ -169,13 +170,13 @@ class ShuttleTest:
         else:
             self._odd = [(lo, t) for lo, t in self._odd if near(lo, loc, 2)] + [(loc, now)]
             if len(self._odd) >= self.jump_reads and now - self._odd[0][1] >= self.jump_s:
-                self.log("WARN", f"[往復] 座標が大きく変わりました ({self._last.x}, {self._last.y}) → ({loc.x}, {loc.y})"
+                self.log("WARN", f"{self.tag} 座標が大きく変わりました ({self._last.x}, {self._last.y}) → ({loc.x}, {loc.y})"
                                  f" ({len(self._odd)} 回続けて同じ読み)")
                 self._last, self._last_t, self._odd = loc, now, []
             else:
                 self.rejected += 1
                 if self.rejected <= 3 or self.rejected % 20 == 0:
-                    self.log("INFO", f"[往復] 座標の読み違いとして捨てました: ({loc.x}, {loc.y}) "
+                    self.log("INFO", f"{self.tag} 座標の読み違いとして捨てました: ({loc.x}, {loc.y}) "
                                      f"(前 ({self._last.x}, {self._last.y}))")
                 return None
         if self.origin is not None and not near(loc, Location(self.map_name, self.origin[1], self.origin[2]),
@@ -200,7 +201,7 @@ class ShuttleTest:
         ox, oy = x - cx, y - cy
         here, goal = self._last, self.walker.home
         self.clicks += 1
-        self.log("INFO", f"[往復] 歩く {self.clicks}: 今 " + (f"({here.x}, {here.y})" if here else "(?)") +
+        self.log("INFO", f"{self.tag} 歩く {self.clicks}: 今 " + (f"({here.x}, {here.y})" if here else "(?)") +
                  (f" → 目標 ({goal[1]}, {goal[2]})" if goal else "") + f"  キャラから ({ox:+.0f}, {oy:+.0f})px をクリック")
         self._click = (here, (ox, oy), self.clock())
         self.pointer.click(*self.client_to_screen(x, y))
@@ -237,7 +238,7 @@ class ShuttleTest:
         old = self.walker.calib.A
         self.walker.calib.A = A
         if old is None or max(abs(A[i][j] - old[i][j]) for i in range(2) for j in range(2)) > 0.004:
-            self.log("INFO", f"[往復] 歩いた結果から画面の向きを直しました: 右へ 100px で X {a * 100:+.1f} / "
+            self.log("INFO", f"{self.tag} 歩いた結果から画面の向きを直しました: 右へ 100px で X {a * 100:+.1f} / "
                              f"Y {c * 100:+.1f}、下へ 100px で X {b * 100:+.1f} / Y {e * 100:+.1f} マス "
                              f"({len(self._samples)} 回分)")
             if self.calib_path:
@@ -247,7 +248,7 @@ class ShuttleTest:
                     pass
 
     def _log_walker(self, msg: str) -> None:
-        self.log("INFO", msg.replace("[home] ", "[往復] "))
+        self.log("INFO", msg.replace("[home] ", f"{self.tag} "))
 
     def read_here(self, timeout: float = 5.0):
         end = time.monotonic() + timeout
@@ -296,7 +297,7 @@ class ShuttleTest:
                 res = f"近くに着いた (許容 ±{self.tolerance})"
         st.arrive_tiles, st.max_walk_s = 0.5, self.max_walk_s
         where = f"({here.x}, {here.y})" if here is not None else "(現在地不明)"
-        self.log("INFO" if ok else "WARN", f"[往復] {label} ({target[1]}, {target[2]}): {res}  今 {where}")
+        self.log("INFO" if ok else "WARN", f"{self.tag} {label} ({target[1]}, {target[2]}): {res}  今 {where}")
         return res
 
     def press_helper(self, moved: bool = True) -> None:
@@ -309,13 +310,13 @@ class ShuttleTest:
         probe = self.walker.helper_probe
         if probe is None:
             self.run(f"kd:{key};w:80;ku:{key}")
-            self.log("INFO", f"[往復] {key} を押しました (MU Helper。状態の確認はしていません)")
+            self.log("INFO", f"{self.tag} {key} を押しました (MU Helper。状態の確認はしていません)")
             return
         self.status = "MU Helper を入れています"
         if not moved:
             st, _p, _ = self.walker.confirm(2, 150)
             if st is True:
-                self.log("INFO", "[往復] MU Helper はもう動作中です")
+                self.log("INFO", f"{self.tag} MU Helper はもう動作中です")
                 return
         t_all = time.monotonic()
         for attempt in range(1, 4):
@@ -328,12 +329,12 @@ class ShuttleTest:
                 on = on + 1 if r.get("state") is True else 0
                 if on >= 2 or (on and float(r.get("p", 0)) >= 0.95):  # はっきり動作中なら 1 回でよい
                     self.walker.helper_seen = f"動作中 ({float(r.get('p', 0)):.2f})"
-                    self.log("INFO", f"[往復] MU Helper 動作中を確認 ({key} {attempt} 回 / "
+                    self.log("INFO", f"{self.tag} MU Helper 動作中を確認 ({key} {attempt} 回 / "
                                      f"{time.monotonic() - t_all:.1f} 秒)")
                     return
-            self.log("WARN", f"[往復] {key} を押して {self.helper_wait_s:g} 秒たっても MU Helper が動作中になりません。"
+            self.log("WARN", f"{self.tag} {key} を押して {self.helper_wait_s:g} 秒たっても MU Helper が動作中になりません。"
                              "もう一度押します" if attempt < 3 else
-                             f"[往復] MU Helper を動作中にできませんでした ({key} 3 回)")
+                             f"{self.tag} MU Helper を動作中にできませんでした ({key} 3 回)")
 
     # ---- 実行 ---------------------------------------------------------------
     def start(self) -> None:
@@ -357,17 +358,18 @@ class ShuttleTest:
             self.stop_reason = str(e)
             why = {"stopped": "止めました", "focus lost": "送信先の窓からフォーカスが外れたので止めました"}.get(
                 str(e), f"止めました ({e})")
-            self.log("INFO", f"[往復] {why}")
+            self.log("INFO", f"{self.tag} {why}")
         except Exception as e:  # noqa: BLE001
-            self.log("ERR", f"[往復] 止まりました: {type(e).__name__}: {e}")
+            self.log("ERR", f"{self.tag} 止まりました: {type(e).__name__}: {e}")
             try:  # 止まるときも MU Helper は入れておく (ゲームが前面のままなら)
                 self.press_helper(moved=False)
             except Exception as e2:  # noqa: BLE001
-                self.log("WARN", f"[往復] 止まるときに MU Helper を確かめられませんでした: {e2}")
+                self.log("WARN", f"{self.tag} 止まるときに MU Helper を確かめられませんでした: {e2}")
         finally:
             self.status = "停止中"
 
-    def _loop(self) -> None:
+    def _setup(self, what: str) -> None:
+        """基準点を決め、MU Helper の今の状態を出し、画面の向きの記録を確かめる (合わなければ測り直す)"""
         if self.base_xy is not None:  # 開始ボタンを押したときの座標を基準点にする
             bx, by = self.base_xy
             here = Location(self.map_name, int(bx), int(by))
@@ -382,9 +384,8 @@ class ShuttleTest:
         self.origin = (here.map, int(here.x), int(here.y))
         if self.walker.helper_probe is not None:
             st, p, _ = self.walker.confirm(2)
-            self.log("INFO", f"[往復] MU Helper の今の状態 (学習済みの AI): {self.walker.helper_seen}")
-        self.log("INFO", f"[往復] 基準点 ({src}): {here.map} ({here.x}, {here.y})  {self.tiles} マス / "
-                         f"{self.wait_s:g} 秒 / 着けないときは ±{self.tolerance} マスまで")
+            self.log("INFO", f"{self.tag} MU Helper の今の状態 (学習済みの AI): {self.walker.helper_seen}")
+        self.log("INFO", f"{self.tag} 基準点 ({src}): {here.map} ({here.x}, {here.y})  {what}")
         need = not self.walker.calib.ok()
         if not need:
             # 座標の軸は画面から見て 45 度傾いている (画面の真下へ歩くと X も Y も同じくらい変わる)。
@@ -396,22 +397,25 @@ class ShuttleTest:
 
             if not (diag(a, c) and diag(b, d)):
                 need = True
-                self.log("WARN", f"[往復] 画面の向きの記録 (models/home_nav.json) が「座標は画面から 45 度傾いている」と"
+                self.log("WARN", f"{self.tag} 画面の向きの記録 (models/home_nav.json) が「座標は画面から 45 度傾いている」と"
                                  f"合いません (画面の右へ 100px で X {a * 100:+.1f} / Y {c * 100:+.1f}、下へ 100px で "
                                  f"X {b * 100:+.1f} / Y {d * 100:+.1f} マス)。調べ直します")
         if need:
             self.status = "画面の向きを調べています"
-            self.log("INFO", "[往復] 画面の向き (何ピクセルで何マス) を調べます。右・下などへ少し歩きます")
+            self.log("INFO", f"{self.tag} 画面の向き (何ピクセルで何マス) を調べます。右・下などへ少し歩きます")
             if not self.walker.calibrate(self.grab()):
                 raise RuntimeError("画面の向きを調べられません (壁際? 少し開けた所で始めてください)")
             (a, b), (c, d) = self.walker.calib.A
-            self.log("INFO", f"[往復] 測った向き: 画面の右へ 100px で X {a * 100:+.1f} / Y {c * 100:+.1f} マス、"
+            self.log("INFO", f"{self.tag} 測った向き: 画面の右へ 100px で X {a * 100:+.1f} / Y {c * 100:+.1f} マス、"
                              f"下へ 100px で X {b * 100:+.1f} / Y {d * 100:+.1f} マス")
             self.walk_to(self.origin, "基準点")
+
+    def _loop(self) -> None:
+        self._setup(f"{self.tiles} マス / {self.wait_s:g} 秒 / 着けないときは ±{self.tolerance} マスまで")
         (a, b), (c, d) = self.walker.calib.A
         px = 1 / max(1e-6, math.hypot(b, d))
         up, down = self.offset_target(-1), self.offset_target(+1)
-        self.log("INFO", f"[往復] 上 = ({up[1]}, {up[2]})  下 = ({down[1]}, {down[2]})  "
+        self.log("INFO", f"{self.tag} 上 = ({up[1]}, {up[2]})  下 = ({down[1]}, {down[2]})  "
                          f"[{ {'y': '座標の Y', 'x': '座標の X', 'screen': '画面の上下'}[self.axis]} ±{self.tiles}]  "
                          f"画面の縦 1 マス ≒ {px:.0f} px")
         while True:
@@ -427,4 +431,4 @@ class ShuttleTest:
                 self.status = f"基準点で待機 {self.wait_s:g} 秒"
                 self._sleep(self.wait_s)
             self.laps += 1
-            self.log("INFO", f"[往復] {self.laps} 周しました")
+            self.log("INFO", f"{self.tag} {self.laps} 周しました")

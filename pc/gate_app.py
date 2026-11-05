@@ -280,6 +280,9 @@ class GateApp:
         self.bring_front = tk.BooleanVar(value=True)  # 送信先が前面でなければ、仲介アプリが前面に出す
         self.hid_out = tk.StringVar(value="virtual")   # キー・マウスの出口: virtual (この PC) / esp32
         self.shuttle_tiles = tk.IntVar(value=10)
+        self.explore_radius = tk.IntVar(value=25)   # マップ探索: 基準点から ±何マス
+        self.explore_step = tk.IntVar(value=3)      # 何マスおきに歩くか
+        self.explore_minutes = tk.IntVar(value=30)  # 最大何分
         self.shuttle_axis = tk.StringVar(value="画面の上下")  # 上下の決め方
         self.shuttle_wait = tk.IntVar(value=5)
         self._armed = False        # 別のスレッド (往復テスト) から読む用 (tk の変数はスレッドをまたいで読まない)
@@ -427,17 +430,24 @@ class GateApp:
         ttk.Label(g, text="待つ秒").grid(row=1, column=2, sticky="e", padx=(6, 2))
         ttk.Spinbox(g, from_=1, to=120, textvariable=self.shuttle_wait, width=4).grid(row=1, column=3)
         ttk.Label(g, text="マップ").grid(row=0, column=4, sticky="e", padx=(6, 2))
-        ttk.Entry(g, textvariable=self.shuttle_map, width=10).grid(row=0, column=5)
+        ttk.Entry(g, textvariable=self.shuttle_map, width=8).grid(row=0, column=5)
         ttk.Label(g, text="マウス").grid(row=1, column=4, sticky="e", padx=(6, 2))
-        ttk.Combobox(g, textvariable=self.mouse_mode, values=["abs", "absrel", "rel"], width=8,
+        ttk.Combobox(g, textvariable=self.mouse_mode, values=["abs", "absrel", "rel"], width=6,
                      state="readonly").grid(row=1, column=5)
         ttk.Label(g, text="方向").grid(row=0, column=6, sticky="e", padx=(6, 2))
-        ttk.Combobox(g, textvariable=self.shuttle_axis, values=list(AXES), width=10,
+        ttk.Combobox(g, textvariable=self.shuttle_axis, values=list(AXES), width=9,
                      state="readonly").grid(row=0, column=7)
+        g = rb.group(t, "マップ探索")
+        rb.button(g, "探索開始", row=0, column=0, rowspan=2, command=lambda: self.start_shuttle(kind="explore"))
+        for i, (text, var, lo, hi) in enumerate((("範囲 ±", self.explore_radius, 5, 60),
+                                                 ("間隔", self.explore_step, 1, 10),
+                                                 ("最大 分", self.explore_minutes, 1, 240))):
+            ttk.Label(g, text=text).grid(row=i % 2, column=1 + 2 * (i // 2), sticky="e", padx=(6, 2))
+            ttk.Spinbox(g, from_=lo, to=hi, textvariable=var, width=4).grid(row=i % 2, column=2 + 2 * (i // 2))
         g = rb.group(t, "▶ 開始 (ARM) を押したら")
-        for i, (v, text) in enumerate((("shuttle", "往復テストを始める"), ("check", "マウス診断をする"),
-                                       ("none", "前面に出すだけ"))):
-            ttk.Radiobutton(g, text=text, value=v, variable=self.arm_runs).grid(row=i, column=0, sticky="w")
+        for i, (v, text) in enumerate((("shuttle", "往復テストを始める"), ("explore", "マップ探索を始める"),
+                                       ("check", "マウス診断をする"), ("none", "前面に出すだけ"))):
+            ttk.Radiobutton(g, text=text, value=v, variable=self.arm_runs).grid(row=i % 2, column=i // 2, sticky="w")
 
         # ミラー: ESP32 へ送る画面
         t = rb.tab("ミラー")
@@ -820,7 +830,7 @@ class GateApp:
         self._armed = True
         if activate and IS_WINDOWS:  # 送信先の窓 (ミラーで映している窓) を前面にし、選んでおいた試験を始める
             then = self.arm_runs.get()
-            if then == "shuttle" and self.shuttle is not None and self.shuttle.running:
+            if then in ("shuttle", "explore") and self.shuttle is not None and self.shuttle.running:
                 self.stop_shuttle()  # 押し直し: 前の往復テストを止め、新しい基準点でやり直す
             threading.Thread(target=self._activate_and_report, args=(then,), daemon=True).start()
         self.log("GATE", f"ARM: {self.target_name} が前面にあるときだけキー操作を通します")
@@ -877,11 +887,11 @@ class GateApp:
     def _activate_and_report(self, then: str = "none"):
         base = None
         t = self.target()
-        if then == "shuttle" and t is not None:  # 押した瞬間の座標を、前面に出す前に読む (基準点)
+        if then in ("shuttle", "explore") and t is not None:  # 押した瞬間の座標を、前面に出す前に読む (基準点)
             base = self._read_base(t.hwnd)
         if self._activate_once():
-            if then == "shuttle":
-                self.root.after(0, lambda: self.start_shuttle(base=base, have_base=True))
+            if then in ("shuttle", "explore"):
+                self.root.after(0, lambda: self.start_shuttle(base=base, have_base=True, kind=then))
             elif then == "check":
                 self.root.after(0, self.start_mouse_check)
 
@@ -1108,8 +1118,12 @@ class GateApp:
         self.log_threadsafe("WARN", "基準点の座標を読めませんでした (読みがそろわない)")
         return None
 
-    def start_shuttle(self, base=None, have_base: bool = False):
-        """往復テストを始める。押すたびに、その瞬間の座標を基準点にする (動いていれば止めてやり直す)"""
+    def start_shuttle(self, base=None, have_base: bool = False, kind: str = "shuttle"):
+        """往復テスト (kind="shuttle") / マップ探索 (kind="explore") を始める。押すたびに、その瞬間の座標を
+        基準点にする (動いていれば止めてやり直す)"""
+        what = "マップ探索" if kind == "explore" else "往復テスト"
+        radius, step = int(self.explore_radius.get()), int(self.explore_step.get())
+        minutes = float(self.explore_minutes.get())
         if getattr(self, "_busy", False):
             self.log("INFO", "往復テスト / マウス診断を準備しています")
             return
@@ -1134,8 +1148,8 @@ class GateApp:
                 if not have_base and t0 is not None:
                     base_xy = self._read_base(t0.hwnd)
                 if base_xy is None:
-                    self.log_threadsafe("WARN", "基準点を読めなかったので、往復テストを始めるときの座標を使います")
-                hwnd = self._begin_on_target("往復テスト")
+                    self.log_threadsafe("WARN", f"基準点を読めなかったので、{what}を始めるときの座標を使います")
+                hwnd = self._begin_on_target(what)
                 if hwnd is None:
                     return
                 from akm.config import PC_DIR
@@ -1162,21 +1176,65 @@ class GateApp:
                 ptr = Pointer(run, self._screen_to_hid, cursor=self._cursor if IS_WINDOWS else None, mode=mode,
                               settle_ms=int(pcfg.get("click_settle_ms", 100)),
                               hold_ms=int(pcfg.get("click_hold_ms", 80)), log=self.log_threadsafe)
-                st = ShuttleTest(run, grab, read_loc, client_to_screen, ptr, log=self.log_threadsafe,
-                                 calib_path=PC_DIR / "models" / "home_nav.json", tiles=tiles, wait_s=wait,
-                                 map_name=map_name, helper_probe=probe, alive=self._hid_allowed, base_xy=base_xy,
-                                 axis=axis)
+                common = dict(log=self.log_threadsafe, calib_path=PC_DIR / "models" / "home_nav.json",
+                              map_name=map_name, helper_probe=probe, alive=self._hid_allowed, base_xy=base_xy)
+                if kind == "explore":
+                    from akm.map_explore import MapExplorer
+
+                    st = MapExplorer(run, grab, read_loc, client_to_screen, ptr, recorder=self._map_recorder(map_name),
+                                     radius=radius, step=step, max_minutes=minutes, read_hp=self._hp_reader(),
+                                     **common)
+                    detail = f"±{radius} マス / {step} マスおき / 最大 {minutes:g} 分"
+                else:
+                    st = ShuttleTest(run, grab, read_loc, client_to_screen, ptr, tiles=tiles, wait_s=wait, axis=axis,
+                                     **common)
+                    detail = f"{tiles} マス / {wait:g} 秒"
                 holder["t"] = st
                 self.shuttle = st
-                self.log_threadsafe("INFO", f"往復テストを始めます: {tiles} マス / {wait:g} 秒 / マップ {map_name} / "
-                                            f"マウス {mode} (ゲームからフォーカスが外れたら止まります。Pause キーでも止まります)")
+                self.log_threadsafe("INFO", f"{what}を始めます: {detail} / マップ {map_name} / マウス {mode} "
+                                            "(ゲームからフォーカスが外れたら止まります。Pause キーでも止まります)")
                 st.start()
             except Exception as e:  # noqa: BLE001
-                self.log_threadsafe("ERR", f"往復テストを始められません: {e}")
+                self.log_threadsafe("ERR", f"{what}を始められません: {e}")
             finally:
                 self._busy = False
 
         threading.Thread(target=go, name="shuttle-start", daemon=True).start()
+
+    def _map_recorder(self, map_name: str):
+        """マップ探索の記録先 (data/mu_map.db)。DB は探索のスレッドで開く (sqlite はスレッドをまたげない)"""
+        from akm.config import config_path
+        from akm.maploc import Location, MapDB
+
+        path = config_path((self.cfg.get("maplog") or {}).get("db", "data/mu_map.db"))
+        box = {}
+
+        def db():
+            if "db" not in box:
+                box["db"] = MapDB(path, interp_max=8)  # 読む間隔の間に歩いた分 (8 マスまで) も歩けるマスにする
+            return box["db"]
+
+        class Rec:
+            def walk(self, x, y):
+                db().record(Location(map_name, int(x), int(y)))
+
+            def blocked(self, x, y):
+                db().add_blocked(map_name, x, y)
+
+        return Rec()
+
+    def _hp_reader(self):
+        """HP (0..1) を画面から読む関数。config.yaml の hud.hp が無ければ None"""
+        h = (self.cfg.get("hud") or {}).get("hp") or {}
+        if not h.get("roi"):
+            return None
+        from akm.vision import bar_level
+
+        def read(img):
+            v = bar_level(img, h["roi"], h.get("color", "red"), h.get("direction", "vertical"))
+            return v if v > 0 else None  # 赤が全く見えない = 読めない (窓で隠れているなど)
+
+        return read
 
     def start_mouse_check(self):
         if (self.shuttle is not None and self.shuttle.running) or getattr(self, "_busy", False):
@@ -1366,6 +1424,10 @@ class GateApp:
             g = int(90 + 140 * k)
             ax, ay = px(x, y)
             c.create_rectangle(ax, ay, ax + s, ay + s, fill=f"#1e{g:02x}2e", width=0)
+        blocked = self.maps.blocked(name) if (self.live is not None and self.maps is not None) else []
+        for x, y in blocked:  # マップ探索で行けなかったマス
+            ax, ay = px(x, y)
+            c.create_rectangle(ax, ay, ax + s, ay + s, fill="#8e2424", width=0)
         if self.show_spots.get():
             for sname, sx, sy, r, col in spots:
                 ax, ay = px(sx - r, sy - r)
@@ -1378,7 +1440,8 @@ class GateApp:
         ax, ay = px(cx + 0.5, cy + 0.5)
         c.create_oval(ax - 5, ay - 5, ax + 5, ay + 5, fill="#e53935", outline="white")
         c.create_text(8, 8, anchor="nw", fill="#9e9e9e",
-                      text=f"({cx}, {cy})  歩いたマス {len(cells)}  表示 {view} マス (ホイールで拡大縮小)  {note}")
+                      text=f"({cx}, {cy})  歩いたマス {len(cells)}" + (f"  行けない {len(blocked)}" if blocked else "") +
+                      f"  表示 {view} マス (ホイールで拡大縮小)  {note}")
 
     # ---- 送信画面 -------------------------------------------------------------
     def show_live(self):
