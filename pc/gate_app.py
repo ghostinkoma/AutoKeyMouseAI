@@ -1041,6 +1041,7 @@ class GateApp:
                                             f"'{reader.last_text}'{where}")
             return []
 
+        read.reader = reader  # 読んだ文字 (reader.last_text) をマップ名にも使う
         return read
 
     def _begin_on_target(self, what: str):
@@ -1097,6 +1098,19 @@ class GateApp:
                                     f"(表示範囲 {r.left},{r.top} {r.width}x{r.height})")
         return t.hwnd
 
+    @staticmethod
+    def _map_from_text(text: str) -> str | None:
+        """OCR の文字 "Noria ( 55 , 137) | ..." からマップ名。知っているマップ名に合うときだけ (読み違えた名前は使わない)"""
+        from akm.maploc import KNOWN_MAPS, normalize_map
+
+        for part in (text or "").split("|"):
+            head = part.split("(")[0].strip()
+            if head:
+                name = normalize_map(head)
+                if name in KNOWN_MAPS:
+                    return name
+        return None
+
     def _read_base(self, hwnd: int):
         """基準点: 押した瞬間のゲーム画面から座標を読み直す (前に読んだ値・前回の基準点は使わない)。
         読み違いを避けるため、何回か読んで同じになった座標を使う。読めなければ None"""
@@ -1109,7 +1123,9 @@ class GateApp:
                     xy = (int(loc.x), int(loc.y))
                     seen[xy] = seen.get(xy, 0) + 1
                     if seen[xy] >= 2:
-                        self.log_threadsafe("INFO", f"基準点 (押したときの座標): {xy}")
+                        self._base_map = self._map_from_text(self._base_reader.reader.last_text)
+                        self.log_threadsafe("INFO", f"基準点 (押したときの座標): {xy}" +
+                                            (f"  マップ {self._base_map}" if self._base_map else ""))
                         return xy
                 time.sleep(0.1)
         except Exception as e:  # noqa: BLE001
@@ -1130,8 +1146,11 @@ class GateApp:
         old = self.shuttle if (self.shuttle is not None and self.shuttle.running) else None
         if old is not None:
             self.stop_shuttle()
+        self.arm_runs.set(kind)  # 次に ▶ 開始 (ARM) を押したときも同じものを始める
+        if not have_base:
+            self._base_map = None
         tiles, wait = int(self.shuttle_tiles.get()), float(self.shuttle_wait.get())
-        map_name, mode = self.shuttle_map.get().strip() or "Crywolf", self.mouse_mode.get()
+        map_ui, mode = self.shuttle_map.get().strip() or "Crywolf", self.mouse_mode.get()
         axis = AXES.get(self.shuttle_axis.get(), "screen")
         pcfg = self.cfg.get("virtual_hid") or {}
 
@@ -1149,6 +1168,9 @@ class GateApp:
                     base_xy = self._read_base(t0.hwnd)
                 if base_xy is None:
                     self.log_threadsafe("WARN", f"基準点を読めなかったので、{what}を始めるときの座標を使います")
+                map_name = getattr(self, "_base_map", None) or map_ui  # 画面から読めたマップ名を優先
+                if map_name != map_ui:
+                    self.root.after(0, lambda: self.shuttle_map.set(map_name))
                 hwnd = self._begin_on_target(what)
                 if hwnd is None:
                     return
