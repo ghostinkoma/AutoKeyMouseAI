@@ -281,7 +281,7 @@ class GateApp:
         self.hid_out = tk.StringVar(value="virtual")   # キー・マウスの出口: virtual (この PC) / esp32
         self.shuttle_tiles = tk.IntVar(value=10)
         self.explore_radius = tk.IntVar(value=25)   # マップ探索: 基準点から ±何マス
-        self.explore_step = tk.IntVar(value=3)      # 何マスおきに歩くか
+        self.explore_step = tk.IntVar(value=5)      # 何マスおきに歩くか
         self.explore_minutes = tk.IntVar(value=30)  # 最大何分
         self.shuttle_axis = tk.StringVar(value="画面の上下")  # 上下の決め方
         self.shuttle_wait = tk.IntVar(value=5)

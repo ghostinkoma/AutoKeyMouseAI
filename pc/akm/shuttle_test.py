@@ -46,11 +46,31 @@ def digit_slip(a, b) -> bool:
 class _Walker(HomeReturn):
     """HomeReturn の歩き方だけを使う (待つ間に画面を撮ってポーションを見る処理は省く)"""
 
+    owner = None  # ShuttleTest (座標の読み取りの結果を共有する)
+
     def _wait(self, ms: int) -> None:
-        self.sleep(ms / 1000)
+        """クリックのあとの待ち。歩いている間も座標を読み、行き先の近くまで来たらすぐ終わる
+        (決まった時間を待ち切らない: 次のクリックを早く出せるので、立ち止まらずに歩き続けられる)"""
+        o = self.owner
+        if o is None or not o.poll_while_walking or self.home is None:
+            self.sleep(ms / 1000)
+            return
+        end = self.clock() + ms / 1000
+        while True:
+            left = end - self.clock()
+            if left <= 0:
+                return
+            self.sleep(min(0.12, left))
+            loc = self.read_loc(self.grab())
+            if loc is not None and math.hypot(self.home[1] - loc.x, self.home[2] - loc.y) <= self.settings.arrive_tiles:
+                return
 
     def _loc(self):
-        """現在地を読む。読めない・読み違いとして捨てたときは、少し待って読み直す (最大 2 秒ほど)"""
+        """現在地を読む。直前 (0.3 秒以内) に読めていればそれを使う。読めない・読み違いとして捨てたときは、
+        少し待って読み直す (最大 2 秒ほど)"""
+        o = self.owner
+        if o is not None and o._fresh is not None and o.clock() - o._fresh[2] < 0.3:
+            return o._fresh[0], o._fresh[1]
         img = None
         for _ in range(10):
             img = self.grab()
@@ -76,6 +96,9 @@ class ShuttleTest:
                         「停止中なら Home → 動作中になったか確かめる」。無ければ Home を押すだけ
         alive(): 続けてよいか (送信先が前面か)。False になったらその場で止める (InterruptedError)"""
         self.alive = alive
+        self._fresh = None             # 最後に読めた (画面, 座標, 時刻)。歩く側で読み直しを省く
+        self.poll_while_walking = True  # クリックのあと、着いたらすぐ次へ (決まった時間を待ち切らない)
+        self.arrive_first = 1.5         # これだけ近づいたら着いたことにする (隣のマス。斜めを含む)
         self.tag = "[往復]"  # ログの頭
         self.calib_path = calib_path
         self.helper_wait_s = float(helper_wait_s)  # Home を押してから動作中になるのを待つ秒数 (過ぎたら押し直す)
@@ -112,6 +135,7 @@ class ShuttleTest:
                               self.char_pos, calib_path=calib_path, log=self._log_walker, sleep=self._sleep)
         self.walker.settings = Settings(arrive_tiles=arrive_tiles, max_walk_s=max_walk_s, helper_key=helper_key)
         self.walker.helper_probe = helper_probe
+        self.walker.owner = self
 
     # ---- 部品 ---------------------------------------------------------------
     def _check(self) -> None:
@@ -167,12 +191,14 @@ class ShuttleTest:
         if ok:
             self._last, self._last_t, self._odd = loc, now, []
             self._learn(loc, now)
+            self._fresh = (img, loc, self.clock())
         else:
             self._odd = [(lo, t) for lo, t in self._odd if near(lo, loc, 2)] + [(loc, now)]
             if len(self._odd) >= self.jump_reads and now - self._odd[0][1] >= self.jump_s:
                 self.log("WARN", f"{self.tag} 座標が大きく変わりました ({self._last.x}, {self._last.y}) → ({loc.x}, {loc.y})"
                                  f" ({len(self._odd)} 回続けて同じ読み)")
                 self._last, self._last_t, self._odd = loc, now, []
+                self._fresh = (img, loc, self.clock())
             else:
                 self.rejected += 1
                 if self.rejected <= 3 or self.rejected % 20 == 0:
@@ -272,6 +298,11 @@ class ShuttleTest:
             raise RuntimeError("画面の向きの記録がおかしい (models/home_nav.json を消して調べ直してください)")
         return m, int(round(x + vx / n * self.tiles)), int(round(y + vy / n * self.tiles))
 
+    def _here(self, max_age: float = 3.0):
+        """最近 (max_age 秒以内) 読めた座標。読めていなければ None (古い座標で「着いた」としないように)"""
+        f = self._fresh
+        return f[1] if f is not None and self.clock() - f[2] <= max_age else None
+
     def _within(self, here, target, d: int) -> bool:
         return here is not None and abs(here.x - target[1]) <= d and abs(here.y - target[2]) <= d
 
@@ -281,16 +312,16 @@ class ShuttleTest:
         self.status = f"{label} ({target[1]}, {target[2]}) へ"
         self.walker.home = target
         st = self.walker.settings
-        st.arrive_tiles, st.max_walk_s = 1.5, self.exact_s
+        st.arrive_tiles, st.max_walk_s = self.arrive_first, self.exact_s
         res = self.walker.walk_home()
-        here = self._last
+        here = self._here()
         ok = res.startswith("着いた")
         if not ok and not self._within(here, target, self.tolerance):
             # 近くまで来ていない (障害物・アイテム・ほかのキャラクターなど): 残りの時間、近くまで歩く
             st.arrive_tiles = self.tolerance * 1.42  # 斜めに tolerance マス離れていても着いたことにする
             st.max_walk_s = max(2.0, self.max_walk_s - self.exact_s)
             res = self.walker.walk_home()
-            here = self._last
+            here = self._here()
         if not ok:
             ok = self._within(here, target, self.tolerance)
             if ok:

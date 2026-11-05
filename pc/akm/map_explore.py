@@ -27,6 +27,8 @@ class MapExplorer(ShuttleTest):
         kw.setdefault("exact_s", 2.0)
         super().__init__(*args, **kw)
         self.tag = "[探索]"
+        self.arrive_first = self.tolerance * 1.42  # 目標は通り道: 近くまで来たらすぐ次へ (立ち止まらない)
+        self.unread = 0  # 続けて座標が読めなかった回数
         self.recorder = recorder
         self.radius, self.step = int(radius), max(1, int(step))
         self.max_minutes = float(max_minutes)
@@ -106,8 +108,16 @@ class MapExplorer(ShuttleTest):
             n += 1
             m = self.origin[0]
             res = self.walk_to((m, t[0], t[1]), f"探索 {len(self.done) + len(self.unreachable) + 1}/{len(self.targets)}")
-            here = self._last
-            if here is not None and self._within(here, (m, t[0], t[1]), self.tolerance):
+            here = self._here()
+            if here is None:  # 座標が読めない (窓で隠れている・表示が消えている): この目標は後回し
+                self.unread += 1
+                if self.unread >= 5:
+                    raise RuntimeError("座標が読めない状態が続くので止めます (画面右下の座標が見えているか確認してください)")
+                self.log("WARN", f"{self.tag} 座標が読めないので ({t[0]}, {t[1]}) は後回しにします")
+                self._sleep(1.0)
+                continue
+            self.unread = 0
+            if self._within(here, (m, t[0], t[1]), self.tolerance):
                 self.done.add(t)
             else:
                 self.unreachable.add(t)
