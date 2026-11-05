@@ -289,7 +289,7 @@ class GateApp:
         self._bring_front = True
         self.shuttle_map = tk.StringVar(value="Crywolf")   # 往復テストのマップ名 (OCR のマップ名は使わない)
         self.mouse_mode = tk.StringVar(value="abs")         # カーソルの動かし方 (akm/pointer.py)
-        self.arm_runs = tk.StringVar(value="shuttle")       # ▶ 開始 (ARM) で続けて始めるもの: none / check / shuttle
+        self.arm_runs = tk.StringVar(value="explore")       # ▶ 開始 (ARM) で続けて始めるもの: explore / shuttle / check / none
         self.bring_front.trace_add("write", lambda *_: setattr(self, "_bring_front", bool(self.bring_front.get())))
         self.vhid = None           # 仮想 HID (akm.virtual_hid.VirtualHid)。初めて使うときに作る
         self.shuttle = None        # 往復テスト (akm.shuttle_test.ShuttleTest)
@@ -334,6 +334,7 @@ class GateApp:
         self.t0 = time.time()
         self.frames = 0
 
+        self._load_ui_settings()
         self._build_ribbon()
         self._build_log()        # 下から順に詰める (ログ → ステータス → 中央)
         self._build_status()
@@ -844,6 +845,9 @@ class GateApp:
         self._armed = True
         if activate and IS_WINDOWS:  # 送信先の窓 (ミラーで映している窓) を前面にし、選んでおいた試験を始める
             then = self.arm_runs.get()
+            self.log("INFO", "ARM のあと: " + {"explore": "マップ探索を始めます", "shuttle": "往復テストを始めます",
+                                                "check": "マウス診断をします", "none": "前面に出すだけです"}.get(then, then) +
+                     " (「試験」タブの「▶ 開始 (ARM) を押したら」で変えられます)")
             if then in ("shuttle", "explore") and self.shuttle is not None and self.shuttle.running:
                 self.stop_shuttle()  # 押し直し: 前の往復テストを止め、新しい基準点でやり直す
             threading.Thread(target=self._activate_and_report, args=(then,), daemon=True).start()
@@ -930,6 +934,49 @@ class GateApp:
                             f"{t.name} が前面になりました" if ok else
                             f"{t.name} を前面にできませんでした (今の前面 hwnd {fg or 0:#010x} '{window_title(fg)}')")
         return ok
+
+    # ---- 試験の設定を覚えておく (models/gate_ui.json。起動し直しても残す) -----------------------
+    def _ui_vars(self) -> dict:
+        return {"arm_runs": self.arm_runs, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
+                "shuttle_wait": self.shuttle_wait, "shuttle_axis": self.shuttle_axis, "mouse_mode": self.mouse_mode,
+                "explore_radius": self.explore_radius, "explore_step": self.explore_step,
+                "explore_minutes": self.explore_minutes}
+
+    def _ui_settings_path(self):
+        from pathlib import Path
+
+        return Path(__file__).resolve().parent / "models" / "gate_ui.json"
+
+    def _load_ui_settings(self):
+        import json
+
+        try:
+            d = json.loads(self._ui_settings_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            d = {}
+        for k, var in self._ui_vars().items():
+            if k in d:
+                try:
+                    var.set(d[k])
+                except (tk.TclError, ValueError):
+                    pass
+            var.trace_add("write", lambda *_: self._save_ui_settings())
+
+    def _save_ui_settings(self):
+        import json
+
+        d = {}
+        for k, var in self._ui_vars().items():
+            try:
+                d[k] = var.get()
+            except (tk.TclError, ValueError):  # 入力の途中 (空欄など)
+                return
+        try:
+            p = self._ui_settings_path()
+            p.parent.mkdir(exist_ok=True)
+            p.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            pass
 
     def restart_as_admin(self):
         if not IS_WINDOWS:
