@@ -620,6 +620,20 @@ class GateApp:
             self.log_text.tag_configure(tag, foreground=color)
 
     def log(self, level: str, msg: str):
+        line = f"{time.strftime('%H:%M:%S')} [{level:<4}] {msg}"
+        try:  # PowerShell の画面と logs/gate_日付.log にも出す (貼り付けて見せやすいように)
+            print(line, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from pathlib import Path
+
+            d = Path(__file__).resolve().parent / "logs"
+            d.mkdir(exist_ok=True)
+            with open(d / f"gate_{time.strftime('%Y%m%d')}.log", "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
         self.log_text.insert(tk.END, time.strftime("%H:%M:%S "), "TIME")
         self.log_text.insert(tk.END, f"[{level:<4}] ", level)
         self.log_text.insert(tk.END, msg + "\n")

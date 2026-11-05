@@ -9,3 +9,4 @@ runs/
 !models/edge_obj.npz
 !models/record_filter.npz
 debug/
+logs/
