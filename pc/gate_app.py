@@ -632,7 +632,7 @@ class GateApp:
         self.log_text = scrolledtext.ScrolledText(box, height=6, font=self.mono, bg="#1e1e1e", fg="#d4d4d4",
                                                   insertbackground="white")
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        for tag, color in (("INFO", "#9cdcfe"), ("WARN", "#dcdcaa"), ("ERR", "#f48771"), ("GATE", "#b5cea8"),
+        for tag, color in (("INFO", "#9cdcfe"), ("WARN", "#dcdcaa"), ("ERR", "#f48771"), ("GATE", "#b5cea8"), ("FPS", "#c586c0"),
                            ("TIME", "#808080")):
             self.log_text.tag_configure(tag, foreground=color)
 
@@ -747,6 +747,7 @@ class GateApp:
         self.sender.set_lines([])  # 液晶にはゲームの画面だけを出す
         self.sender_fmt = fmt
         self.sender_route = self.route.get()
+        self._fps_begin(fmt)
         if host:
             self._start_esp_poll(host)  # 有線のときも、内訳は Wi-Fi の /status から読む
         self.log("INFO", f"ESP32 ({where}) への送信を始めました: {fmt} → " +
@@ -783,8 +784,63 @@ class GateApp:
                  f"{st.get('decode_ms', 0):.0f}/描画(SPI) {st.get('draw_ms', 0):.0f}ms "
                  f"CPU{st.get('cpu_pct', 0):.0f}% {st.get('kbps', 0) / 8:.0f}KB/s")
 
+    # ---- 平均 fps をログに出す (テキストで比べやすいように 1 行にまとめる) ------------------------------
+    FPS_LOG_S = 10.0  # この間隔ごとに、その間の平均を 1 行出す
+
+    def _fps_begin(self, fmt: str):
+        m = self.sender
+        now = time.monotonic()
+        self._fps = {"fmt": fmt, "t0": now, "tw": now, "sent_w": 0, "bytes_w": 0, "fail_w": 0, "esp": [], "esp_w": []}
+        if m is not None:
+            self.root.after(int(self.FPS_LOG_S * 1000), lambda: self._fps_tick(m))
+
+    @staticmethod
+    def _esp_avg(samples):
+        """ESP32 の /status の mirror (fps と内訳) の平均。無ければ None"""
+        if not samples:
+            return None
+        keys = ("fps", "recv_ms", "decode_ms", "draw_ms", "cpu_pct", "kbps")
+        return {k: sum(float(x.get(k, 0)) for x in samples) / len(samples) for k in keys}
+
+    def _fps_line(self, label: str, fmt: str, dt: float, sent: int, nbytes: int, fails: int, esp) -> str:
+        fps = sent / dt if dt > 0 else 0.0
+        kb = nbytes / sent / 1024 if sent else 0.0
+        line = (f"{label}{fmt.replace(' ', '')} {dt:.0f}s PC {fps:.1f}fps {kb:.1f}KB/枚 "
+                f"{nbytes / dt / 1024 if dt > 0 else 0:.0f}KB/s 失敗{fails}")
+        if esp:
+            line += (f" | ESP {esp['fps']:.1f}fps 受信待ち{esp['recv_ms']:.0f} 展開{esp['decode_ms']:.0f} "
+                     f"描画{esp['draw_ms']:.0f}ms CPU{esp['cpu_pct']:.0f}%")
+        return line
+
+    def _fps_tick(self, m):
+        """FPS_LOG_S ごと: その間の平均を 1 行ログに出す"""
+        f = getattr(self, "_fps", None)
+        if m is not self.sender or f is None:
+            return
+        now = time.monotonic()
+        st = self.esp_stats
+        if st:
+            f["esp_w"].append(st)
+            f["esp"].append(st)
+        sent, nbytes, fails = m.sent - f["sent_w"], m.bytes_sent - f["bytes_w"], m.fails - f["fail_w"]
+        self.log("FPS", self._fps_line("", f["fmt"], now - f["tw"], sent, nbytes, fails, self._esp_avg(f["esp_w"])))
+        f.update(tw=now, sent_w=m.sent, bytes_w=m.bytes_sent, fail_w=m.fails, esp_w=[])
+        self.root.after(int(self.FPS_LOG_S * 1000), lambda: self._fps_tick(m))
+
+    def _fps_summary(self, m):
+        """送信をやめる / 形式を変えるとき: その形式で送っていた間の全体の平均を 1 行"""
+        f = getattr(self, "_fps", None)
+        if f is None or m is None:
+            return
+        dt = time.monotonic() - f["t0"]
+        if dt >= 3 and m.sent:
+            self.log("FPS", self._fps_line("平均 ", f["fmt"], dt, m.sent, m.bytes_sent, m.fails,
+                                           self._esp_avg(f["esp"])))
+        self._fps = None
+
     def stop_sending(self):
         if self.sender is not None:
+            self._fps_summary(self.sender)
             # 前の送信が本当に終わるまで待つ (返事待ちは最大 3 秒)。残っていると Wi-Fi と有線の
             # 2 つが同時に送ることになり、ESP32 の液晶が両方を待って詰まる
             m, self.sender = self.sender, None

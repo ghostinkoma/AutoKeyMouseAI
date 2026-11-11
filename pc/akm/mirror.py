@@ -122,6 +122,8 @@ class Mirror:
         self.sent = 0
         self.errors = 0
         self.jpeg_errors = 0
+        self.bytes_sent = 0   # 送れたバイト数の合計 (平均の計算用)
+        self.fails = 0        # 送れなかった回数の合計
         # 計測 (直近の平均, ms)
         self.t_capture = 0.0
         self.t_encode = 0.0
@@ -240,6 +242,7 @@ class Mirror:
 
     def _ok(self, n: int) -> None:
         self.sent += 1
+        self.bytes_sent += n
         self.errors = 0
         self._fps_n += 1
         dt = time.monotonic() - self._fps_t0
@@ -435,6 +438,7 @@ class Mirror:
                         continue
                     except Exception as e:
                         self.errors += 1
+                        self.fails += 1
                         self._tcp_fail += 1
                         if self.transport == "auto" and self._tcp_fail >= 3:
                             print(f"[mirror] 専用ポートに接続できないので、しばらく HTTP で送ります ({e})。"
@@ -465,6 +469,7 @@ class Mirror:
                             print(f"[mirror] 液晶への表示に成功 ({self.fmt}, {len(data)} バイト)")
                     else:
                         self.errors += 1
+                        self.fails += 1
                         msg = f"HTTP {r.status_code} {r.text.strip()}"
                         if self.fmt == "jpeg" and r.status_code == 400:
                             self.jpeg_errors += 1
@@ -476,11 +481,13 @@ class Mirror:
                             self._warn(msg)
                 except Exception as e:  # 通信エラーでボットは止めない
                     self.errors += 1
+                    self.fails += 1
                     self._warn(str(e))
                     s = requests.Session()  # 接続を張り直す
                 if self.grab is not None:
                     time.sleep(max(0.0, self._interval() - (time.monotonic() - t0)))
             except Exception as e:  # 送信スレッドが落ちて液晶が止まらないように、何があっても送り続ける
                 self.errors += 1
+                self.fails += 1
                 self._warn(f"送信で予期しないエラー (続けます): {e!r}")
                 time.sleep(1.0)
