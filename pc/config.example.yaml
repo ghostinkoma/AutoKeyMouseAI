@@ -215,8 +215,8 @@ mirror:
   # jpeg : 毎回 JPEG (5〜10KB/枚, ESP32 の展開が重い) / raw: 非圧縮 (64.8KB/枚)
   format: bad16
   # bad16 の色のビット数 R G B。565 = 可逆 (16 面, 1 枚 30KB 前後) / 343 = 10 面 (既定) / 332 = 8 面 (一番小さい)
-  # YCoCg 版 (明るさ + 色差。仲介アプリの形式。firmware frame-stream-32 以降) も書ける:
-  #   "YCoCg 420 Y6C5" (343 より小さく高画質) / "YCoCg 420 Y4C4" (343 と同じ画質で約半分) / "YCoCg 可逆"
+  # YCoCg 版 (明るさ + 色差。仲介アプリの形式。firmware frame-stream-34 以降) も書ける:
+  #   "YCoCg 420 Y6C5" (343 より小さく高画質) / "YCoCg 420 Y4C4" (343 と同じ画質で約半分)
   color: "343"
   gray: false              # true: 各色を Gray 符号にして送る (可逆のまま 1 割強小さい。firmware frame-stream-10 以降)
   with_prev: false         # true: 面ごとのフレーム (少し小さいが ESP32 に面の数 x 4KB 要る。S3 + PSRAM 向け)

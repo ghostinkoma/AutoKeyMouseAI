@@ -137,16 +137,17 @@ inline const uint64_t* spread() {
 //   ver 1: 'B' '6' 1 flags                … 16 面すべて、面ごとの BadCodec フレーム (前フレームが要る)
 //   ver 2: 'B' '6' 2 flags mask(u16 LE)   … mask の面だけ、面ごとの BadCodec フレーム (前フレームが要る)
 //   ver 3: 'B' '6' 3 flags mask(u16 LE)   … 前フレーム不要のブロックストリーム (decodeAbs)
-//   ver 4: 'B' '6' 4 flags mode ny nc     … YCoCg 版。前フレーム不要、16x16 のマクロブロック (decodeYcc)
+//   ver 5: 'B' '6' 5 flags mode ny nc     … YCoCg 版。前フレーム不要、16x16 のマクロブロック (decodeYcc)
+//          (ver 4 は 16x16 を丸ごと送っていた試作。今は受け付けない)
 struct Header {
   bool key = false;
   bool gray = false;       // flags bit1 (ver 3): 各色を Gray 符号にしてからビット面に分けてある
   bool rep = false;        // flags bit2 (ver 3): 送られない下位ビットを上位ビットの複製で埋めて表示する
   bool abs = false;        // ver 3
   uint16_t mask = 0xFFFF;  // 送られてくるビット面 (bit b = RGB565 の bit b)。無い面は常に 0
-  bool ycc = false;        // ver 4 (YCoCg)
-  uint8_t mode = 0;        // ver 4: 0 = 4:4:4 / 1 = 4:2:0 / 2 = 可逆 (RGB565 の YCoCg-R)
-  uint8_t ny = 0, nc = 0;  // ver 4: Y / 色差のビット数
+  bool ycc = false;        // ver 5 (YCoCg)
+  uint8_t mode = 0;        // ver 5: 0 = 4:4:4 / 1 = 4:2:0 / 2 = 可逆 (RGB565 の YCoCg-R)
+  uint8_t ny = 0, nc = 0;  // ver 5: Y / 色差のビット数
 };
 
 inline int planesIn(uint16_t mask) {
@@ -165,7 +166,7 @@ inline bool readHeader(ReadFn read, void* ctx, Header& h) {
     h.mask = 0xFFFF;
     return true;
   }
-  if (b[2] == 4) {
+  if (b[2] == 5) {
     uint8_t m[3];
     if (!read(ctx, m, 3)) return false;
     h.abs = h.ycc = true;
@@ -368,10 +369,11 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// ver 4 (YCoCg 版。pc/akm/bad16.py の YccEncoder) の本体を読みながら、変わった 16x16 のマクロブロックを
-// 8x8 ずつ sink(bx, by, rows, px) に渡す (decodeAbs と同じ形。前フレーム不要、メモリは数百バイト)。
-// マクロブロック: Y の 4 ブロック (左上・右上・左下・右下) x ny 面 → 色差 (4:2:0 なら Co の nc 面・Cg の nc 面を
-// 1 ブロックずつ、4:4:4 なら 4 ブロックそれぞれに Co・Cg)。面は bit0 から。値は Gray 符号のことがある (flags bit1)。
+// ver 5 (YCoCg 版。pc/akm/bad16.py の YccEncoder) の本体を読みながら、変わった 8x8 を sink(bx, by, rows, px) に
+// 渡す (decodeAbs と同じ形。前フレーム不要)。16x16 のマクロブロック: 先頭 1 バイト = 変わった 8x8 (bit0 左上・bit1
+// 右上・bit2 左下・bit3 右下) → その 8x8 の Y x ny 面 → 色差 (4:2:0 なら Co の nc 面・Cg の nc 面を 1 ブロックずつ、
+// 4:4:4 なら変わった 8x8 それぞれに Co・Cg)。面は bit0 から。値は Gray 符号のことがある (flags bit1)。
+// 変わっていない 8x8 は読みも描きもしない (液晶に残っている絵のまま)。
 // 色の戻し方は足し算だけ: t = Y - Cg, G = Y + Cg, B = t - Co, R = t + Co (掛け算・割り算なし)
 namespace detail {
 // 1 つの 8x8 命令 (先頭 op は読み済みなら first に) → 8 行 (1 行 1 バイト, bit x = 画素 x)
@@ -421,9 +423,23 @@ struct YccWork {
   uint8_t ys[4][64], cos[4][64], cgs[4][64];
   alignas(8) uint8_t rm[8][8];
   uint16_t px[64];
+  // 色差から作る足し分 (色差の 1 画素につき 1 回): R = Y + dR, G = Y + dG, B = Y + dB
+  int16_t dR[64], dG[64], dB[64];  // 4:2:0 はマクロブロックに 1 組、4:4:4 は 8x8 ごとに作り直す
+  // 0..255 に切り詰める表 (添字 = 値 + 256。-256..511)。足し算の結果をそのまま引く (768B)
+  uint8_t clip[768];
+  uint8_t idx420[4][64];  // 4:2:0: 8x8 の各画素が使う色差の位置
+  bool tables;  // 静的領域なので 0 (false) で始まる (初期化子を付けると初回の排他チェックが入る)
 };
 inline YccWork& yccWork() {
   static YccWork w;  // ゼロ初期化だけ (初期化の排他は要らない)
+  if (!w.tables) {  // 最初の 1 回だけ表を作る
+    for (int v = -256; v < 512; v++) w.clip[v + 256] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+    for (int sb = 0; sb < 4; sb++)
+      for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++)
+          w.idx420[sb][y * 8 + x] = (uint8_t)((((sb >> 1) * 8 + y) >> 1) * 8 + (((sb & 1) * 8 + x) >> 1));
+    w.tables = true;
+  }
   return w;
 }
 }  // namespace detail
@@ -456,20 +472,17 @@ inline int decodeYcc(const Header& h, ReadFn read, void* ctx, Sink sink) {
       continue;
     }
     uint32_t c0 = BAD16_CYCLES();
-    bool have = true;  // op は読み済み
+    const int mask = op;  // 変わった 8x8
+    if (mask < 1 || mask > 15) return -1;
     auto next = [&](uint8_t rows8[8]) BAD16_AI -> bool {
       uint8_t o;
-      if (have) {
-        o = op;
-        have = false;
-      } else if (!read(ctx, &o, 1)) {
-        return false;
-      }
+      if (!read(ctx, &o, 1)) return false;
       return detail::block8(rd, o, rows8);
     };
     uint8_t(&rm)[8][8] = wk.rm;
     uint8_t rows8[8];
     for (int s = 0; s < 4; s++) {
+      if (!(mask >> s & 1)) continue;
       for (int b = 0; b < ny; b++) {
         if (!next(rows8)) return -1;
         for (int y = 0; y < 8; y++) rm[y][b] = rows8[y];
@@ -478,6 +491,7 @@ inline int decodeYcc(const Header& h, ReadFn read, void* ctx, Sink sink) {
     }
     int nchroma = sub ? 1 : 4;
     for (int s = 0; s < nchroma; s++) {
+      if (!sub && !(mask >> s & 1)) continue;
       for (int b = 0; b < nc; b++) {
         if (!next(rows8)) return -1;
         for (int y = 0; y < 8; y++) rm[y][b] = rows8[y];
@@ -491,37 +505,51 @@ inline int decodeYcc(const Header& h, ReadFn read, void* ctx, Sink sink) {
     }
     uint32_t c1 = BAD16_CYCLES();
     int mx = ptr % MBX, my = ptr / MBX;
+    int16_t *dR = wk.dR, *dG = wk.dG, *dB = wk.dB;
+    // 色差の足し分を色差の画素ごとに 1 回だけ作る (4:2:0 なら 4 画素で共有)。R = Y + dR, G = Y + dG, B = Y + dB
+    auto deltas = [&](int cs) BAD16_AI {
+      for (int k = 0; k < 64; k++) {
+        int co = (int)lc[cos[cs][k]] - 128, cg = (int)lc[cgs[cs][k]] - 128;
+        dR[k] = (int16_t)(co - cg);   // R = (Y - Cg) + Co
+        dG[k] = (int16_t)cg;          // G = Y + Cg
+        dB[k] = (int16_t)(-co - cg);  // B = (Y - Cg) - Co
+      }
+    };
+    if (sub && !lossless) deltas(0);
+    const uint8_t* clip = wk.clip + 256;
+    // 切り詰めた 8 ビットを RGB565 に詰める (R 上位 5 / G 上位 6 / B 上位 5)
+#define BAD16_PACK(r, g, b) \
+  (uint16_t)(((clip[r] & 0xF8) << 8) | ((clip[g] & 0xFC) << 3) | (clip[b] >> 3))
     for (int s = 0; s < 4; s++) {
+      if (!(mask >> s & 1)) continue;  // 変わっていない 8x8 は描かない
       int bx = mx * 2 + (s & 1), by = my * 2 + (s >> 1);
       int rows = ROWS - by * 8;
       if (rows <= 0) continue;  // 135 行より下 (余白)
       if (rows > 8) rows = 8;
-      for (int y = 0; y < 8; y++)
-        for (int x = 0; x < 8; x++) {
-          int i = y * 8 + x;
-          int ci, cs;
-          if (sub) {  // 色差は 8x8 で 16x16 を覆う: この画素の位置の半分
-            cs = 0;
-            ci = (((s >> 1) * 8 + y) >> 1) * 8 + (((s & 1) * 8 + x) >> 1);
-          } else {
-            cs = s;
-            ci = i;
-          }
-          int Y = ly[ys[s][i]];
-          if (lossless) {  // YCoCg-R (RGB565 そのもの)
-            int co = (int)cos[cs][ci] - 64, cg = (int)cgs[cs][ci] - 64;
-            int t = Y - (cg >> 1);
-            int g = cg + t, b = t - (co >> 1), r = b + co;
-            px[i] = (uint16_t)(((r & 31) << 11) | ((g & 63) << 5) | (b & 31));
-          } else {
-            int co = (int)lc[cos[cs][ci]] - 128, cg = (int)lc[cgs[cs][ci]] - 128;
-            int t = Y - cg;
-            int g = detail::clamp255(Y + cg), b = detail::clamp255(t - co), r = detail::clamp255(t + co);
-            px[i] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-          }
+      const uint8_t* yv = ys[s];
+      if (lossless) {  // YCoCg-R (RGB565 そのもの)
+        for (int i = 0; i < 64; i++) {
+          int co = (int)cos[s][i] - 64, cg = (int)cgs[s][i] - 64;
+          int t = yv[i] - (cg >> 1);
+          int g = cg + t, b = t - (co >> 1), r = b + co;
+          px[i] = (uint16_t)(((r & 31) << 11) | ((g & 63) << 5) | (b & 31));
         }
+      } else if (sub) {  // 4:2:0: 色差は idx420 の位置
+        const uint8_t* ix = wk.idx420[s];
+        for (int i = 0; i < 64; i++) {
+          int Y = ly[yv[i]], c = ix[i];
+          px[i] = BAD16_PACK(Y + dR[c], Y + dG[c], Y + dB[c]);
+        }
+      } else {  // 4:4:4
+        deltas(s);
+        for (int i = 0; i < 64; i++) {
+          int Y = ly[yv[i]];
+          px[i] = BAD16_PACK(Y + dR[i], Y + dG[i], Y + dB[i]);
+        }
+      }
       sink(bx, by, rows, px);
     }
+#undef BAD16_PACK
     uint32_t c2 = BAD16_CYCLES();
     prof().parse += c1 - c0;
     prof().assemble += c2 - c1;

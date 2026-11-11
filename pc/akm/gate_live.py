@@ -47,7 +47,7 @@ class Snapshot:
 # 送る形式 (仲介アプリのミラーのタブ)。BadCodec のカラーは R G B のビット数 (565 = RGB565 そのまま・可逆)
 FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit",
            "YCoCg 420 Y6C5", "YCoCg 420 Y6C4", "YCoCg 420 Y5C4", "YCoCg 420 Y4C4", "YCoCg 420 Y5C3",
-           "YCoCg 444 Y6C5", "YCoCg 可逆", "JPEG")
+           "YCoCg 444 Y6C5", "JPEG")  # YCoCg 可逆は小さくならず展開が一番重いので出さない (YccEncoder("lossless") はある)
 _YCC_PREVIEW: dict = {}
 
 

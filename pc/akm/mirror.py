@@ -103,7 +103,7 @@ class Mirror:
         # 色のビット数を 1 段ずつ下げて (面を減らして) 送り直し、最後は JPEG に戻す
         self._b16 = None
         self.b16_bits: tuple[int, int, int] = tuple(b16_bits)  # R, G, B のビット数 (5, 6, 5 = 可逆)
-        # YCoCg 版 (ver 4。frame-stream-32 以降): (mode, ny, nc)。指定すると bad16 の代わりに使う
+        # YCoCg 版 (ver 5。frame-stream-34 以降): (mode, ny, nc)。指定すると bad16 の代わりに使う
         self.ycc = tuple(ycc) if ycc else None
         # True: 前フレーム不要版 (ver 3)。ESP32 は変わったブロックを直接液晶へ描くのでメモリ不足にならない。
         # False: 面ごとのフレーム (ver 2)。少し小さいが ESP32 に (面の数 + 1) x 4KB 要る
@@ -388,7 +388,7 @@ class Mirror:
                           "(古いままだと暗めに表示されます)")
                 need = (10 if self.b16_gray else 9) if self.b16_prev_free else 7
                 if self.ycc:
-                    need = 32
+                    need = 34  # YCoCg 版 ver 5 (変わった 8x8 だけ)
                 if self.fmt == "bad16" and (not m or int(m.group(1)) < need):
                     print(f"[mirror] BadCodec {'YCoCg 版' if self.ycc else '16bit 版'}"
                           f"{'(前フレーム不要版)' if self.b16_prev_free and not self.ycc else ''}には "

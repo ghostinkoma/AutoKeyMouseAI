@@ -1,4 +1,4 @@
-"""BadCodec YCoCg 版 (ver 4): C エンコーダ → ESP32 と同じ C++ デコーダ (firmware の bad16.h) で、
+"""BadCodec YCoCg 版 (ver 5): C エンコーダ → ESP32 と同じ C++ デコーダ (firmware の bad16.h) で、
 エンコーダが計算した液晶の絵 (last_display) とぴったり同じになる。可逆は RGB565 そのものに戻る。"""
 import shutil
 import struct
@@ -63,7 +63,7 @@ def test_ycc_roundtrip_matches_esp32_decoder(decoder, mode, ny, nc, gray):
     for f in srcs:
         datas.append(enc.encode(f))
         expect.append(enc.last_display.copy())
-    assert datas[0][:3] == b"B6\x04" and datas[0][3] & 1 and not datas[1][3] & 1
+    assert datas[0][:3] == b"B6\x05" and datas[0][3] & 1 and not datas[1][3] & 1
     assert len(datas[-1]) < 20  # 変化なし: SKIP だけ
     got = run_decoder(decoder, datas)
     for i, (g, e) in enumerate(zip(got, expect)):
@@ -89,3 +89,17 @@ def test_parse_ycc():
     assert parse_ycc("YCoCg 444 Y6 C5") == ("444", 6, 5)
     assert parse_ycc("YCoCg 可逆") == ("lossless", 6, 7)
     assert parse_ycc("BadCodec 343") is None
+
+
+def test_ycc_sends_only_changed_8x8(decoder):
+    """1 画素だけ変わったら、16x16 のうち変わった 8x8 だけを送る (前は 16x16 を丸ごと)"""
+    enc = YccEncoder("420", 6, 5)
+    a = frames_of(n=1)[0]
+    b = a.copy()
+    b[5, 5] = (255, 0, 255)  # 左上のマクロブロックの左上の 8x8 だけ
+    d0, e0 = enc.encode(a), enc.last_display.copy()
+    d1, e1 = enc.encode(b), enc.last_display.copy()
+    assert d1[7] == 0x01  # 最初のマクロブロック: 左上の 8x8 だけ
+    got = run_decoder(decoder, [d0, d1])
+    assert (got[0] == e0).all() and (got[1] == e1).all()
+    assert len(d1) < 7 + 1 + 6 * 9 + 2 * 5 * 9 + 8  # mask + Y 6 面 + 色差 10 面 (1 ブロックずつ) + SKIP

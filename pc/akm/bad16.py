@@ -223,7 +223,8 @@ class Encoder:
 # 輪郭が 3 回送られる。YCoCg なら輪郭は Y に集まり、色差の面はほとんど平ら (小さく圧縮できる)。
 # 色差は 4:2:0 (縦横半分) にもできる。戻すのは足し算だけ (t = Y - Cg, G = Y + Cg, B = t - Co, R = t + Co)。
 #
-# コンテナ: 'B' '6' 4 flags mode ny nc + 本体 (pc/native/bad_encode.c の bad16_encode_ycc)
+# コンテナ: 'B' '6' 5 flags mode ny nc + 本体 (pc/native/bad_encode.c の bad16_encode_ycc)
+#   16x16 単位で、変わったものは先頭 1 バイトに「どの 8x8 が変わったか」。変わった 8x8 だけ送り・描く
 #   flags bit0 = キーフレーム, bit1 = 各値を Gray 符号にしてある
 #   mode 0 = 4:4:4 / 1 = 4:2:0 (どちらも非可逆: Y・色差を 8 ビットにしてから上位 ny / nc ビット)
 #        2 = 可逆 (RGB565 そのものを YCoCg-R に: Y 6 ビット、Co / Cg 7 ビット (+64)。4:4:4)
@@ -342,7 +343,7 @@ class YccEncoder:
         self.changed_blocks = ch.value
         self.prev = cur
         flags = (1 if key else 0) | (2 if self.gray else 0)
-        return b"B6\x04" + bytes([flags, YCC_MODES[self.mode], self.ny, self.nc]) + out[:n].tobytes()
+        return b"B6\x05" + bytes([flags, YCC_MODES[self.mode], self.ny, self.nc]) + out[:n].tobytes()
 
 
 def parse_ycc(name: str):

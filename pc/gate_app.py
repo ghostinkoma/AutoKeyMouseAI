@@ -462,7 +462,7 @@ class GateApp:
         # BadCodec のカラーは R G B のビット数。565 = RGB565 そのまま (可逆・一番きれい・1 枚が一番大きい)
         labels = {"BadCodec 565": "RGB565 (可逆)", "BadCodec 343": "RGB 343 (10 面)", "BadCodec 332": "RGB 332 (8 面)",
                   "BadCodec 1bit": "白黒 (1 ビット)", "YCoCg 可逆": "YCoCg 可逆 (RGB565 そのもの)", "JPEG": "JPEG"}
-        for f in FORMATS:  # YCoCg (明るさ + 色差。frame-stream-32 以降): "YCoCg 4:2:0 Y6 C5" のように出す
+        for f in FORMATS:  # YCoCg (明るさ + 色差。frame-stream-34 以降): "YCoCg 4:2:0 Y6 C5" のように出す
             if f not in labels and f.startswith("YCoCg"):
                 _, sub, yc = f.split()
                 labels[f] = f"YCoCg {sub[0]}:{sub[1]}:{sub[2]} {yc[:2]} {yc[2:]}"
@@ -478,7 +478,7 @@ class GateApp:
         cb = ttk.Combobox(g, textvariable=fmt_label, values=names, width=24, state="readonly")
         cb.grid(row=0, column=0, sticky="w")
         cb.bind("<<ComboboxSelected>>", pick)
-        ttk.Label(g, text="YCoCg = 明るさ + 色差 (同じ画質で小さい。\nfirmware frame-stream-32 以降)",
+        ttk.Label(g, text="YCoCg = 明るさ + 色差 (同じ画質で小さい。\nfirmware frame-stream-34 以降)",
                   style="Caption.TLabel").grid(row=1, column=0, rowspan=2, sticky="w")
         g = rb.group(t, "2値化")
         ttk.Label(g, text="しきい値").grid(row=0, column=0, sticky="w")

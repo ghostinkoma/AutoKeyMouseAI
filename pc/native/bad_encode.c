@@ -541,11 +541,12 @@ API int bad16_encode_abs(const uint16_t *curr, const uint16_t *prev, int w, int 
 }
 
 /* ------------------------------------------------------------------------------------------------
- * BadCodec YCoCg 版 (コンテナ ver 4。pc/akm/bad16.py の YccEncoder)。前フレーム不要 (液晶に残る絵を使う)。
+ * BadCodec YCoCg 版 (コンテナ ver 5。pc/akm/bad16.py の YccEncoder)。前フレーム不要 (液晶に残る絵を使う)。
  * 16x16 のマクロブロック単位。変わらないマクロブロックは SKIP (0x80-0xBF = n+1 個)。変わったものは
- *   Y   : 4 つの 8x8 (左上・右上・左下・右下) それぞれに、Y の面 bit0 → bit(ny-1) の 8x8 命令 1 つずつ
+ *   mask: 1 バイト (0x01-0x0F)。変わった 8x8 (bit0 左上・bit1 右上・bit2 左下・bit3 右下)。この 8x8 だけ送り・描く
+ *   Y   : mask の 8x8 それぞれに、Y の面 bit0 → bit(ny-1) の 8x8 命令 1 つずつ
  *   色差: 4:2:0 なら Co の面 bit0..、Cg の面 bit0.. を 8x8 (= マクロブロック全体の半分の解像度) 1 つずつ
- *         4:4:4 なら 4 つの 8x8 それぞれに Co の面、Cg の面
+ *         4:4:4 なら mask の 8x8 それぞれに Co の面、Cg の面
  * 値 (Y / Co / Cg) は呼び出し側で量子化・Gray 符号化済みの 0..255 (ny / nc ビット)。
  * Y は w x h、色差は 4:2:0 なら (w/2) x (h/2)、4:4:4 なら w x h。w, h は 16 の倍数。
  * ------------------------------------------------------------------------------------------------ */
@@ -575,17 +576,35 @@ API int bad16_encode_ycc(const uint8_t *Y, const uint8_t *Co, const uint8_t *Cg,
   for (int my = 0; my < nby; my++)
     for (int mx = 0; mx < nbx; mx++) {
       int cx = mx * cm, cy = my * cm;
-      int diff = pY == NULL || region_diff(Y, pY, w, mx * 16, my * 16, 16) ||
-                 region_diff(Co, pCo, cw, cx, cy, cm) || region_diff(Cg, pCg, cw, cx, cy, cm);
-      if (!diff) { skip++; continue; }
+      /* 変わった 8x8 (左上 bit0・右上 bit1・左下 bit2・右下 bit3)。色差は、その 8x8 にかかる部分で見る */
+      int mask = 0;
+      for (int s = 0; s < 4; s++) {
+        int x8 = mx * 16 + (s & 1) * 8, y8 = my * 16 + (s >> 1) * 8;
+        int d;
+        if (pY == NULL) {
+          d = 1;
+        } else if (sub420) {
+          int qx = cx + (s & 1) * 4, qy = cy + (s >> 1) * 4;
+          d = region_diff(Y, pY, w, x8, y8, 8) || region_diff(Co, pCo, cw, qx, qy, 4) ||
+              region_diff(Cg, pCg, cw, qx, qy, 4);
+        } else {
+          d = region_diff(Y, pY, w, x8, y8, 8) || region_diff(Co, pCo, cw, x8, y8, 8) ||
+              region_diff(Cg, pCg, cw, x8, y8, 8);
+        }
+        if (d) mask |= 1 << s;
+      }
+      if (!mask) { skip++; continue; }
       FLUSH_SKIP();
       changed++;
-      for (int s = 0; s < 4; s++) { EMIT(Y, w, mx * 16 + (s & 1) * 8, my * 16 + (s >> 1) * 8, ny) }
-      if (sub420) {
+      PUT(mask);  /* 0x01-0x0F: どの 8x8 が続くか (SKIP 0x80-0xBF と重ならない) */
+      for (int s = 0; s < 4; s++)
+        if (mask >> s & 1) { EMIT(Y, w, mx * 16 + (s & 1) * 8, my * 16 + (s >> 1) * 8, ny) }
+      if (sub420) {  /* 色差は 8x8 1 つでマクロブロック全体 (変わった 8x8 の色はここから取る) */
         EMIT(Co, cw, cx, cy, nc)
         EMIT(Cg, cw, cx, cy, nc)
       } else {
         for (int s = 0; s < 4; s++) {
+          if (!(mask >> s & 1)) continue;
           int x0 = cx + (s & 1) * 8, y0 = cy + (s >> 1) * 8;
           EMIT(Co, cw, x0, y0, nc)
           EMIT(Cg, cw, x0, y0, nc)
