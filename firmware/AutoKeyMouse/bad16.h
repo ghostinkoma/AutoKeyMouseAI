@@ -413,6 +413,19 @@ inline uint8_t repBits(uint8_t q, int n) {
   return (uint8_t)v;
 }
 BAD16_AI inline int clamp255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+// decodeYcc の作業領域 (約 1.4KB)。スタックに置くと、受信タスク (スタック 4KB) で Wi-Fi の受信の深い呼び出しと
+// 重なってあふれる (ESP32 が再起動する)。展開は 1 つのタスクだけで行うので、1 つを使い回す
+struct YccWork {
+  uint8_t ly[256], lc[256];
+  uint8_t ys[4][64], cos[4][64], cgs[4][64];
+  alignas(8) uint8_t rm[8][8];
+  uint16_t px[64];
+};
+inline YccWork& yccWork() {
+  static YccWork w;  // ゼロ初期化だけ (初期化の排他は要らない)
+  return w;
+}
 }  // namespace detail
 
 template <typename Sink>
@@ -423,13 +436,17 @@ inline int decodeYcc(const Header& h, ReadFn read, void* ctx, Sink sink) {
   constexpr int MBX = W / 16, MBY = (ROWS + 15) / 16, TOTAL = MBX * MBY;
   const bool sub = h.mode == 1, lossless = h.mode == 2;
   const int ny = h.ny, nc = h.nc;
+  detail::YccWork& wk = detail::yccWork();
+  uint8_t* ly = wk.ly;
+  uint8_t* lc = wk.lc;
   // 値 → 8 ビット (非可逆)。可逆は値をそのまま使う
-  uint8_t ly[256], lc[256];
   for (int q = 0; q < (1 << ny); q++) ly[q] = lossless ? (uint8_t)q : detail::repBits((uint8_t)q, ny);
   for (int q = 0; q < (1 << nc); q++) lc[q] = lossless ? (uint8_t)q : detail::repBits((uint8_t)q, nc);
   auto rd = [&](uint8_t* dst, size_t n) BAD16_AI { return read(ctx, dst, n); };
-  uint8_t ys[4][64], cos[4][64], cgs[4][64];
-  uint16_t px[64];
+  uint8_t(&ys)[4][64] = wk.ys;
+  uint8_t(&cos)[4][64] = wk.cos;
+  uint8_t(&cgs)[4][64] = wk.cgs;
+  uint16_t* px = wk.px;
   int ptr = 0, drawn = 0;
   while (ptr < TOTAL) {
     uint8_t op;
@@ -450,7 +467,7 @@ inline int decodeYcc(const Header& h, ReadFn read, void* ctx, Sink sink) {
       }
       return detail::block8(rd, o, rows8);
     };
-    alignas(8) uint8_t rm[8][8];
+    uint8_t(&rm)[8][8] = wk.rm;
     uint8_t rows8[8];
     for (int s = 0; s < 4; s++) {
       for (int b = 0; b < ny; b++) {
