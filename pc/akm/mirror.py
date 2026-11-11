@@ -68,7 +68,7 @@ class Mirror:
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
                  fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005,
                  pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5),
-                 ycc: tuple | None = None,
+                 ycc: tuple | None = None, entropy: str | None = None,
                  b16_gray: bool = False, link_factory=None):
         self.enabled = enabled and bool(host)
         self.url = None
@@ -105,6 +105,9 @@ class Mirror:
         self.b16_bits: tuple[int, int, int] = tuple(b16_bits)  # R, G, B のビット数 (5, 6, 5 = 可逆)
         # YCoCg 版 (ver 5。frame-stream-34 以降): (mode, ny, nc)。指定すると bad16 の代わりに使う
         self.ycc = tuple(ycc) if ycc else None
+        # BadCodec のフレームをさらに 1 フレームまるごと "huff" (ハフマン) / "tans" で包む (frame-stream-35 以降)
+        self.entropy = entropy or None
+        self._key_sent = False  # 包んだフレームがキーフレームか (包むと先頭の flags が見えないので覚えておく)
         # True: 前フレーム不要版 (ver 3)。ESP32 は変わったブロックを直接液晶へ描くのでメモリ不足にならない。
         # False: 面ごとのフレーム (ver 2)。少し小さいが ESP32 に (面の数 + 1) x 4KB 要る
         self.b16_prev_free = b16_prev_free
@@ -283,6 +286,11 @@ class Mirror:
                 self._b16 = (YccEncoder(*self.ycc) if self.ycc else
                              Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free, gray=self.b16_gray))
             data = self._b16.encode(frame)
+            if self.entropy and data[:2] == b"B6":
+                from .bad16 import entropy_wrap
+
+                self._key_sent = bool(data[3] & 1)
+                data = entropy_wrap(data, self.entropy)
         else:
             data = encode(frame, "jpeg" if self.fmt in ("bc", "bad16") else self.fmt, self.quality)
         t2 = time.perf_counter()
@@ -305,8 +313,9 @@ class Mirror:
             print(f"[mirror] 専用ポート {self.hostname}:{self.port} に接続しました (TCP で連続送信)")
         try:
             self._sock.sendall(b"AKMF" + struct.pack("<I", len(data)) + data)
-            kind = "bad16" if data[:2] == b"B6" else ("bc" if data[:2] == b"BC" else "jpeg")
-            if kind == "jpeg" or data[3] & 1:  # JPEG も全体を描くのでキーフレームと同じ
+            kind = "bad16" if data[:2] in (b"B6", b"BH", b"BA") else ("bc" if data[:2] == b"BC" else "jpeg")
+            key = self._key_sent if data[:2] in (b"BH", b"BA") else bool(data[3] & 1)
+            if kind == "jpeg" or key:  # JPEG も全体を描くのでキーフレームと同じ
                 self._key_gen += 1
             self._inflight.append((kind, self.b16_bits, self._key_gen))
             depth = self.pipeline if kind != "jpeg" else 1
@@ -389,6 +398,8 @@ class Mirror:
                 need = (10 if self.b16_gray else 9) if self.b16_prev_free else 7
                 if self.ycc:
                     need = 34  # YCoCg 版 ver 5 (変わった 8x8 だけ)
+                if self.entropy:
+                    need = max(need, 35)  # ハフマン / tANS で包んだフレーム
                 if self.fmt == "bad16" and (not m or int(m.group(1)) < need):
                     print(f"[mirror] BadCodec {'YCoCg 版' if self.ycc else '16bit 版'}"
                           f"{'(前フレーム不要版)' if self.b16_prev_free and not self.ycc else ''}には "

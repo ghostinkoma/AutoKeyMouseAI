@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "display.h"
+#include "entropy.h"
 
 namespace serial_stream {
 namespace {
@@ -98,6 +99,19 @@ void handleFrame(uint32_t len) {
   if (len < 2 || !readFn(&rd, head, 2)) {
     discardRest(rd);
     ack('R');
+    return;
+  }
+  if (head[0] == 'B' && (head[1] == 'H' || head[1] == 'A')) {
+    // ハフマン / tANS で包んだ BadCodec (frame_stream.cpp と同じ)
+    ent::Dec& d = ent::dec();
+    int res = ent::begin(d, head[1], readFn, &rd, len) ? display::drawBad16(ent::read, &d, d.outLeft, &rd.waitUs) : 0;
+    discardRest(rd);
+    if (res < 0) {
+      display::releaseBad16();
+      ack('E');
+    } else {
+      ack(res == 0 || res == 4 || display::needKeyframe() ? 'R' : 'K');
+    }
     return;
   }
   if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6')) {

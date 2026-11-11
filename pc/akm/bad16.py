@@ -43,6 +43,10 @@ def _lib():
         lib.bad16_encode_abs.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint16,
                                          ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
         lib.bad16_encode_abs.restype = ctypes.c_int
+        for fn in ("bad_entropy_huff", "bad_entropy_tans"):
+            if hasattr(lib, fn):
+                getattr(lib, fn).argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+                getattr(lib, fn).restype = ctypes.c_int
         if hasattr(lib, "bad16_encode_ycc"):
             lib.bad16_encode_ycc.argtypes = [ctypes.c_void_p] * 6 + [ctypes.c_int] * 5 + [
                 ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
@@ -344,6 +348,26 @@ class YccEncoder:
         self.prev = cur
         flags = (1 if key else 0) | (2 if self.gray else 0)
         return b"B6\x05" + bytes([flags, YCC_MODES[self.mode], self.ny, self.nc]) + out[:n].tobytes()
+
+
+# ------------------------------------------------------- 1 フレームまるごとのエントロピー符号 --
+# BadCodec の出力 ('B' '6' ...) を、さらにハフマン ('B' 'H') か tANS ('B' 'A') で小さくする。
+# ESP32 は受け取りながら戻して、そのまま BadCodec の展開に渡す (firmware frame-stream-35 以降)。
+ENTROPY = {"huff": 11, "tans": 10}  # ハフマンの符号長の上限 / tANS の表の大きさ (2^10)
+
+
+def entropy_wrap(data: bytes, kind: str) -> bytes:
+    """kind: "huff" / "tans"。小さくならなかったら元のまま返す"""
+    lib = _lib()
+    fn = {"huff": "bad_entropy_huff", "tans": "bad_entropy_tans"}[kind]
+    if not hasattr(lib, fn):
+        raise RuntimeError("bad_encode が古い (エントロピー符号が無い)。pc/native を作り直してください")
+    src = np.frombuffer(data, np.uint8)
+    out = np.empty(len(data) + 1024, np.uint8)
+    n = getattr(lib, fn)(src.ctypes.data, len(data), out.ctypes.data, out.size, ENTROPY[kind])
+    if n < 0 or n >= len(data):
+        return data
+    return out[:n].tobytes()
 
 
 def parse_ycc(name: str):

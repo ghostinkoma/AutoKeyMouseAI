@@ -701,7 +701,7 @@ def test_bad16_esp32_decoder_matches_encoder(bits, prev_free, gray):
     exe = PC / "tests" / ("_bad16_decode_test_" + "".join(map(str, bits)) + str(ver) + str(g))
     fw = PC.parent / "firmware" / "AutoKeyMouse"
     subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(PC / "tests" / "bad16_decode_test.cpp"),
-                    str(fw / "bad_decode.cpp")], check=True)
+                    str(fw / "bad_decode.cpp"), str(fw / "entropy.cpp")], check=True)
     try:
         stdin = b"".join(struct.pack("<I", len(d)) + d for d in frames)
         out = subprocess.run([str(exe)], input=stdin, capture_output=True, check=True).stdout
@@ -2970,7 +2970,7 @@ def test_badcodec_fast_rle_matches_reference():
     exe = PC / "tests" / "_rle_equiv_test"
     fw = PC.parent / "firmware" / "AutoKeyMouse"
     subprocess.run([gxx, "-std=c++17", "-O2", "-o", str(exe), str(PC / "tests" / "rle_equiv_test.cpp"),
-                    str(fw / "bad_decode.cpp")], check=True)
+                    str(fw / "bad_decode.cpp"), str(fw / "entropy.cpp")], check=True)
     try:
         out = subprocess.run([str(exe), "quick"], capture_output=True, text=True)
         assert out.returncode == 0 and out.stdout.strip() == "ok", out.stdout

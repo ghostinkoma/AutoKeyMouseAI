@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../../firmware/AutoKeyMouse/bad16.h"
+#include "../../firmware/AutoKeyMouse/entropy.h"
 
 struct Mem {
   const uint8_t* p;
@@ -30,20 +31,37 @@ int main() {
     std::vector<uint8_t> buf(len);
     if (fread(buf.data(), 1, len, stdin) != len) return 2;
     Mem m{buf.data(), len};
+    // 'B' 'H' / 'B' 'A': エントロピー符号を戻しながら、中の BadCodec のフレームを読む (ESP32 と同じ)
+    bad16::ReadFn rdf = rd;
+    void* rctx = &m;
+    if (len >= 2 && buf[0] == 'B' && (buf[1] == 'H' || buf[1] == 'A')) {
+      uint8_t h2[2];
+      rd(&m, h2, 2);
+      if (!ent::begin(ent::dec(), buf[1], rd, &m, len)) {
+        fprintf(stderr, "entropy header failed\n");
+        return 1;
+      }
+      rdf = ent::read;
+      rctx = &ent::dec();
+    }
     bad16::Header h;
     int r = 0;
     bool abs = false;
-    if (bad16::readHeader(rd, &m, h)) {
+    if (bad16::readHeader(rdf, rctx, h)) {
       if (h.abs) {  // ver 3 / 4: 前フレーム無しで変わったブロックだけ fb (= 液晶) に描く
         abs = true;
         auto sink = [&](int bx, int by, int rows, const uint16_t* px) {
           for (int y = 0; y < rows; y++) memcpy(&fb[by * 8 + y][bx * 8], px + y * 8, 16);
         };
-        r = (h.ycc ? bad16::decodeYcc(h, rd, &m, sink) : bad16::decodeAbs(h, rd, &m, sink)) >= 0 ? 1 : 0;
+        r = (h.ycc ? bad16::decodeYcc(h, rdf, rctx, sink) : bad16::decodeAbs(h, rdf, rctx, sink)) >= 0 ? 1 : 0;
       } else {
         if (!(st.ready && st.mask == h.mask) && h.key) bad16::setup(st, h.mask, [](int i) { return pool[i]; });
-        r = bad16::decodeBody(st, h, rd, &m);
+        r = bad16::decodeBody(st, h, rdf, rctx);
       }
+    }
+    if (rctx != &m) {  // 符号の残り (詰め物) を捨てる
+      if (ent::dec().outLeft) r = 0;
+      m.left = 0;
     }
     if (r == 0 || m.left) {
       fprintf(stderr, "decode failed r=%d left=%zu\n", r, m.left);

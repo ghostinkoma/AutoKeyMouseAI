@@ -155,6 +155,9 @@ def foreground_hwnd(windows: list[GameWindow]) -> int | None:
 # ---------------------------------------------------------------------------
 # リボン (Excel のようなタブ + グループ)
 # ---------------------------------------------------------------------------
+# BadCodec のフレームをさらに包む符号 (表示 → akm.mirror の entropy)
+ENTROPY_MODES = {"なし": None, "ハフマン": "huff", "tANS": "tans"}
+
 # 往復テストの上下の決め方 (表示 → akm.shuttle_test の axis)
 AXES = {"画面の上下": "screen", "Y (座標)": "y", "X (座標)": "x"}
 
@@ -295,6 +298,7 @@ class GateApp:
         self.shuttle = None        # 往復テスト (akm.shuttle_test.ShuttleTest)
         self.auto_refresh = tk.BooleanVar(value=True)
         self.mirror_fmt = tk.StringVar(value="BadCodec 343")  # 既定はカラー。config の mirror.color で変わる
+        self.mirror_ent = tk.StringVar(value="なし")  # BadCodec のフレームをさらに包む: なし / ハフマン / tANS
         self.threshold = tk.IntVar(value=100)
         self.fps = tk.IntVar(value=15)
         self.com = tk.StringVar(value="COM18")
@@ -478,8 +482,15 @@ class GateApp:
         cb = ttk.Combobox(g, textvariable=fmt_label, values=names, width=24, state="readonly")
         cb.grid(row=0, column=0, sticky="w")
         cb.bind("<<ComboboxSelected>>", pick)
-        ttk.Label(g, text="YCoCg = 明るさ + 色差 (同じ画質で小さい。\nfirmware frame-stream-34 以降)",
-                  style="Caption.TLabel").grid(row=1, column=0, rowspan=2, sticky="w")
+        ef = ttk.Frame(g)
+        ef.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(ef, text="さらに").pack(side=tk.LEFT)
+        ttk.Combobox(ef, textvariable=self.mirror_ent, values=list(ENTROPY_MODES), width=8,
+                     state="readonly").pack(side=tk.LEFT)
+        # YCoCg = 明るさ + 色差 (firmware frame-stream-34 以降)
+        # さらに = BadCodec の 1 フレームをハフマン / tANS で包む (frame-stream-35 以降)
+        ttk.Label(g, text="YCoCg: fw34〜 / さらに: fw35〜",
+                  style="Caption.TLabel").grid(row=2, column=0, sticky="w")
         g = rb.group(t, "2値化")
         ttk.Label(g, text="しきい値").grid(row=0, column=0, sticky="w")
         ttk.Scale(g, from_=0, to=255, variable=self.threshold, length=140).grid(row=1, column=0)
@@ -741,13 +752,16 @@ class GateApp:
                              # HTTP に逃げない (逃げると 1 枚ずつの POST が並行して届き、液晶が詰まる)
                              transport="tcp",
                              port=int(mcfg.get("port", 5005)), b16_bits=bits, ycc=ycc,
+                             entropy=ENTROPY_MODES.get(self.mirror_ent.get()) if kind == "bad16" else None,
                              # 有線は 1 枚ずつ返事を待つ (ESP32 の受信バッファ 8KB を溢れさせない)
                              pipeline=1 if wired else 2, link_factory=link,
                              b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))
         self.sender.set_lines([])  # 液晶にはゲームの画面だけを出す
+        ent = self.mirror_ent.get() if kind == "bad16" else "なし"
         self.sender_fmt = fmt
+        self.sender_ent = self.mirror_ent.get()
         self.sender_route = self.route.get()
-        self._fps_begin(fmt)
+        self._fps_begin(fmt + ("" if ent == "なし" else f" +{ent}"))
         if host:
             self._start_esp_poll(host)  # 有線のときも、内訳は Wi-Fi の /status から読む
         self.log("INFO", f"ESP32 ({where}) への送信を始めました: {fmt} → " +
@@ -871,7 +885,8 @@ class GateApp:
             return ("送信停止中", "#888888")
         if m.sent == 0:
             return ("接続中…" if m.errors == 0 else f"送れません ({m.errors})", "#e09000" if m.errors == 0 else "#d32f2f")
-        if getattr(self, "sender_fmt", "") != self.mirror_fmt.get():
+        if (getattr(self, "sender_fmt", "") != self.mirror_fmt.get()
+                or getattr(self, "sender_ent", "なし") != self.mirror_ent.get()):
             self.start_sending()  # 形式を変えたら送り直す
         return (f"{m.fps:4.1f} fps {m.last_bytes / 1024:.1f}KB", "#2e7d32" if m.errors == 0 else "#e09000")
 
@@ -1025,7 +1040,7 @@ class GateApp:
 
     # ---- 試験の設定を覚えておく (models/gate_ui.json。起動し直しても残す) -----------------------
     def _ui_vars(self) -> dict:
-        return {"arm_runs": self.arm_runs, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
+        return {"arm_runs": self.arm_runs, "mirror_ent": self.mirror_ent, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
                 "shuttle_wait": self.shuttle_wait, "shuttle_axis": self.shuttle_axis, "mouse_mode": self.mouse_mode,
                 "explore_radius": self.explore_radius, "explore_step": self.explore_step,
                 "explore_minutes": self.explore_minutes}

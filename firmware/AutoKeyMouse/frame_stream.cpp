@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "display.h"
+#include "entropy.h"
 
 namespace frame_stream {
 namespace {
@@ -135,12 +136,19 @@ void task(void*) {
       client.stop();
       continue;
     }
-    if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6')) {
+    if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6' || head[1] == 'H' || head[1] == 'A')) {
       // 受信しながら描く (フレームバッファ不要)。描き終わったら返事:
       //   'K' = OK / 'R' = 次はキーフレームが欲しい / 'E' = この形式は使えない (メモリ不足。PC は JPEG に戻す)
       Pre pre{&rd, {head[0], head[1]}, 0};
-      int res = head[1] == '6' ? display::drawBad16(readPre, &pre, len, &rd.waitUs)
-                               : display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
+      int res;
+      if (head[1] == 'H' || head[1] == 'A') {
+        // ハフマン / tANS で包んだ BadCodec: 受け取りながら戻して、そのまま BadCodec の展開に渡す
+        ent::Dec& d = ent::dec();
+        res = ent::begin(d, head[1], readFn, &rd, len) ? display::drawBad16(ent::read, &d, d.outLeft, &rd.waitUs) : 0;
+      } else {
+        res = head[1] == '6' ? display::drawBad16(readPre, &pre, len, &rd.waitUs)
+                             : display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
+      }
       if (res == 0) {
         Serial.println("[STREAM] block frame failed");
         client.stop();

@@ -618,3 +618,180 @@ API int bad16_encode_ycc(const uint8_t *Y, const uint8_t *Co, const uint8_t *Cg,
   if (changed_blocks) *changed_blocks = changed;
   return n;
 }
+
+/* ------------------------------------------------------------------------------------------------
+ * 1 フレームをまるごとエントロピー符号にする (BadCodec の出力 'B' '6' ... をさらに小さく)。
+ * ESP32 は受け取りながら 1 バイトずつ戻し、そのまま BadCodec の展開に渡す (firmware/AutoKeyMouse/entropy.cpp)。
+ *   ハフマン: 'B' 'H' 1 maxLen  元の長さ(u32 LE)  符号長 256 個 (4 ビットずつ, 下位ニブルが偶数番の記号) 128B
+ *             続けてビット列 (上位ビットから)。符号は正準ハフマン (同じ長さは記号の小さい順)
+ *   tANS     : 'B' 'A' 1 R  元の長さ(u32 LE)  記号の数-1 (u8)  (記号 u8, 回数 u16 LE) x 記号の数
+ *             続けてビット列 (上位ビットから): 最初の状態 R ビット、以後 1 記号ごとに表の nb ビット
+ *             表は L = 2^R。記号を step = L/2 + L/8 + 3 で散らして並べる (FSE と同じ)
+ * ------------------------------------------------------------------------------------------------ */
+typedef struct { uint8_t *p; int cap, n; uint32_t acc; int bits; } bw_t;
+static int bw_put(bw_t *w, uint32_t v, int nb) {
+  while (nb > 0) {
+    int k = nb > 16 ? 16 : nb;
+    nb -= k;
+    w->acc = (w->acc << k) | ((v >> nb) & ((1u << k) - 1));
+    w->bits += k;
+    while (w->bits >= 8) {
+      if (w->n >= w->cap) return -1;
+      w->p[w->n++] = (uint8_t)(w->acc >> (w->bits - 8));
+      w->bits -= 8;
+    }
+  }
+  return 0;
+}
+static int bw_flush(bw_t *w) {
+  if (w->bits > 0) {
+    if (w->n >= w->cap) return -1;
+    w->p[w->n++] = (uint8_t)(w->acc << (8 - w->bits));
+    w->bits = 0;
+  }
+  return w->n;
+}
+
+/* 符号長 (最大 maxLen)。普通のハフマンで長すぎたら回数を半分にして作り直す */
+static void huff_lengths(const uint32_t *freq0, int maxLen, uint8_t *len) {
+  uint32_t freq[256];
+  memcpy(freq, freq0, sizeof(freq));
+  for (;;) {
+    int nsym = 0, idx[256];
+    for (int s = 0; s < 256; s++) { len[s] = 0; if (freq[s]) idx[nsym++] = s; }
+    if (nsym == 0) return;
+    if (nsym == 1) { len[idx[0]] = 1; return; }
+    /* 節点: 0..nsym-1 = 葉, それ以降 = 内部。親を覚えて深さを数える */
+    uint64_t w[512]; int parent[512], alive[512], nn = nsym;
+    for (int i = 0; i < nsym; i++) { w[i] = freq[idx[i]]; alive[i] = 1; parent[i] = -1; }
+    for (int m = 0; m < nsym - 1; m++) {
+      int a = -1, b = -1;
+      for (int i = 0; i < nn; i++) {
+        if (!alive[i]) continue;
+        if (a < 0 || w[i] < w[a]) { b = a; a = i; } else if (b < 0 || w[i] < w[b]) { b = i; }
+      }
+      alive[a] = alive[b] = 0;
+      w[nn] = w[a] + w[b]; alive[nn] = 1; parent[nn] = -1;
+      parent[a] = parent[b] = nn;
+      nn++;
+    }
+    int maxd = 0;
+    for (int i = 0; i < nsym; i++) {
+      int d = 0;
+      for (int p = i; parent[p] >= 0; p = parent[p]) d++;
+      len[idx[i]] = (uint8_t)d;
+      if (d > maxd) maxd = d;
+    }
+    if (maxd <= maxLen) return;
+    for (int s = 0; s < 256; s++) if (freq[s]) freq[s] = (freq[s] + 1) / 2;
+  }
+}
+
+API int bad_entropy_huff(const uint8_t *in, int n, uint8_t *out, int cap, int maxLen) {
+  if (maxLen < 1 || maxLen > 12 || cap < 136) return -1;
+  uint32_t freq[256] = {0};
+  for (int i = 0; i < n; i++) freq[in[i]]++;
+  uint8_t len[256];
+  huff_lengths(freq, maxLen, len);
+  /* 正準ハフマンの符号 */
+  int bl[16] = {0};
+  for (int s = 0; s < 256; s++) bl[len[s]]++;
+  bl[0] = 0;
+  uint32_t next[16], code = 0, sc[256];
+  for (int l = 1; l <= 15; l++) { code = (code + bl[l - 1]) << 1; next[l] = code; }
+  for (int s = 0; s < 256; s++) sc[s] = len[s] ? next[len[s]]++ : 0;
+  int k = 0;
+  out[k++] = 'B'; out[k++] = 'H'; out[k++] = 1; out[k++] = (uint8_t)maxLen;
+  out[k++] = (uint8_t)n; out[k++] = (uint8_t)(n >> 8); out[k++] = (uint8_t)(n >> 16); out[k++] = (uint8_t)(n >> 24);
+  for (int s = 0; s < 256; s += 2) out[k++] = (uint8_t)(len[s] | len[s + 1] << 4);
+  bw_t bw = {out + k, cap - k, 0, 0, 0};
+  for (int i = 0; i < n; i++)
+    if (bw_put(&bw, sc[in[i]], len[in[i]]) < 0) return -1;
+  int m = bw_flush(&bw);
+  return m < 0 ? -1 : k + m;
+}
+
+static int highbit32(uint32_t v) { int r = 0; while (v >>= 1) r++; return r; }
+
+API int bad_entropy_tans(const uint8_t *in, int n, uint8_t *out, int cap, int R) {
+  if (R < 6 || R > 12 || n <= 0) return -1;
+  const int L = 1 << R;
+  uint32_t freq[256] = {0};
+  for (int i = 0; i < n; i++) freq[in[i]]++;
+  /* 回数を合計 L に (出てくる記号は 1 以上) */
+  int norm[256], sum = 0, nsym = 0;
+  for (int s = 0; s < 256; s++) {
+    norm[s] = 0;
+    if (!freq[s]) continue;
+    nsym++;
+    int v = (int)(((uint64_t)freq[s] * L + n / 2) / n);
+    norm[s] = v < 1 ? 1 : v;
+    sum += norm[s];
+  }
+  if (nsym > L) return -1;
+  while (sum != L) {  /* 一番多い記号で合わせる (減らすときは 2 以上のものから) */
+    int best = -1;
+    for (int s = 0; s < 256; s++)
+      if (norm[s] && (sum < L || norm[s] > 1) && (best < 0 || freq[s] > freq[best])) best = s;
+    if (sum < L) { norm[best]++; sum++; } else { norm[best]--; sum--; }
+  }
+  /* 記号を散らして並べる */
+  uint8_t *tsym = (uint8_t *)malloc(L);
+  uint16_t *tu = (uint16_t *)malloc(L * sizeof(uint16_t));
+  uint32_t *vals = (uint32_t *)malloc((size_t)n * sizeof(uint32_t));
+  uint8_t *nbs = (uint8_t *)malloc((size_t)n);
+  if (!tsym || !tu || !vals || !nbs) { free(tsym); free(tu); free(vals); free(nbs); return -1; }
+  {
+    int pos = 0, step = (L >> 1) + (L >> 3) + 3;
+    for (int s = 0; s < 256; s++)
+      for (int i = 0; i < norm[s]; i++) { tsym[pos] = (uint8_t)s; pos = (pos + step) & (L - 1); }
+  }
+  /* 符号化の表 (FSE と同じ形) */
+  int cum[257], cnext[256];
+  cum[0] = 0;
+  for (int s = 0; s < 256; s++) cum[s + 1] = cum[s] + norm[s];
+  for (int s = 0; s < 256; s++) cnext[s] = cum[s];
+  for (int u = 0; u < L; u++) tu[cnext[tsym[u]]++] = (uint16_t)(L + u);
+  int32_t dnb[256], dfs[256];
+  for (int s = 0; s < 256; s++) {
+    if (!norm[s]) continue;
+    if (norm[s] == 1) {
+      dnb[s] = (R << 16) - L;
+      dfs[s] = cum[s] - 1;
+    } else {
+      int mb = R - highbit32((uint32_t)norm[s] - 1);
+      int minp = norm[s] << mb;
+      dnb[s] = (mb << 16) - minp;
+      dfs[s] = cum[s] - norm[s];
+    }
+  }
+  /* 後ろから符号化 (出すビットは覚えておき、最後に逆順で書く = 受け側は前から読める) */
+  uint32_t X = (uint32_t)L;
+  for (int i = n - 1; i >= 0; i--) {
+    int s = in[i];
+    int nb = (int)((X + (uint32_t)dnb[s]) >> 16);
+    vals[i] = X & ((1u << nb) - 1);
+    nbs[i] = (uint8_t)nb;
+    X = tu[(X >> nb) + dfs[s]];
+  }
+  int k = 0, ret = -1;
+  out[k++] = 'B'; out[k++] = 'A'; out[k++] = 1; out[k++] = (uint8_t)R;
+  out[k++] = (uint8_t)n; out[k++] = (uint8_t)(n >> 8); out[k++] = (uint8_t)(n >> 16); out[k++] = (uint8_t)(n >> 24);
+  out[k++] = (uint8_t)(nsym - 1);
+  for (int s = 0; s < 256; s++) {
+    if (!norm[s]) continue;
+    if (k + 3 > cap) goto done;
+    out[k++] = (uint8_t)s; out[k++] = (uint8_t)norm[s]; out[k++] = (uint8_t)(norm[s] >> 8);
+  }
+  {
+    bw_t bw = {out + k, cap - k, 0, 0, 0};
+    if (bw_put(&bw, X - (uint32_t)L, R) < 0) goto done;
+    for (int i = 0; i < n; i++)
+      if (bw_put(&bw, vals[i], nbs[i]) < 0) goto done;
+    int m = bw_flush(&bw);
+    if (m >= 0) ret = k + m;
+  }
+done:
+  free(tsym); free(tu); free(vals); free(nbs);
+  return ret;
+}

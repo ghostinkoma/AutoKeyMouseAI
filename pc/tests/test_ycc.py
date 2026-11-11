@@ -42,7 +42,7 @@ def decoder(tmp_path_factory):
     exe = tmp_path_factory.mktemp("ycc") / "bad16_decode_test"
     fw = PC.parent / "firmware" / "AutoKeyMouse"
     subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(PC / "tests" / "bad16_decode_test.cpp"),
-                    str(fw / "bad_decode.cpp")], check=True)
+                    str(fw / "bad_decode.cpp"), str(fw / "entropy.cpp")], check=True)
     return exe
 
 
@@ -103,3 +103,63 @@ def test_ycc_sends_only_changed_8x8(decoder):
     got = run_decoder(decoder, [d0, d1])
     assert (got[0] == e0).all() and (got[1] == e1).all()
     assert len(d1) < 7 + 1 + 6 * 9 + 2 * 5 * 9 + 8  # mask + Y 6 面 + 色差 10 面 (1 ブロックずつ) + SKIP
+
+
+@pytest.mark.parametrize("kind", ["huff", "tans"])
+@pytest.mark.parametrize("make", ["rgb343", "rgb565", "ycc420"])
+def test_entropy_wrap_roundtrip(decoder, kind, make):
+    """BadCodec のフレームをハフマン / tANS で包んでも、ESP32 と同じコードで同じ絵に戻る (小さくもなる)"""
+    from akm.bad16 import Encoder, entropy_wrap
+
+    enc = {"rgb343": lambda: Encoder(bits=(3, 4, 3), gray=True), "rgb565": lambda: Encoder(bits=(5, 6, 5), gray=True),
+           "ycc420": lambda: YccEncoder("420", 6, 5)}[make]()
+    srcs = frames_of()
+    raw, wrapped, expect = [], [], []
+    for f in srcs:
+        d = enc.encode(f)
+        raw.append(d)
+        wrapped.append(entropy_wrap(d, kind))
+        expect.append(enc.last_display[:135].copy())
+    assert wrapped[0][:2] == (b"BH" if kind == "huff" else b"BA")
+    assert len(wrapped[0]) < len(raw[0])
+    got = run_decoder(decoder, wrapped)
+    for i, (g, e) in enumerate(zip(got, expect)):
+        assert (g == e).all(), f"frame {i}"
+
+
+def test_entropy_random_bytes_roundtrip(tmp_path):
+    """どんなバイト列でも元に戻る (C のエンコーダ → ESP32 と同じ C++ デコーダ)"""
+    from akm.bad16 import entropy_wrap
+
+    gxx = shutil.which("g++")
+    if not gxx:
+        pytest.skip("g++ が無い")
+    src = tmp_path / "t.cpp"
+    src.write_text("""
+#include <cstdio>
+#include <cstring>
+#include <vector>
+#include "%s"
+struct M { const uint8_t* p; size_t left; };
+static bool rd(void* c, uint8_t* d, size_t n) { M* m = (M*)c; if (n > m->left) return false; memcpy(d, m->p, n); m->p += n; m->left -= n; return true; }
+int main() {
+  std::vector<uint8_t> b; int ch; while ((ch = getchar()) != EOF) b.push_back((uint8_t)ch);
+  M m{b.data() + 2, b.size() - 2};
+  if (!ent::begin(ent::dec(), b[1], rd, &m, (uint32_t)b.size())) return 1;
+  std::vector<uint8_t> out(ent::dec().outLeft);
+  if (!ent::read(&ent::dec(), out.data(), out.size())) return 2;
+  fwrite(out.data(), 1, out.size(), stdout);
+}
+""" % (PC.parent / "firmware" / "AutoKeyMouse" / "entropy.h").as_posix())
+    exe = tmp_path / "t"
+    subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(src),
+                    str(PC.parent / "firmware" / "AutoKeyMouse" / "entropy.cpp")], check=True)
+    rng = np.random.default_rng(1)
+    for kind in ("huff", "tans"):
+        for data in (bytes(rng.integers(0, 4, 5000, dtype=np.uint8)),          # 偏りが大きい
+                     bytes(rng.geometric(0.05, 20000).clip(0, 255).astype(np.uint8)),  # 長い裾
+                     bytes([7]) * 3000 + bytes([9]) * 5):                          # ほぼ 1 種類
+            w = entropy_wrap(data, kind)
+            assert w[:2] in (b"BH", b"BA") and len(w) < len(data)
+            out = subprocess.run([str(exe)], input=w, capture_output=True, check=True).stdout
+            assert out == data, kind
