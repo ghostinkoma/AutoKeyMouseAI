@@ -208,14 +208,16 @@ IRAM_ATTR void dmaBlock(int x, int y, int rows, const uint16_t* px);
 // noinline: 呼び出し元 (drawBad16。フラッシュ) に埋め込まれると IRAM に置かれないため
 __attribute__((noinline)) IRAM_ATTR int decodeAbsDma(const bad16::Header& h, ReadFn read, void* ctx, uint32_t* drawUs,
                                                     uint32_t* edgeUs) {
-  return bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) __attribute__((always_inline)) {
+  auto sink = [&](int bx, int by, int rows, uint16_t* px) __attribute__((always_inline)) {
     uint32_t d0 = micros();
     edge_win::feedBlock(bx * 8, by * 8, 8, rows, px, 8);
     uint32_t d1 = micros();
     dmaBlock(bx * 8, by * 8, rows, px);  // 帯がつながらなくなったら前の帯を DMA で送る
     *edgeUs += d1 - d0;
     *drawUs += micros() - d1;
-  });
+  };
+  // ver 4 (YCoCg) も同じ描き方 (変わったブロックだけ。16x16 を 8x8 ずつ渡してくる)
+  return h.ycc ? bad16::decodeYcc(h, read, ctx, sink) : bad16::decodeAbs(h, read, ctx, sink);
 }
 
 IRAM_ATTR void dmaBlock(int x, int y, int rows, const uint16_t* px) {
@@ -586,13 +588,14 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
     } else {
       dmaEnd();
       gTft.startWrite();
-      n = bad16::decodeAbs(h, read, ctx, [&](int bx, int by, int rows, uint16_t* px) {
+      auto sink = [&](int bx, int by, int rows, uint16_t* px) {
         uint32_t d0 = micros();
         edge_win::feedBlock(bx * 8, by * 8, 8, rows, px, 8);  // 液晶に送る前に (送ると並びが変わることがある)
         gTft.setAddrWindow(bx * 8, by * 8, 8, rows);
         gTft.writePixels(px, 8 * rows);
         drawUs += micros() - d0;
-      });
+      };
+      n = h.ycc ? bad16::decodeYcc(h, read, ctx, sink) : bad16::decodeAbs(h, read, ctx, sink);
       gTft.endWrite();
     }
     uint32_t waited = recvUs ? *recvUs - recv0 : 0;

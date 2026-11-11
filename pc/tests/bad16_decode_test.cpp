@@ -34,11 +34,12 @@ int main() {
     int r = 0;
     bool abs = false;
     if (bad16::readHeader(rd, &m, h)) {
-      if (h.abs) {  // ver 3: 前フレーム無しで変わったブロックだけ fb (= 液晶) に描く
+      if (h.abs) {  // ver 3 / 4: 前フレーム無しで変わったブロックだけ fb (= 液晶) に描く
         abs = true;
-        r = bad16::decodeAbs(h, rd, &m, [&](int bx, int by, int rows, const uint16_t* px) {
-              for (int y = 0; y < rows; y++) memcpy(&fb[by * 8 + y][bx * 8], px + y * 8, 16);
-            }) >= 0 ? 1 : 0;
+        auto sink = [&](int bx, int by, int rows, const uint16_t* px) {
+          for (int y = 0; y < rows; y++) memcpy(&fb[by * 8 + y][bx * 8], px + y * 8, 16);
+        };
+        r = (h.ycc ? bad16::decodeYcc(h, rd, &m, sink) : bad16::decodeAbs(h, rd, &m, sink)) >= 0 ? 1 : 0;
       } else {
         if (!(st.ready && st.mask == h.mask) && h.key) bad16::setup(st, h.mask, [](int i) { return pool[i]; });
         r = bad16::decodeBody(st, h, rd, &m);

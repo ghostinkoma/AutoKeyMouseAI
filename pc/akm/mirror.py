@@ -68,6 +68,7 @@ class Mirror:
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
                  fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005,
                  pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5),
+                 ycc: tuple | None = None,
                  b16_gray: bool = False, link_factory=None):
         self.enabled = enabled and bool(host)
         self.url = None
@@ -102,6 +103,8 @@ class Mirror:
         # 色のビット数を 1 段ずつ下げて (面を減らして) 送り直し、最後は JPEG に戻す
         self._b16 = None
         self.b16_bits: tuple[int, int, int] = tuple(b16_bits)  # R, G, B のビット数 (5, 6, 5 = 可逆)
+        # YCoCg 版 (ver 4。frame-stream-32 以降): (mode, ny, nc)。指定すると bad16 の代わりに使う
+        self.ycc = tuple(ycc) if ycc else None
         # True: 前フレーム不要版 (ver 3)。ESP32 は変わったブロックを直接液晶へ描くのでメモリ不足にならない。
         # False: 面ごとのフレーム (ver 2)。少し小さいが ESP32 に (面の数 + 1) x 4KB 要る
         self.b16_prev_free = b16_prev_free
@@ -272,9 +275,10 @@ class Mirror:
             data = self._encode_bc(frame)
         elif self.fmt == "bad16" and self.transport in ("tcp", "auto"):
             if self._b16 is None:
-                from .bad16 import Encoder
+                from .bad16 import Encoder, YccEncoder
 
-                self._b16 = Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free, gray=self.b16_gray)
+                self._b16 = (YccEncoder(*self.ycc) if self.ycc else
+                             Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free, gray=self.b16_gray))
             data = self._b16.encode(frame)
         else:
             data = encode(frame, "jpeg" if self.fmt in ("bc", "bad16") else self.fmt, self.quality)
@@ -380,8 +384,11 @@ class Mirror:
                     print("[mirror] 色を減らしたときのきれいな表示 (下位ビットの複製) には frame-stream-11 以降が必要です"
                           "(古いままだと暗めに表示されます)")
                 need = (10 if self.b16_gray else 9) if self.b16_prev_free else 7
+                if self.ycc:
+                    need = 32
                 if self.fmt == "bad16" and (not m or int(m.group(1)) < need):
-                    print(f"[mirror] BadCodec 16bit 版{'(前フレーム不要版)' if self.b16_prev_free else ''}には "
+                    print(f"[mirror] BadCodec {'YCoCg 版' if self.ycc else '16bit 版'}"
+                          f"{'(前フレーム不要版)' if self.b16_prev_free and not self.ycc else ''}には "
                           f"frame-stream-{need} 以降が必要です。ファームウェアを書き込み直してください")
             else:
                 print("[mirror] ESP32 のファームウェアが古いです。画面が映らない場合は書き込み直してください (README 参照)")

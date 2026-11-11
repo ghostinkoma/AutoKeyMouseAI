@@ -43,6 +43,10 @@ def _lib():
         lib.bad16_encode_abs.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint16,
                                          ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
         lib.bad16_encode_abs.restype = ctypes.c_int
+        if hasattr(lib, "bad16_encode_ycc"):
+            lib.bad16_encode_ycc.argtypes = [ctypes.c_void_p] * 6 + [ctypes.c_int] * 5 + [
+                ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            lib.bad16_encode_ycc.restype = ctypes.c_int
         _LIB = lib
     return _LIB
 
@@ -212,6 +216,147 @@ class Encoder:
         self.prev565 = img
         flags = (1 if key else 0) | (2 if self.gray else 0) | (4 if self.smooth else 0)
         return b"B6\x03" + bytes([flags]) + struct.pack("<H", mask) + out[:n].tobytes()
+
+
+# ------------------------------------------------------------------ YCoCg 版 (ver 4) --
+# 明るさ (Y) と色差 (Co, Cg) に分けてからビット面にする。RGB の 3 色は同じ輪郭を持つので、RGB のまま面にすると
+# 輪郭が 3 回送られる。YCoCg なら輪郭は Y に集まり、色差の面はほとんど平ら (小さく圧縮できる)。
+# 色差は 4:2:0 (縦横半分) にもできる。戻すのは足し算だけ (t = Y - Cg, G = Y + Cg, B = t - Co, R = t + Co)。
+#
+# コンテナ: 'B' '6' 4 flags mode ny nc + 本体 (pc/native/bad_encode.c の bad16_encode_ycc)
+#   flags bit0 = キーフレーム, bit1 = 各値を Gray 符号にしてある
+#   mode 0 = 4:4:4 / 1 = 4:2:0 (どちらも非可逆: Y・色差を 8 ビットにしてから上位 ny / nc ビット)
+#        2 = 可逆 (RGB565 そのものを YCoCg-R に: Y 6 ビット、Co / Cg 7 ビット (+64)。4:4:4)
+#   画面は 240 x 144 (135 行 + 9 行の余白。16 の倍数)
+YCC_H = 144
+YCC_MODES = {"444": 0, "420": 1, "lossless": 2}
+
+
+def rep_bits(q, n: int):
+    """n ビットの値を 8 ビットに広げる (上位ビットを下位に繰り返す。ESP32 も同じ計算)"""
+    v = np.asarray(q, np.int32) << (8 - n)
+    s = n
+    while s < 8:
+        v = v | (v >> s)
+        s *= 2
+    return v & 0xFF
+
+
+def _nearest_lut(n: int) -> np.ndarray:
+    """0..255 → rep_bits で一番近くに戻る n ビットの値"""
+    reps = rep_bits(np.arange(1 << n), n)
+    return np.abs(np.arange(256)[:, None] - reps[None, :]).argmin(axis=1).astype(np.uint8)
+
+
+def gray8(v):
+    return v ^ (v >> 1)
+
+
+class YccEncoder:
+    """BadCodec YCoCg 版。mode: "444" / "420" / "lossless"。ny / nc: Y / 色差のビット数 (lossless では無視)"""
+
+    def __init__(self, mode: str = "420", ny: int = 6, nc: int = 5, gray: bool = True):
+        if mode not in YCC_MODES:
+            raise ValueError(f"mode: {mode}")
+        self.mode = mode
+        self.ny, self.nc = (6, 7) if mode == "lossless" else (int(ny), int(nc))
+        if not (1 <= self.ny <= 8 and 1 <= self.nc <= 8):
+            raise ValueError("ny / nc は 1〜8")
+        self.gray = gray
+        self.prev = None
+        self.force_key = True
+        self.changed_blocks = 0
+        self.last_display: np.ndarray | None = None  # 液晶に出る RGB565 (135x240, テスト用)
+        if mode != "lossless":
+            self._qy, self._qc = _nearest_lut(self.ny), _nearest_lut(self.nc)
+
+    def request_key(self) -> None:
+        self.force_key = True
+
+    def planes(self) -> int:
+        return self.ny + 2 * self.nc
+
+    def label(self) -> str:
+        return "YCoCg 可逆" if self.mode == "lossless" else f"YCoCg {self.mode} Y{self.ny}C{self.nc}"
+
+    def _channels(self, bgr: np.ndarray):
+        """BGR (144x240) → 量子化した Y, Co, Cg (uint8) と、液晶に出る RGB565"""
+        if self.mode == "lossless":
+            r = (bgr[..., 2] >> 3).astype(np.int32)
+            g = (bgr[..., 1] >> 2).astype(np.int32)
+            b = (bgr[..., 0] >> 3).astype(np.int32)
+            co = r - b
+            t = b + (co >> 1)
+            cg = g - t
+            y = t + (cg >> 1)
+            disp = ((r << 11) | (g << 5) | b).astype(np.uint16)
+            return y.astype(np.uint8), (co + 64).astype(np.uint8), (cg + 64).astype(np.uint8), disp
+        f = bgr.astype(np.int32)
+        b, g, r = f[..., 0], f[..., 1], f[..., 2]
+        y8 = (r + 2 * g + b + 2) >> 2
+        co8 = np.clip((r - b + 256) >> 1, 0, 255)
+        cg8 = np.clip((-r + 2 * g - b + 512 + 2) >> 2, 0, 255)
+        if self.mode == "420":  # 2x2 の平均
+            h2, w2 = co8.shape[0] // 2, co8.shape[1] // 2
+            co8 = (co8.reshape(h2, 2, w2, 2).sum(axis=(1, 3)) + 2) >> 2
+            cg8 = (cg8.reshape(h2, 2, w2, 2).sum(axis=(1, 3)) + 2) >> 2
+        qy, qco, qcg = self._qy[y8], self._qc[co8], self._qc[cg8]
+        return qy, qco, qcg, self.display(qy, qco, qcg)
+
+    def display(self, qy, qco, qcg) -> np.ndarray:
+        """ESP32 と同じ計算で、量子化した値から液晶の RGB565 を作る"""
+        y = rep_bits(qy, self.ny)
+        co = rep_bits(qco, self.nc) - 128
+        cg = rep_bits(qcg, self.nc) - 128
+        if self.mode == "420":
+            co = np.repeat(np.repeat(co, 2, axis=0), 2, axis=1)
+            cg = np.repeat(np.repeat(cg, 2, axis=0), 2, axis=1)
+        t = y - cg
+        g = np.clip(y + cg, 0, 255)
+        b = np.clip(t - co, 0, 255)
+        r = np.clip(t + co, 0, 255)
+        return (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)).astype(np.uint16)
+
+    def encode(self, bgr: np.ndarray) -> bytes:
+        assert bgr.shape[:2] == (135, W), bgr.shape
+        src = np.concatenate([bgr, np.repeat(bgr[-1:], YCC_H - 135, axis=0)], axis=0)
+        y, co, cg, disp = self._channels(src)
+        self.last_display = disp[:135]
+        if self.gray:
+            y, co, cg = gray8(y), gray8(co), gray8(cg)
+        cur = tuple(np.ascontiguousarray(a, np.uint8) for a in (y, co, cg))
+        key = self.force_key or self.prev is None
+        self.force_key = False
+        prev = (None, None, None) if key else self.prev
+        out = np.empty(W * YCC_H * 4 + 1024, np.uint8)
+        ch = ctypes.c_int()
+        lib = _lib()
+        if not hasattr(lib, "bad16_encode_ycc"):
+            raise RuntimeError("bad_encode が古い (YCoCg 版が無い)。pc/native を作り直してください")
+        n = lib.bad16_encode_ycc(*(a.ctypes.data for a in cur),
+                                 *(None if a is None else a.ctypes.data for a in prev),
+                                 W, YCC_H, 1 if self.mode == "420" else 0, self.ny, self.nc,
+                                 out.ctypes.data, out.size, ctypes.byref(ch))
+        if n < 0:
+            raise RuntimeError("bad16_encode_ycc failed")
+        self.changed_blocks = ch.value
+        self.prev = cur
+        flags = (1 if key else 0) | (2 if self.gray else 0)
+        return b"B6\x04" + bytes([flags, YCC_MODES[self.mode], self.ny, self.nc]) + out[:n].tobytes()
+
+
+def parse_ycc(name: str):
+    """'YCoCg 420 Y6C5' / 'YCoCg 可逆' → (mode, ny, nc)。YCoCg でなければ None"""
+    import re
+
+    if not name.startswith("YCoCg"):
+        return None
+    if "可逆" in name or "lossless" in name:
+        return ("lossless", 6, 7)
+    m = re.search(r"(444|420)\s*Y(\d)\s*C(\d)", name)
+    if not m:
+        raise ValueError(f"YCoCg の形式: {name!r} (例 'YCoCg 420 Y6C5')")
+    return (m.group(1), int(m.group(2)), int(m.group(3)))
 
 
 # ------------------------------------------------------------- 参照デコーダ (テスト用) --

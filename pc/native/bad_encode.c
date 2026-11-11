@@ -539,3 +539,63 @@ API int bad16_encode_abs(const uint16_t *curr, const uint16_t *prev, int w, int 
   if (changed_blocks) *changed_blocks = changed;
   return n;
 }
+
+/* ------------------------------------------------------------------------------------------------
+ * BadCodec YCoCg 版 (コンテナ ver 4。pc/akm/bad16.py の YccEncoder)。前フレーム不要 (液晶に残る絵を使う)。
+ * 16x16 のマクロブロック単位。変わらないマクロブロックは SKIP (0x80-0xBF = n+1 個)。変わったものは
+ *   Y   : 4 つの 8x8 (左上・右上・左下・右下) それぞれに、Y の面 bit0 → bit(ny-1) の 8x8 命令 1 つずつ
+ *   色差: 4:2:0 なら Co の面 bit0..、Cg の面 bit0.. を 8x8 (= マクロブロック全体の半分の解像度) 1 つずつ
+ *         4:4:4 なら 4 つの 8x8 それぞれに Co の面、Cg の面
+ * 値 (Y / Co / Cg) は呼び出し側で量子化・Gray 符号化済みの 0..255 (ny / nc ビット)。
+ * Y は w x h、色差は 4:2:0 なら (w/2) x (h/2)、4:4:4 なら w x h。w, h は 16 の倍数。
+ * ------------------------------------------------------------------------------------------------ */
+static void plane_block(const uint8_t *v, int stride, int x0, int y0, int bit, blk_t c) {
+  for (int y = 0; y < 8; y++)
+    for (int x = 0; x < 8; x++) c[y][x] = (uint8_t)(v[(y0 + y) * stride + x0 + x] >> bit & 1);
+}
+
+static int region_diff(const uint8_t *a, const uint8_t *b, int stride, int x0, int y0, int n) {
+  for (int y = 0; y < n; y++)
+    if (memcmp(a + (y0 + y) * stride + x0, b + (y0 + y) * stride + x0, n) != 0) return 1;
+  return 0;
+}
+
+API int bad16_encode_ycc(const uint8_t *Y, const uint8_t *Co, const uint8_t *Cg, const uint8_t *pY,
+                         const uint8_t *pCo, const uint8_t *pCg, int w, int h, int sub420, int ny, int nc,
+                         uint8_t *out, int out_cap, int *changed_blocks) {
+  if (!g_scan_ready) build_scan_paths();
+  if (w % 16 || h % 16 || ny < 1 || ny > 8 || nc < 1 || nc > 8) return -1;
+  int nbx = w / 16, nby = h / 16, n = 0, skip = 0, changed = 0;
+  int cw = sub420 ? w / 2 : w, cm = sub420 ? 8 : 16;  /* 色差の横幅 / 1 マクロブロックの色差の大きさ */
+#define PUT(v) do { if (n >= out_cap) return -1; out[n++] = (uint8_t)(v); } while (0)
+#define FLUSH_SKIP() do { while (skip > 0) { int k = skip > 64 ? 64 : skip; PUT(0x80 | (k - 1)); skip -= k; } } while (0)
+#define EMIT(v, stride, x0, y0, nb) \
+  for (int bit = 0; bit < (nb); bit++) { blk_t c; uint8_t op[9]; plane_block(v, stride, x0, y0, bit, c); \
+    int k = encode_block_abs(c, op); for (int i = 0; i < k; i++) PUT(op[i]); }
+  for (int my = 0; my < nby; my++)
+    for (int mx = 0; mx < nbx; mx++) {
+      int cx = mx * cm, cy = my * cm;
+      int diff = pY == NULL || region_diff(Y, pY, w, mx * 16, my * 16, 16) ||
+                 region_diff(Co, pCo, cw, cx, cy, cm) || region_diff(Cg, pCg, cw, cx, cy, cm);
+      if (!diff) { skip++; continue; }
+      FLUSH_SKIP();
+      changed++;
+      for (int s = 0; s < 4; s++) { EMIT(Y, w, mx * 16 + (s & 1) * 8, my * 16 + (s >> 1) * 8, ny) }
+      if (sub420) {
+        EMIT(Co, cw, cx, cy, nc)
+        EMIT(Cg, cw, cx, cy, nc)
+      } else {
+        for (int s = 0; s < 4; s++) {
+          int x0 = cx + (s & 1) * 8, y0 = cy + (s >> 1) * 8;
+          EMIT(Co, cw, x0, y0, nc)
+          EMIT(Cg, cw, x0, y0, nc)
+        }
+      }
+    }
+  FLUSH_SKIP();
+#undef EMIT
+#undef PUT
+#undef FLUSH_SKIP
+  if (changed_blocks) *changed_blocks = changed;
+  return n;
+}

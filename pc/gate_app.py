@@ -53,7 +53,7 @@ try:
 except Exception as _e:  # noqa: BLE001
     cv2 = LiveFeed = MapSource = None
     LIVE_ERROR = f"{type(_e).__name__}: {_e}"
-    FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit", "JPEG")
+    FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit", "YCoCg 420 Y6C5", "JPEG")
 
     def color_bits(fmt):
         tail = fmt.split()[-1]
@@ -311,6 +311,8 @@ class GateApp:
         mc = str((self.cfg.get("mirror") or {}).get("color", "343"))
         if f"BadCodec {mc}" in FORMATS:
             self.mirror_fmt.set(f"BadCodec {mc}")
+        elif mc in FORMATS:  # 例 "YCoCg 420 Y6C5"
+            self.mirror_fmt.set(mc)
         self.host.set(str((self.cfg.get("device") or {}).get("host") or ""))
         self.sender = None         # ESP32 への送信 (akm.mirror.Mirror)
         self.auto_send.set(bool((self.cfg.get("gate") or {}).get("auto_send", True)))
@@ -458,12 +460,26 @@ class GateApp:
                             command=lambda t=text: self.log("INFO", f"撮影方式: {t}")).grid(row=i, column=0, sticky="w")
         g = rb.group(t, "形式")
         # BadCodec のカラーは R G B のビット数。565 = RGB565 そのまま (可逆・一番きれい・1 枚が一番大きい)
-        labels = {"BadCodec 565": "RGB565 (可逆)", "BadCodec 343": "343 (10 ビット)", "BadCodec 332": "332 (8 ビット)",
-                  "BadCodec 1bit": "白黒 (1 ビット)", "JPEG": "JPEG"}
-        for i, f in enumerate(FORMATS):
-            ttk.Radiobutton(g, text=labels[f], value=f, variable=self.mirror_fmt,
-                            command=lambda f=f: self.log("INFO", f"送信形式: {labels[f]}")).grid(
-                row=i % 3, column=i // 3, sticky="w")
+        labels = {"BadCodec 565": "RGB565 (可逆)", "BadCodec 343": "RGB 343 (10 面)", "BadCodec 332": "RGB 332 (8 面)",
+                  "BadCodec 1bit": "白黒 (1 ビット)", "YCoCg 可逆": "YCoCg 可逆 (RGB565 そのもの)", "JPEG": "JPEG"}
+        for f in FORMATS:  # YCoCg (明るさ + 色差。frame-stream-32 以降): "YCoCg 4:2:0 Y6 C5" のように出す
+            if f not in labels and f.startswith("YCoCg"):
+                _, sub, yc = f.split()
+                labels[f] = f"YCoCg {sub[0]}:{sub[1]}:{sub[2]} {yc[:2]} {yc[2:]}"
+        names = [labels[f] for f in FORMATS]
+        by_label = dict(zip(names, FORMATS))
+        fmt_label = tk.StringVar(value=labels.get(self.mirror_fmt.get(), names[0]))
+
+        def pick(_e=None):
+            f = by_label[fmt_label.get()]
+            self.mirror_fmt.set(f)
+            self.log("INFO", f"送信形式: {fmt_label.get()}")  # 送っている途中なら sender_status が送り直す
+
+        cb = ttk.Combobox(g, textvariable=fmt_label, values=names, width=24, state="readonly")
+        cb.grid(row=0, column=0, sticky="w")
+        cb.bind("<<ComboboxSelected>>", pick)
+        ttk.Label(g, text="YCoCg = 明るさ + 色差 (同じ画質で小さい。\nfirmware frame-stream-32 以降)",
+                  style="Caption.TLabel").grid(row=1, column=0, rowspan=2, sticky="w")
         g = rb.group(t, "2値化")
         ttk.Label(g, text="しきい値").grid(row=0, column=0, sticky="w")
         ttk.Scale(g, from_=0, to=255, variable=self.threshold, length=140).grid(row=1, column=0)
@@ -701,7 +717,13 @@ class GateApp:
         fmt = self.mirror_fmt.get()
         # BadCodec: 選んだ色のビット数で送る (1bit は送信画面と同じ白黒の絵を各色 1 ビット = 3 面で)
         bits = color_bits(fmt)
-        kind, bits = ("jpeg", (3, 4, 3)) if bits is None else ("bad16", bits)
+        ycc = None
+        if fmt.startswith("YCoCg"):
+            from akm.bad16 import parse_ycc
+
+            kind, bits, ycc = "bad16", (5, 6, 5), parse_ycc(fmt)
+        else:
+            kind, bits = ("jpeg", (3, 4, 3)) if bits is None else ("bad16", bits)
         link, where = None, host
         if wired:  # 有線: COM で送る (akm/serial_link.py。ファームウェア frame-stream-15 以降)
             from akm.serial_link import SerialFrameLink
@@ -718,7 +740,7 @@ class GateApp:
                              quality=int(mcfg.get("quality", 70)), grab=self._sender_grab,
                              # HTTP に逃げない (逃げると 1 枚ずつの POST が並行して届き、液晶が詰まる)
                              transport="tcp",
-                             port=int(mcfg.get("port", 5005)), b16_bits=bits,
+                             port=int(mcfg.get("port", 5005)), b16_bits=bits, ycc=ycc,
                              # 有線は 1 枚ずつ返事を待つ (ESP32 の受信バッファ 8KB を溢れさせない)
                              pipeline=1 if wired else 2, link_factory=link,
                              b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))
@@ -727,7 +749,8 @@ class GateApp:
         self.sender_route = self.route.get()
         if host:
             self._start_esp_poll(host)  # 有線のときも、内訳は Wi-Fi の /status から読む
-        self.log("INFO", f"ESP32 ({where}) への送信を始めました: {fmt} → {kind} {''.join(map(str, bits))}")
+        self.log("INFO", f"ESP32 ({where}) への送信を始めました: {fmt} → " +
+                 (f"YCoCg {ycc[0]} Y{ycc[1]} C{ycc[2]}" if ycc else f"{kind} {''.join(map(str, bits))}"))
 
     def _route_changed(self):
         self.log("INFO", f"送信経路: {'有線 (' + self.com.get() + ')' if self.route.get() == 'serial' else 'Wi-Fi'}")

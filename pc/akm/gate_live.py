@@ -45,7 +45,10 @@ class Snapshot:
 
 
 # 送る形式 (仲介アプリのミラーのタブ)。BadCodec のカラーは R G B のビット数 (565 = RGB565 そのまま・可逆)
-FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit", "JPEG")
+FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit",
+           "YCoCg 420 Y6C5", "YCoCg 420 Y6C4", "YCoCg 420 Y5C4", "YCoCg 420 Y4C4", "YCoCg 420 Y5C3",
+           "YCoCg 444 Y6C5", "YCoCg 可逆", "JPEG")
+_YCC_PREVIEW: dict = {}
 
 
 def color_bits(fmt: str) -> tuple[int, int, int] | None:
@@ -80,6 +83,18 @@ def to_send_format(small: np.ndarray, fmt: str, threshold: int) -> tuple[np.ndar
         g = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         bw = np.where(g > threshold, 255, 0).astype(np.uint8)
         return cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR), SEND_W * SEND_H // 8
+    if fmt.startswith("YCoCg"):  # YCoCg 版: ESP32 と同じ計算で液晶の色を出す
+        from .bad16 import YCC_H, YccEncoder, parse_ycc
+
+        p = parse_ycc(fmt)
+        enc = _YCC_PREVIEW.get(p)
+        if enc is None:
+            enc = _YCC_PREVIEW[p] = YccEncoder(*p)
+        h = small.shape[0]
+        src = np.concatenate([small, np.repeat(small[-1:], YCC_H - h, axis=0)], axis=0)
+        disp = enc._channels(src)[3][:h]
+        per_px = enc.ny + 2 * enc.nc / (4 if p[0] == "420" else 1)
+        return from565(disp), int(SEND_W * SEND_H * per_px / 8)
     bits = color_bits(fmt)
     if bits is not None:
         from .bad16 import replicate565, to565
