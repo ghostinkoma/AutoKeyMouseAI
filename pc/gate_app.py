@@ -387,7 +387,7 @@ class GateApp:
         g = rb.group(t, "アプリ")
         rb.button(g, "ログを保存")
         rb.button(g, "管理者で\n起動し直す", command=self.restart_as_admin)
-        rb.button(g, "終了", command=self.root.destroy)
+        rb.button(g, "終了", command=self.close)
 
         # ホーム: 送信先の選択とゲート
         t = rb.tab("ホーム")
@@ -826,6 +826,15 @@ class GateApp:
         self.log("FPS", self._fps_line("", f["fmt"], now - f["tw"], sent, nbytes, fails, self._esp_avg(f["esp_w"])))
         f.update(tw=now, sent_w=m.sent, bytes_w=m.bytes_sent, fail_w=m.fails, esp_w=[])
         self.root.after(int(self.FPS_LOG_S * 1000), lambda: self._fps_tick(m))
+
+    def close(self):
+        """アプリを閉じる (× ボタン / 終了)。送っている途中なら、その形式の平均 fps をログに残してから"""
+        try:
+            if self.sender is not None:
+                self._fps_summary(self.sender)
+        except Exception:  # noqa: BLE001
+            pass
+        self.root.destroy()
 
     def _fps_summary(self, m):
         """送信をやめる / 形式を変えるとき: その形式で送っていた間の全体の平均を 1 行"""
@@ -1734,6 +1743,7 @@ def main():
             pass
     root = tk.Tk()
     app = GateApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.close)  # × で閉じたときも平均 fps をログに残す
     root.mainloop()
     if app.live is not None:
         app.live.stop()
