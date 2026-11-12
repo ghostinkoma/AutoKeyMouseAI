@@ -67,6 +67,11 @@ uint32_t gSpiHz = 40000000;  // 今の液晶の SPI クロック (setSpiHz)
 //   * 同じ行の続いたブロックを 1 本の帯にまとめて 1 回で送る (範囲指定の命令の回数を減らす)
 //   * 帯を 2 本交互に使い、1 本を DMA で送っている間に CPU は次の帯を組み立てる (展開と描画を重ねる)
 // 状態画面・JPEG などを Adafruit で描くときは dmaEnd() で VSPI に戻す (TftLock が自動で行う)。
+// 奇数・偶数のフレームを 2 つのコアで (frame-stream-41): コア 0 が前のフレームを描いている間に、コア 1 が次のフレームを
+// 描くことがある。液晶の同じ列を古いフレームで上書きしないよう、新しいフレームは「古いフレームが描き終えた列」より
+// 下を描くときは追いつくまで待つ
+volatile bool gAsyncActive = false;  // コア 0 がフレームを展開・描画中
+volatile int gAsyncNextY = 0;        // コア 0 のフレームが描き終えた列の下端 (この行より上は描き終わった)
 bool gDmaOn = TFT_DMA;          // 使うか (シリアルの tft dma on / off)
 bool gDmaActive = false;        // 今 HSPI につなぎ替えてある
 // HSPI のドライバー (DMA の記述子など) は最初に 1 回だけ用意して、使い終わっても返さない。
@@ -235,6 +240,7 @@ IRAM_ATTR void dmaBlock(int x, int y, int rows, const uint16_t* px) {
 
 void dmaEnd() {
   if (!gDmaActive) return;
+  while (gAsyncActive) vTaskDelay(1);  // コア 0 が JPEG を描いている間は液晶を渡さない
   dmaFlush();
   dmaWait();
   digitalWrite(TFT_PIN_CS, HIGH);
@@ -413,6 +419,7 @@ struct JpegOut {
   int cur;
 };
 JpegOut* gDmaOwner = nullptr;  // 今 DMA で送っている帯の持ち主
+JpegOut gJobOut;                     // コア 0 の出力 (下で使う)
 
 // 範囲を指定して DMA を始める (gSpiMx を持って呼ぶ。前の DMA は待つ)
 IRAM_ATTR void jpegQueue(JpegOut* o, spi_transaction_t& t, const uint16_t* d, int x, int y, int w, int h) {
@@ -462,18 +469,24 @@ IRAM_ATTR int jpegOutDma(JDEC* jd, void* bitmap, JRECT* r) {
       int w = o.rowW > FRAME_W ? FRAME_W : o.rowW;
       if (w < FRAME_W)  // 幅が 240 より狭い JPEG: 帯を詰める
         for (int j = 1; j < o.rowH; j++) memmove(o.strip + j * w, o.strip + j * FRAME_W, w * 2);
+      if (&o != &gJobOut)  // 新しいフレーム: 古いフレーム (コア 0) がこの列を描き終えるまで待つ
+        while (gAsyncActive && gAsyncNextY < o.rowY + o.rowH) esp_rom_delay_us(20);
       xSemaphoreTake(gSpiMx, portMAX_DELAY);
       jpegQueue(&o, o.tr, o.strip, 0, o.rowY, w, o.rowH);
       xSemaphoreGive(gSpiMx);
+      if (&o == &gJobOut) gAsyncNextY = o.rowY + o.rowH;
       o.rowW = 0;
     }
   } else {  // 帯が取れなかった: MCU ごとに
+    if (&o != &gJobOut)
+      while (gAsyncActive && gAsyncNextY < y + bh) esp_rom_delay_us(20);
     uint16_t* d = o.mcu[o.cur];
     int n = bw * bh;
     for (int i = 0; i < n; i++) d[i] = __builtin_bswap16(px[i]);
     xSemaphoreTake(gSpiMx, portMAX_DELAY);
     jpegQueue(&o, o.mtr[o.cur], d, r->left, y, bw, bh);
     xSemaphoreGive(gSpiMx);
+    if (&o == &gJobOut && r->left + bw >= (int)jd->width) gAsyncNextY = y + bh;
     o.cur ^= 1;  // もう片方の置き場は、DMA が同時に 1 つだけなので必ず送り終わっている
   }
   o.drawUs += micros() - t0;
@@ -502,25 +515,38 @@ bool decodeJpegPart(const uint8_t* data, size_t len, int y0, uint32_t* work, siz
 uint32_t gJpegWork[TJPGD_WORKSPACE_SIZE / 4 + 1];  // このタスク (コア 1) 用
 JpegOut gJpegOut;
 
-// 作業タスク (コア 0): 下半分の JPEG を展開する
+// 作業タスク (コア 0): 'B' 'J' の下半分、または奇数番目のフレーム全体 (async) を展開する
 struct JpegJob {
   const uint8_t* data;
   size_t len;
   int y0;
   bool ok;
+  bool async;  // true: フレーム全体。終わったら統計に足し、置き場 (gJpegBuf2) を返す (gJobIdle)
 };
 JpegJob gJob;
-JpegOut gJobOut;
 SemaphoreHandle_t gJobGo = nullptr, gJobDone = nullptr;
+SemaphoreHandle_t gJobIdle = nullptr;  // 作業タスクが空いている (奇数番目のフレームの置き場も空いている)
 TaskHandle_t gJobTask = nullptr;
+uint8_t* gJpegBuf2 = nullptr;  // 奇数番目のフレームの置き場 (ミラー専用のビルドだけ。無ければ 1 つのコアで)
+uint32_t gJpegSeq = 0;         // 受け取った JPEG の数 (奇数 = コア 0)
+void noteShown(uint32_t totalUs, uint32_t drawUs, bool ok);  // 下で定義
 
 void jpegWorker(void*) {
   static uint32_t work[TJPGD_WORKSPACE_SIZE / 4 + 1];
   for (;;) {
     xSemaphoreTake(gJobGo, portMAX_DELAY);
     gJobOut.drawUs = 0;
+    gJobOut.rowW = 0;
+    uint32_t t0 = micros();
     gJob.ok = decodeJpegPart(gJob.data, gJob.len, gJob.y0, work, sizeof(work), &gJobOut);
-    xSemaphoreGive(gJobDone);
+    if (gJob.async) {
+      gAsyncNextY = 1 << 15;  // 全部描いた (新しいフレームは待たなくてよい)
+      gAsyncActive = false;
+      noteShown(micros() - t0, gJobOut.drawUs, gJob.ok);
+      xSemaphoreGive(gJobIdle);
+    } else {
+      xSemaphoreGive(gJobDone);
+    }
   }
 }
 
@@ -529,13 +555,20 @@ void startJpegWorker() {
   gSpiMx = xSemaphoreCreateMutex();
   gJobGo = xSemaphoreCreateBinary();
   gJobDone = xSemaphoreCreateBinary();
+  gJobIdle = xSemaphoreCreateBinary();
+  if (gJobIdle) xSemaphoreGive(gJobIdle);
+#if AKM_MIRROR_ONLY
+  // 奇数番目のフレームの置き場 (24KB)。BLE 入りのビルドはメモリに余裕が無いので、1 つのコアで描く
+  gJpegBuf2 = (uint8_t*)heap_caps_malloc(FRAME_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#endif
   for (JpegOut* o : {&gJpegOut, &gJobOut}) {  // 帯 (MCU 1 列) を 2 本。取れなければ MCU ごとに送る
     o->strip = (uint16_t*)heap_caps_malloc(kJpegRow * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     o->rowW = 0;
   }
-  Serial.printf("[TFT] JPEG strips %s (free heap %u)\n", gJpegOut.strip && gJobOut.strip ? "ok" : "missing",
+  Serial.printf("[TFT] JPEG strips %s, odd/even frames on 2 cores %s (free heap %u)\n",
+                gJpegOut.strip && gJobOut.strip ? "ok" : "missing", gJpegBuf2 ? "on" : "off",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
-  if (!gSpiMx || !gJobGo || !gJobDone ||
+  if (!gSpiMx || !gJobGo || !gJobDone || !gJobIdle ||
       xTaskCreatePinnedToCore(jpegWorker, "jpeg1", 4096, nullptr, 2, &gJobTask, 0) != pdPASS) {
     gJobTask = nullptr;
     Serial.println("[TFT] JPEG worker (core 0) could not start: one core only");
@@ -591,13 +624,15 @@ bool drawJpegAny(const uint8_t* data, size_t len) {
   gJpegOut.rowW = gJobOut.rowW = 0;
   bool two = n == 2 && gJobTask;
   if (two) {
-    gJob = {parts[1].data, parts[1].len, parts[1].y0, false};
+    xSemaphoreTake(gJobIdle, portMAX_DELAY);  // 前の奇数番目のフレームを描き終えてから
+    gJob = {parts[1].data, parts[1].len, parts[1].y0, false, false};
     xSemaphoreGive(gJobGo);  // 下半分はコア 0 で
   }
   bool ok = decodeJpegPart(parts[0].data, parts[0].len, parts[0].y0, gJpegWork, sizeof(gJpegWork), &gJpegOut);
   uint32_t draw = gJpegOut.drawUs;
   if (two) {
     xSemaphoreTake(gJobDone, portMAX_DELAY);
+    xSemaphoreGive(gJobIdle);
     ok = ok && gJob.ok;
     if (gJobOut.drawUs > draw) draw = gJobOut.drawUs;
   } else if (n == 2) {  // 作業タスクが無い: このコアで続けて
@@ -642,16 +677,77 @@ bool showFrame(const uint8_t* data, size_t len) {
   }
   uint32_t total = micros() - t0;
   if (!jpeg) gDrawUsFrame = total;
+  noteShown(total, gDrawUsFrame, ok);
+  return ok;
+}
+
+namespace {
+portMUX_TYPE gStatMux = portMUX_INITIALIZER_UNLOCKED;
+// 1 フレーム描いた: 統計に足す (2 つのコアから呼ばれる)。展開・描画の時間はフレームごと (コア 2 つ分の合計)
+void noteShown(uint32_t totalUs, uint32_t drawUs, bool ok) {
+  portENTER_CRITICAL(&gStatMux);
   rollStats();
-  gCur.drawUs += gDrawUsFrame;
-  gCur.decodeUs += total > gDrawUsFrame ? total - gDrawUsFrame : 0;
+  gCur.drawUs += drawUs;
+  gCur.decodeUs += totalUs > drawUs ? totalUs - drawUs : 0;
   if (ok) {
     gLastFrame = millis();
     gFrameShown = true;
     ++gFrames;
     gNeedKey = false;  // JPEG は全面を描くのでキーフレームと同じ
   }
+  portEXIT_CRITICAL(&gStatMux);
+}
+}  // namespace
+
+// ---- 奇数・偶数のフレームを 2 つのコアで (frame-stream-41) ------------------------------------
+// 偶数番目: 受信タスク (コア 1) がその場で展開・描画 (置き場 = 共用バッファ)。
+// 奇数番目: 作業タスク (コア 0) に渡してすぐ戻る (置き場 = gJpegBuf2)。受信タスクはその間に次のフレームを受け取る。
+uint8_t* acquireJpegBuffer(uint32_t waitMs, bool* async) {
+  *async = false;
+  if (gJpegBuf2 && gJobTask && (gJpegSeq & 1)) {
+    if (xSemaphoreTake(gJobIdle, pdMS_TO_TICKS(waitMs)) != pdTRUE) return nullptr;
+    *async = true;
+    return gJpegBuf2;
+  }
+  return acquireFrameBuffer(waitMs);
+}
+
+void cancelJpegBuffer(bool async) {
+  if (async) xSemaphoreGive(gJobIdle);
+  else releaseFrameBuffer();
+}
+
+bool submitJpeg(uint8_t* buf, size_t len, bool async) {
+  gJpegSeq++;
+  if (async) {
+    bool jpeg = len > 2 && buf[0] == 0xFF && buf[1] == 0xD8;
+    bool dma = false;
+    if (jpeg) {
+      TftLock lock(true);
+      dma = gDmaOn && gSpiMx && dmaBegin();
+      if (dma) {
+        gRunX = -1;
+        gAsyncNextY = 0;
+        gAsyncActive = true;
+        gJob = {buf, len, 0, false, true};
+        xSemaphoreGive(gJobGo);  // コア 0 で展開・描画。置き場はコア 0 が返す
+        return true;
+      }
+    }
+    // DMA が使えない / 'B' 'J': この場で描く。'B' 'J' は作業タスクに下半分を頼むので、先に空きを返す
+    // (gJpegBuf2 はこのあと奇数番目まで使われない)
+    xSemaphoreGive(gJobIdle);
+    return showFrame(buf, len);
+  }
+  bool ok = showFrame(buf, len);
+  releaseFrameBuffer();
   return ok;
+}
+
+void drainJpeg() {
+  if (!gJobIdle || !gAsyncActive) return;
+  xSemaphoreTake(gJobIdle, portMAX_DELAY);  // コア 0 のフレームを描き終えるまで
+  xSemaphoreGive(gJobIdle);
 }
 
 uint32_t framesShown() { return gFrames; }
@@ -1066,6 +1162,13 @@ void releaseBad16() {}
 bool needKeyframe() { return false; }
 void requestKeyframe() {}
 uint8_t* acquireFrameBuffer(uint32_t) { return nullptr; }
+uint8_t* acquireJpegBuffer(uint32_t, bool* async) {
+  *async = false;
+  return nullptr;
+}
+bool submitJpeg(uint8_t*, size_t, bool) { return false; }
+void cancelJpegBuffer(bool) {}
+void drainJpeg() {}
 void releaseFrameBuffer() {}
 String frameStatsJson() { return "{}"; }
 String frameStatsLine() { return "no display"; }

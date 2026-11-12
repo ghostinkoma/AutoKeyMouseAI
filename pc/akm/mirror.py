@@ -402,10 +402,12 @@ class Mirror:
 
                 m = re.match(r"frame-stream-(\d+)", fw)
                 ver = int(m.group(1)) if m else 0
-                self.jpeg_split = ver >= 39 and self.transport in ("tcp", "auto")
+                # 39〜40: 上下 2 つに分けて 2 つのコアで展開 / 41 以降: 1 枚のまま、奇数・偶数のフレームでコアを分ける
+                self.jpeg_split = 39 <= ver < 41 and self.transport in ("tcp", "auto")
                 if self.fmt == "jpeg":
                     print("[mirror] JPEG: " + ("上下 2 つに分けて送ります (ESP32 の 2 つのコアで展開)" if self.jpeg_split
-                                               else "1 枚で送ります (2 コアでの展開は frame-stream-39 以降)"))
+                                               else "1 枚で送ります (奇数・偶数のフレームを ESP32 の 2 つのコアで展開)"
+                                               if ver >= 41 else "1 枚で送ります (2 コアでの展開は frame-stream-39 以降)"))
                 if self.fmt == "bad16" and self.b16_gray and ver < 10:
                     # 古いファームウェアは Gray 符号を戻せず色が崩れるので、Gray 符号なしで送る
                     print("[mirror] Gray 符号には frame-stream-10 以降が必要です。今回は Gray 符号なしで送ります"
