@@ -28,6 +28,17 @@
 
 #include "akm_tjpgd.h"
 
+/* AutoKeyMouse: 展開の中心 (MCU ごとに呼ばれるもの) を IRAM / DRAM に置く。フラッシュから実行すると
+   Wi-Fi の処理とキャッシュを取り合って遅くなる (2 つのコアで同時に展開するとなおさら) */
+#ifdef ESP_PLATFORM
+#include <esp_attr.h>
+#define JD_IRAM IRAM_ATTR
+#define JD_DRAM DRAM_ATTR
+#else
+#define JD_IRAM
+#define JD_DRAM
+#endif
+
 
 #if JD_FASTDECODE == 2
 #define HUFF_BIT	10	/* Bit length to apply fast huffman decode */
@@ -40,7 +51,7 @@
 /* Zigzag-order to raster-order conversion table */
 /*-----------------------------------------------*/
 
-static const uint8_t Zig[64] = {	/* Zigzag-order to raster-order conversion table */
+static const uint8_t JD_DRAM Zig[64] = {	/* Zigzag-order to raster-order conversion table */
 	 0,  1,  8, 16,  9,  2,  3, 10, 17, 24, 32, 25, 18, 11,  4,  5,
 	12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13,  6,  7, 14, 21, 28,
 	35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
@@ -54,7 +65,7 @@ static const uint8_t Zig[64] = {	/* Zigzag-order to raster-order conversion tabl
 /* (scaled up 16 bits for fixed point operations)  */
 /*-------------------------------------------------*/
 
-static const uint16_t Ipsf[64] = {	/* See also aa_idct.png */
+static const uint16_t JD_DRAM Ipsf[64] = {	/* See also aa_idct.png */
 	(uint16_t)(1.00000*8192), (uint16_t)(1.38704*8192), (uint16_t)(1.30656*8192), (uint16_t)(1.17588*8192), (uint16_t)(1.00000*8192), (uint16_t)(0.78570*8192), (uint16_t)(0.54120*8192), (uint16_t)(0.27590*8192),
 	(uint16_t)(1.38704*8192), (uint16_t)(1.92388*8192), (uint16_t)(1.81226*8192), (uint16_t)(1.63099*8192), (uint16_t)(1.38704*8192), (uint16_t)(1.08979*8192), (uint16_t)(0.75066*8192), (uint16_t)(0.38268*8192),
 	(uint16_t)(1.30656*8192), (uint16_t)(1.81226*8192), (uint16_t)(1.70711*8192), (uint16_t)(1.53636*8192), (uint16_t)(1.30656*8192), (uint16_t)(1.02656*8192), (uint16_t)(0.70711*8192), (uint16_t)(0.36048*8192),
@@ -281,7 +292,7 @@ static JRESULT create_huffman_tbl (	/* 0:OK, !0:Failed */
 /* Extract a huffman decoded data from input stream                      */
 /*-----------------------------------------------------------------------*/
 
-static int huffext (	/* >=0: decoded data, <0: error code */
+JD_IRAM static int huffext (	/* >=0: decoded data, <0: error code */
 	JDEC* jd,			/* Pointer to the decompressor object */
 	unsigned int id,	/* Table ID (0:Y, 1:C) */
 	unsigned int cls	/* Table class (0:DC, 1:AC) */
@@ -422,7 +433,7 @@ static int huffext (	/* >=0: decoded data, <0: error code */
 /* Extract N bits from input stream                                      */
 /*-----------------------------------------------------------------------*/
 
-static int bitext (	/* >=0: extracted data, <0: error code */
+JD_IRAM static int bitext (	/* >=0: extracted data, <0: error code */
 	JDEC* jd,			/* Pointer to the decompressor object */
 	unsigned int nbit	/* Number of bits to extract (1 to 16) */
 )
@@ -507,7 +518,7 @@ static int bitext (	/* >=0: extracted data, <0: error code */
 /* Process restart interval                                              */
 /*-----------------------------------------------------------------------*/
 
-static JRESULT restart (
+JD_IRAM static JRESULT restart (
 	JDEC* jd,		/* Pointer to the decompressor object */
 	uint16_t rstn	/* Expected restert sequense number */
 )
@@ -578,7 +589,7 @@ static JRESULT restart (
 /* Apply Inverse-DCT in Arai Algorithm (see also aa_idct.png)            */
 /*-----------------------------------------------------------------------*/
 
-static void block_idct (
+JD_IRAM static void block_idct (
 	int32_t* src,	/* Input block data (de-quantized and pre-scaled for Arai Algorithm) */
 	jd_yuv_t* dst	/* Pointer to the destination to store the block as byte array */
 )
@@ -701,7 +712,7 @@ static void block_idct (
 /* Load all blocks in an MCU into working buffer                         */
 /*-----------------------------------------------------------------------*/
 
-static JRESULT mcu_load (
+JD_IRAM static JRESULT mcu_load (
 	JDEC* jd		/* Pointer to the decompressor object */
 )
 {
@@ -787,7 +798,7 @@ static JRESULT mcu_load (
 /* Output an MCU: Convert YCrCb to RGB and output it in RGB form         */
 /*-----------------------------------------------------------------------*/
 
-static JRESULT mcu_output (
+JD_IRAM static JRESULT mcu_output (
 	JDEC* jd,			/* Pointer to the decompressor object */
 	int (*outfunc)(JDEC*, void*, JRECT*),	/* RGB output function */
 	unsigned int x,		/* MCU location in the image */
@@ -1134,7 +1145,7 @@ JRESULT akm_jd_prepare (
 /* Start to decompress the JPEG picture                                  */
 /*-----------------------------------------------------------------------*/
 
-JRESULT akm_jd_decomp (
+JD_IRAM JRESULT akm_jd_decomp (
 	JDEC* jd,								/* Initialized decompression object */
 	int (*outfunc)(JDEC*, void*, JRECT*),	/* RGB output function */
 	uint8_t scale							/* Output de-scaling factor (0 to 3) */

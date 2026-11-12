@@ -314,6 +314,10 @@ void setSpiHz(uint32_t hz) {
 
 uint32_t spiHz() { return gSpiHz; }
 
+namespace {
+void startJpegWorker();  // 下で定義
+}  // namespace
+
 void begin() {
   if (!gLock) gLock = xSemaphoreCreateRecursiveMutex();
   if (!gBufLock) gBufLock = xSemaphoreCreateMutex();
@@ -329,6 +333,7 @@ void begin() {
   gSpiHz = TFT_SPI_HZ;
   Serial.printf("[TFT] SPI clock %lu Hz\n", (unsigned long)gSpiHz);
   gTft.setRotation(1);  // 横向き 240x135
+  startJpegWorker();  // JPEG の下半分を展開する作業タスク (コア 0)
   test();
   gTft.fillScreen(ST77XX_BLACK);
   line(4, 2, ST77XX_CYAN, "AutoKeyMouse");
@@ -337,13 +342,16 @@ void begin() {
 
 namespace {
 
+struct JpegOut;
 struct JpegSrc {
   const uint8_t* data;
   size_t len;
   size_t pos;
+  JpegOut* out;  // DMA で描くとき: 出力先 (コアごと)。nullptr = Adafruit
+  int y0;        // この JPEG を置く行 (上下 2 つに分けた 'B' 'J' の下半分なら 64 など)
 };
 
-size_t jpegIn(JDEC* jd, uint8_t* buf, size_t n) {
+IRAM_ATTR size_t jpegIn(JDEC* jd, uint8_t* buf, size_t n) {
   JpegSrc* src = (JpegSrc*)jd->device;
   size_t left = src->len - src->pos;
   if (n > left) n = left;
@@ -375,33 +383,188 @@ void rollStats() {
 }
 
 int jpegOut(JDEC* jd, void* bitmap, JRECT* r) {
-  // RGB565 (ホストのバイト順) のブロックが来るのでそのまま液晶へ
-  if (r->left >= FRAME_W || r->top >= FRAME_H) return 1;
+  // RGB565 (ホストのバイト順) のブロックが来るのでそのまま液晶へ (DMA を使わないとき。1 つのコアだけ)
+  int y = r->top + ((JpegSrc*)jd->device)->y0;
+  if (r->left >= FRAME_W || y >= FRAME_H) return 1;
   uint32_t t0 = micros();
   int bw = r->right - r->left + 1, bh = r->bottom - r->top + 1;
-  edge_win::feedBlock(r->left, r->top, bw, bh, (const uint16_t*)bitmap, bw);  // 窓の認識にも同じ画素を
-  gTft.drawRGBBitmap(r->left, r->top, (uint16_t*)bitmap, bw, bh);
+  if (y + bh > FRAME_H) bh = FRAME_H - y;
+  edge_win::feedBlock(r->left, y, bw, bh, (const uint16_t*)bitmap, bw);  // 窓の認識にも同じ画素を
+  gTft.drawRGBBitmap(r->left, y, (uint16_t*)bitmap, bw, bh);
   gDrawUsFrame += micros() - t0;
   return 1;
 }
 
-bool drawJpeg(const uint8_t* data, size_t len) {
-  static uint32_t work[TJPGD_WORKSPACE_SIZE / 4 + 1];  // 4 バイト境界に置く
+// ---- JPEG を DMA で描く・2 つのコアで展開する -----------------------------------------------
+// TJpgDec は 1 つの MCU (4:2:0 なら 16x16) ずつ出してくる。それを液晶のバイト順にして DMA で送り、
+// 送っている間に次の MCU を展開する (コアごとに 2 つの置き場を交互に使う)。
+// 'B' 'J' (上下 2 つの JPEG) は、上半分をこのタスク (コア 1)、下半分を作業タスク (コア 0) で同時に展開する。
+// 液晶 (SPI) は 1 本なので、範囲の指定 + DMA の開始だけを gSpiMx で順番にする (DMA は同時に 1 つだけ)
+SemaphoreHandle_t gSpiMx = nullptr;
+struct JpegOut {
+  alignas(4) uint16_t buf[2][16 * 16];  // MCU 1 つ (最大 16x16)。液晶のバイト順
+  spi_transaction_t tr[2];
+  int cur;
+  uint32_t drawUs;  // このコアが液晶へ送るのに使った時間
+};
+
+IRAM_ATTR int jpegOutDma(JDEC* jd, void* bitmap, JRECT* r) {
+  JpegSrc* src = (JpegSrc*)jd->device;
+  JpegOut& o = *src->out;
+  int y = r->top + src->y0;
+  if (r->left >= FRAME_W || y >= FRAME_H) return 1;
+  int bw = r->right - r->left + 1, bh = r->bottom - r->top + 1;  // 右端・下端は詰めて渡される
+  if (y + bh > FRAME_H) bh = FRAME_H - y;
+  const uint16_t* px = (const uint16_t*)bitmap;
+  edge_win::feedBlock(r->left, y, bw, bh, px, bw);  // 窓の認識 (コアごとに別の場所を書くので鍵は要らない)
+  uint32_t t0 = micros();
+  uint16_t* d = o.buf[o.cur];
+  int n = bw * bh;
+  for (int i = 0; i < n; i++) d[i] = __builtin_bswap16(px[i]);
+  xSemaphoreTake(gSpiMx, portMAX_DELAY);
+  dmaWait();  // 前の DMA (どちらのコアのものでも) が終わってから範囲を指定する
+  int x = r->left + gTft.xStart(), yy = y + gTft.yStart();
+  dmaCmd(ST77XX_CASET, x, x + bw - 1);
+  dmaCmd(ST77XX_RASET, yy, yy + bh - 1);
+  digitalWrite(TFT_PIN_DC, LOW);
+  const uint8_t ramwr = ST77XX_RAMWR;
+  dmaSend(&ramwr, 1);
+  digitalWrite(TFT_PIN_DC, HIGH);
+  spi_transaction_t& t = o.tr[o.cur];
+  t = {};
+  t.length = 16 * n;
+  t.tx_buffer = d;
+  spi_device_queue_trans(gDmaDev, &t, portMAX_DELAY);
+  gDmaPending = true;
+  xSemaphoreGive(gSpiMx);
+  o.cur ^= 1;  // もう片方の置き場は、DMA が同時に 1 つだけなので必ず送り終わっている
+  o.drawUs += micros() - t0;
+  return 1;
+}
+
+// JPEG 1 つを展開して描く。out = nullptr なら DMA を使わない (Adafruit)
+bool decodeJpegPart(const uint8_t* data, size_t len, int y0, uint32_t* work, size_t workSize, JpegOut* out) {
   JDEC jd;
-  JpegSrc src{data, len, 0};
-  JRESULT rc = akm_jd_prepare(&jd, jpegIn, work, sizeof(work), &src);
+  JpegSrc src{data, len, 0, out, y0};
+  JRESULT rc = akm_jd_prepare(&jd, jpegIn, work, workSize, &src);
   if (rc != JDR_OK) {
     Serial.printf("[TFT] jpeg prepare failed: %d\n", rc);
     return false;
   }
-  if (jd.width > FRAME_W || jd.height > FRAME_H) {
-    Serial.printf("[TFT] jpeg too large: %ux%u\n", jd.width, jd.height);
+  if (jd.width > FRAME_W || y0 + jd.height > FRAME_H + 15) {
+    Serial.printf("[TFT] jpeg too large: %ux%u at y %d\n", jd.width, jd.height, y0);
     return false;
   }
   jd.swap = 0;
-  rc = akm_jd_decomp(&jd, jpegOut, 0);
+  rc = akm_jd_decomp(&jd, out ? jpegOutDma : jpegOut, 0);
   if (rc != JDR_OK) Serial.printf("[TFT] jpeg decode failed: %d\n", rc);
   return rc == JDR_OK;
+}
+
+uint32_t gJpegWork[TJPGD_WORKSPACE_SIZE / 4 + 1];  // このタスク (コア 1) 用
+JpegOut gJpegOut;
+
+// 作業タスク (コア 0): 下半分の JPEG を展開する
+struct JpegJob {
+  const uint8_t* data;
+  size_t len;
+  int y0;
+  bool ok;
+};
+JpegJob gJob;
+JpegOut gJobOut;
+SemaphoreHandle_t gJobGo = nullptr, gJobDone = nullptr;
+TaskHandle_t gJobTask = nullptr;
+
+void jpegWorker(void*) {
+  static uint32_t work[TJPGD_WORKSPACE_SIZE / 4 + 1];
+  for (;;) {
+    xSemaphoreTake(gJobGo, portMAX_DELAY);
+    gJobOut.drawUs = 0;
+    gJob.ok = decodeJpegPart(gJob.data, gJob.len, gJob.y0, work, sizeof(work), &gJobOut);
+    xSemaphoreGive(gJobDone);
+  }
+}
+
+void startJpegWorker() {
+  if (gJobTask) return;
+  gSpiMx = xSemaphoreCreateMutex();
+  gJobGo = xSemaphoreCreateBinary();
+  gJobDone = xSemaphoreCreateBinary();
+  if (!gSpiMx || !gJobGo || !gJobDone ||
+      xTaskCreatePinnedToCore(jpegWorker, "jpeg1", 4096, nullptr, 2, &gJobTask, 0) != pdPASS) {
+    gJobTask = nullptr;
+    Serial.println("[TFT] JPEG worker (core 0) could not start: one core only");
+  }
+}
+
+// 'B' 'J' n (y0 u16, 長さ u32) x n + JPEG x n。n = 1 か 2
+struct JpegPart {
+  const uint8_t* data;
+  size_t len;
+  int y0;
+};
+int parseSplit(const uint8_t* d, size_t len, JpegPart parts[2]) {
+  if (len < 3 || d[0] != 'B' || d[1] != 'J' || d[2] < 1 || d[2] > 2) return 0;
+  int n = d[2];
+  size_t pos = 3 + 6 * (size_t)n;
+  if (len < pos) return 0;
+  for (int i = 0; i < n; i++) {
+    const uint8_t* e = d + 3 + 6 * i;
+    parts[i].y0 = e[0] | e[1] << 8;
+    parts[i].len = e[2] | e[3] << 8 | e[4] << 16 | (uint32_t)e[5] << 24;
+    parts[i].data = d + pos;
+    pos += parts[i].len;
+    if (pos > len || parts[i].len < 4 || parts[i].y0 >= FRAME_H) return 0;
+  }
+  return n;
+}
+
+// JPEG ('FF D8' 1 つ) / 上下 2 つの JPEG ('B' 'J') を描く。DMA が使えれば DMA (2 つなら 2 コアで)
+bool drawJpegAny(const uint8_t* data, size_t len) {
+  JpegPart parts[2];
+  int n;
+  if (data[0] == 0xFF) {
+    parts[0] = {data, len, 0};
+    n = 1;
+  } else {
+    n = parseSplit(data, len, parts);
+    if (!n) {
+      Serial.println("[TFT] bad split jpeg");
+      return false;
+    }
+  }
+  bool dma = gDmaOn && gSpiMx && dmaBegin();
+  if (!dma) {  // DMA なし: 1 つのコアで順に (Adafruit は 2 つのコアから同時に使えない)
+    dmaEnd();
+    bool ok = true;
+    for (int i = 0; i < n; i++)
+      ok = decodeJpegPart(parts[i].data, parts[i].len, parts[i].y0, gJpegWork, sizeof(gJpegWork), nullptr) && ok;
+    return ok;
+  }
+  gRunX = -1;  // BadCodec の帯 (共用バッファ) は使わない
+  gJpegOut.drawUs = 0;
+  bool two = n == 2 && gJobTask;
+  if (two) {
+    gJob = {parts[1].data, parts[1].len, parts[1].y0, false};
+    xSemaphoreGive(gJobGo);  // 下半分はコア 0 で
+  }
+  bool ok = decodeJpegPart(parts[0].data, parts[0].len, parts[0].y0, gJpegWork, sizeof(gJpegWork), &gJpegOut);
+  uint32_t draw = gJpegOut.drawUs;
+  if (two) {
+    xSemaphoreTake(gJobDone, portMAX_DELAY);
+    ok = ok && gJob.ok;
+    if (gJobOut.drawUs > draw) draw = gJobOut.drawUs;
+  } else if (n == 2) {  // 作業タスクが無い: このコアで続けて
+    gJpegOut.drawUs = 0;
+    ok = decodeJpegPart(parts[1].data, parts[1].len, parts[1].y0, gJpegWork, sizeof(gJpegWork), &gJpegOut) && ok;
+    draw += gJpegOut.drawUs;
+  }
+  xSemaphoreTake(gSpiMx, portMAX_DELAY);
+  dmaWait();  // 最後の MCU を送り終えてから (共用バッファ・液晶を次の人に渡せるように)
+  xSemaphoreGive(gSpiMx);
+  gDrawUsFrame = draw;
+  return ok;
 }
 
 bool drawRaw(const uint8_t* data, size_t len) {
@@ -422,13 +585,16 @@ bool drawRaw(const uint8_t* data, size_t len) {
 }  // namespace
 
 bool showFrame(const uint8_t* data, size_t len) {
-  TftLock lock;
+  bool jpeg = len > 2 && ((data[0] == 0xFF && data[1] == 0xD8) || (data[0] == 'B' && data[1] == 'J'));
+  TftLock lock(jpeg);  // JPEG は DMA のまま描く (Adafruit に戻さない)
   bool ok;
   gDrawUsFrame = 0;
   uint32_t t0 = micros();
-  bool jpeg = len > 2 && data[0] == 0xFF && data[1] == 0xD8;
-  if (jpeg) ok = drawJpeg(data, len);  // JPEG
-  else ok = drawRaw(data, len);        // RGB565 BE
+  if (jpeg) ok = drawJpegAny(data, len);  // JPEG (上下 2 つなら 2 コアで)
+  else {
+    dmaEnd();
+    ok = drawRaw(data, len);  // RGB565 BE
+  }
   uint32_t total = micros() - t0;
   if (!jpeg) gDrawUsFrame = total;
   rollStats();

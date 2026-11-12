@@ -39,6 +39,20 @@ def encode(bgr: np.ndarray, fmt: str = "jpeg", quality: int = 70) -> bytes:
     return buf.tobytes()
 
 
+JPEG_SPLIT_Y = 64  # 上下 2 つの JPEG に分ける行 (MCU 16 行の倍数。上 64 行・下 71 行で展開の量がほぼ同じ)
+
+
+def encode_jpeg_split(bgr: np.ndarray, quality: int = 70, split: int = JPEG_SPLIT_Y) -> bytes:
+    """上下 2 つの独立した JPEG ('B' 'J')。ESP32 は上半分と下半分を 2 つのコアで同時に展開する (frame-stream-39 以降)。
+    'B' 'J' n (y0 u16 LE, 長さ u32 LE) x n + JPEG x n"""
+    import struct
+
+    parts = [(0, bgr[:split]), (split, bgr[split:])]
+    jpgs = [encode(np.ascontiguousarray(p), "jpeg", quality) for _y, p in parts]
+    head = b"BJ" + bytes([len(parts)]) + b"".join(struct.pack("<HI", y, len(j)) for (y, _p), j in zip(parts, jpgs))
+    return head + b"".join(jpgs)
+
+
 def compose(img: np.ndarray, lines: list[tuple[str, tuple[int, int, int]]]) -> np.ndarray:
     """ゲーム画面を 240x135 に収め (縦横比を保って余白は黒)、上に文字を重ねる。"""
     h, w = img.shape[:2]
@@ -125,6 +139,7 @@ class Mirror:
         self.sent = 0
         self.errors = 0
         self.jpeg_errors = 0
+        self.jpeg_split = False  # JPEG を上下 2 つに分けて送る (ESP32 が frame-stream-39 以降なら True にする)
         self.bytes_sent = 0   # 送れたバイト数の合計 (平均の計算用)
         self.fails = 0        # 送れなかった回数の合計
         # 計測 (直近の平均, ms)
@@ -291,6 +306,8 @@ class Mirror:
 
                 self._key_sent = bool(data[3] & 1)
                 data = entropy_wrap(data, self.entropy)
+        elif self.fmt == "jpeg" and self.jpeg_split and self.transport in ("tcp", "auto"):  # 上下 2 つ: ESP32 の 2 つのコアで展開
+            data = encode_jpeg_split(frame, self.quality)
         else:
             data = encode(frame, "jpeg" if self.fmt in ("bc", "bad16") else self.fmt, self.quality)
         t2 = time.perf_counter()
@@ -385,6 +402,10 @@ class Mirror:
 
                 m = re.match(r"frame-stream-(\d+)", fw)
                 ver = int(m.group(1)) if m else 0
+                self.jpeg_split = ver >= 39 and self.transport in ("tcp", "auto")
+                if self.fmt == "jpeg":
+                    print("[mirror] JPEG: " + ("上下 2 つに分けて送ります (ESP32 の 2 つのコアで展開)" if self.jpeg_split
+                                               else "1 枚で送ります (2 コアでの展開は frame-stream-39 以降)"))
                 if self.fmt == "bad16" and self.b16_gray and ver < 10:
                     # 古いファームウェアは Gray 符号を戻せず色が崩れるので、Gray 符号なしで送る
                     print("[mirror] Gray 符号には frame-stream-10 以降が必要です。今回は Gray 符号なしで送ります"
