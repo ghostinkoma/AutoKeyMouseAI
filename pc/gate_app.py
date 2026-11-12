@@ -825,7 +825,7 @@ class GateApp:
                              palette=fmt == "Index 256",
                              # 有線は 1 枚ずつ返事を待つ (ESP32 の受信バッファ 8KB を溢れさせない)
                              pipeline=1 if wired else 2, link_factory=link,
-                             b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))
+                             b16_prev_free=not mcfg.get("with_prev", False), jpeg_mode=str(mcfg.get("jpeg_mode", "split")), b16_gray=bool(mcfg.get("gray", False)))
         self.sender.set_lines([])  # 液晶にはゲームの画面だけを出す
         ent = self._ent_effective() if kind == "bad16" else "なし"
         self.sender_fmt = fmt
