@@ -24,7 +24,12 @@
 /  1: Enable
 */
 
+/* AutoKeyMouse: ミラー専用 (BLE なし。メモリに余裕がある) はハフマンを表引き (2)、BLE ありは 1 */
+#if defined(AKM_MIRROR_ONLY) && AKM_MIRROR_ONLY
+#define JD_FASTDECODE	2
+#else
 #define JD_FASTDECODE	1
+#endif
 /* Optimization level
 /  0: Basic optimization. Suitable for 8/16-bit MCUs.
 /     Workspace of 3100 bytes needed.

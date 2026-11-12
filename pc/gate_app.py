@@ -1149,7 +1149,7 @@ class GateApp:
     # ---- 試験の設定を覚えておく (models/gate_ui.json。起動し直しても残す) -----------------------
     def _ui_vars(self) -> dict:
         return {"arm_runs": self.arm_runs, "mirror_fmt": self.mirror_fmt, "mirror_ent": self.mirror_ent,
-                "threshold": self.threshold, "dither": self.dither, "show_other": self.show_other, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
+                "threshold": self.threshold, "dither": self.dither, "show_other": self.show_other, "fps": self.fps, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
                 "shuttle_wait": self.shuttle_wait, "shuttle_axis": self.shuttle_axis, "mouse_mode": self.mouse_mode,
                 "explore_radius": self.explore_radius, "explore_step": self.explore_step,
                 "explore_minutes": self.explore_minutes}
