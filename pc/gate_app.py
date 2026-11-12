@@ -48,12 +48,13 @@ TITLE_RE = re.compile(
 try:
     import cv2
 
-    from akm.gate_live import FORMATS, LiveFeed, MapSource, color_bits
+    from akm.gate_live import DITHERS, FORMATS, LiveFeed, MapSource, color_bits
     LIVE_ERROR = ""
 except Exception as _e:  # noqa: BLE001
     cv2 = LiveFeed = MapSource = None
     LIVE_ERROR = f"{type(_e).__name__}: {_e}"
-    FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit", "YCoCg 420 Y6C5", "Index 256", "JPEG")
+    FORMATS = ("Index 256", "BadCodec 565", "JPEG", "BadCodec 1bit")
+    DITHERS = ("なし", "Bayer 4x4", "Bayer 8x8")
 
     def color_bits(fmt):
         tail = fmt.split()[-1]
@@ -156,7 +157,7 @@ def foreground_hwnd(windows: list[GameWindow]) -> int | None:
 # リボン (Excel のようなタブ + グループ)
 # ---------------------------------------------------------------------------
 # BadCodec のフレームをさらに包む符号 (表示 → akm.mirror の entropy)
-ENTROPY_MODES = {"なし": None, "ハフマン": "huff", "tANS": "tans"}
+ENTROPY_MODES = {"なし": None, "tANS": "tans"}  # BadCodec のフレームを tANS で包むか (JPEG は包まない)
 
 # 往復テストの上下の決め方 (表示 → akm.shuttle_test の axis)
 AXES = {"画面の上下": "screen", "Y (座標)": "y", "X (座標)": "x"}
@@ -298,8 +299,9 @@ class GateApp:
         self.shuttle = None        # 往復テスト (akm.shuttle_test.ShuttleTest)
         self.auto_refresh = tk.BooleanVar(value=True)
         self.mirror_fmt = tk.StringVar(value="Index 256")  # 既定はインデックス 256 色。config の mirror.color で変わり、選んだものは覚えておく
-        self.mirror_ent = tk.StringVar(value="なし")  # BadCodec のフレームをさらに包む: なし / ハフマン / tANS
+        self.mirror_ent = tk.StringVar(value="なし")  # BadCodec のフレームをさらに包む: なし / tANS
         self.threshold = tk.IntVar(value=100)
+        self.dither = tk.StringVar(value="Bayer 4x4")  # 白黒 1 ビットのディザ (akm.gate_live.DITHERS)
         self.fps = tk.IntVar(value=15)
         self.com = tk.StringVar(value="COM18")
         self.host = tk.StringVar(value="")
@@ -315,7 +317,7 @@ class GateApp:
         mc = str((self.cfg.get("mirror") or {}).get("color", "Index 256"))  # 仲介アプリで選んだもの (gate_ui.json) が優先
         if f"BadCodec {mc}" in FORMATS:
             self.mirror_fmt.set(f"BadCodec {mc}")
-        elif mc in FORMATS:  # 例 "YCoCg 420 Y6C5"
+        elif mc in FORMATS:  # 例 "Index 256"
             self.mirror_fmt.set(mc)
         self.host.set(str((self.cfg.get("device") or {}).get("host") or ""))
         self.sender = None         # ESP32 への送信 (akm.mirror.Mirror)
@@ -464,14 +466,9 @@ class GateApp:
                             command=lambda t=text: self.log("INFO", f"撮影方式: {t}")).grid(row=i, column=0, sticky="w")
         g = rb.group(t, "形式")
         # BadCodec のカラーは R G B のビット数。565 = RGB565 そのまま (可逆・一番きれい・1 枚が一番大きい)
-        labels = {"BadCodec 565": "RGB565 (可逆)", "BadCodec 343": "RGB 343 (10 面)", "BadCodec 332": "RGB 332 (8 面)",
-                  "BadCodec 1bit": "白黒 (1 ビット)", "YCoCg 可逆": "YCoCg 可逆 (RGB565 そのもの)",
-                  "Index 256": "インデックス 256 色 (8 面)", "JPEG": "JPEG"}
-        for f in FORMATS:  # YCoCg (明るさ + 色差。frame-stream-34 以降): "YCoCg 4:2:0 Y6 C5" のように出す
-            if f not in labels and f.startswith("YCoCg"):
-                _, sub, yc = f.split()
-                labels[f] = f"YCoCg {sub[0]}:{sub[1]}:{sub[2]} {yc[:2]} {yc[2:]}"
-        names = [labels[f] for f in FORMATS]
+        labels = {"Index 256": "インデックス 8 ビット (256 色)", "BadCodec 565": "BadCodec 16 ビット (可逆)",
+                  "JPEG": "JPEG", "BadCodec 1bit": "白黒 1 ビット"}
+        names = [labels.get(f, f) for f in FORMATS]
         by_label = dict(zip(names, FORMATS))
         fmt_label = tk.StringVar(value=labels.get(self.mirror_fmt.get(), names[0]))
 
@@ -479,24 +476,25 @@ class GateApp:
             f = by_label[fmt_label.get()]
             self.mirror_fmt.set(f)
             self.log("INFO", f"送信形式: {fmt_label.get()}")  # 送っている途中なら sender_status が送り直す
+            ent_box.configure(state=tk.DISABLED if f == "JPEG" else tk.NORMAL)
 
         cb = ttk.Combobox(g, textvariable=fmt_label, values=names, width=24, state="readonly")
         cb.grid(row=0, column=0, sticky="w")
         cb.bind("<<ComboboxSelected>>", pick)
-        ef = ttk.Frame(g)
-        ef.grid(row=1, column=0, sticky="w", pady=(2, 0))
-        ttk.Label(ef, text="さらに").pack(side=tk.LEFT)
-        ttk.Combobox(ef, textvariable=self.mirror_ent, values=list(ENTROPY_MODES), width=8,
-                     state="readonly").pack(side=tk.LEFT)
-        # YCoCg = 明るさ + 色差 (firmware frame-stream-34 以降)
-        # さらに = BadCodec の 1 フレームをハフマン / tANS で包む (frame-stream-35 以降)
-        # インデックス 256 色 = パレットの番号 8 面 (frame-stream-36 以降)
-        ttk.Label(g, text="YCoCg: fw34〜 / さらに: fw35〜\nインデックス: fw36〜",
-                  style="Caption.TLabel").grid(row=2, column=0, sticky="w")
-        g = rb.group(t, "2値化")
+        # tANS = BadCodec の 1 フレームをまるごと tANS で包む (frame-stream-35 以降)。インデックスで 2〜3 割小さくなる
+        ent_box = ttk.Checkbutton(g, text="tANS で圧縮", variable=self.mirror_ent, onvalue="tANS", offvalue="なし")
+        ent_box.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        if self.mirror_fmt.get() == "JPEG":
+            ent_box.configure(state=tk.DISABLED)
+        ttk.Label(g, text="インデックス: fw36〜 / 白黒: fw37〜", style="Caption.TLabel").grid(row=2, column=0, sticky="w")
+        g = rb.group(t, "白黒 1 ビット")
         ttk.Label(g, text="しきい値").grid(row=0, column=0, sticky="w")
         ttk.Scale(g, from_=0, to=255, variable=self.threshold, length=140).grid(row=1, column=0)
         ttk.Label(g, textvariable=self.threshold).grid(row=1, column=1)
+        df = ttk.Frame(g)
+        df.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Label(df, text="ディザ").pack(side=tk.LEFT)
+        ttk.Combobox(df, textvariable=self.dither, values=list(DITHERS), width=10, state="readonly").pack(side=tk.LEFT)
         g = rb.group(t, "送信経路")
         for i, (v, text) in enumerate((("wifi", "Wi-Fi"), ("serial", "有線 (COM)"))):
             ttk.Radiobutton(g, text=text, value=v, variable=self.route,
@@ -730,13 +728,8 @@ class GateApp:
         fmt = self.mirror_fmt.get()
         # BadCodec: 選んだ色のビット数で送る (1bit は送信画面と同じ白黒の絵を各色 1 ビット = 3 面で)
         bits = color_bits(fmt)
-        ycc = None
         if fmt == "Index 256":  # インデックスカラー (frame-stream-36 以降)
             kind, bits = "bad16", (5, 6, 5)
-        elif fmt.startswith("YCoCg"):
-            from akm.bad16 import parse_ycc
-
-            kind, bits, ycc = "bad16", (5, 6, 5), parse_ycc(fmt)
         else:
             kind, bits = ("jpeg", (3, 4, 3)) if bits is None else ("bad16", bits)
         link, where = None, host
@@ -755,7 +748,7 @@ class GateApp:
                              quality=int(mcfg.get("quality", 70)), grab=self._sender_grab,
                              # HTTP に逃げない (逃げると 1 枚ずつの POST が並行して届き、液晶が詰まる)
                              transport="tcp",
-                             port=int(mcfg.get("port", 5005)), b16_bits=bits, ycc=ycc,
+                             port=int(mcfg.get("port", 5005)), b16_bits=bits,
                              entropy=ENTROPY_MODES.get(self.mirror_ent.get()) if kind == "bad16" else None,
                              palette=fmt == "Index 256",
                              # 有線は 1 枚ずつ返事を待つ (ESP32 の受信バッファ 8KB を溢れさせない)
@@ -770,7 +763,7 @@ class GateApp:
         if host:
             self._start_esp_poll(host)  # 有線のときも、内訳は Wi-Fi の /status から読む
         self.log("INFO", f"ESP32 ({where}) への送信を始めました: {fmt} → " +
-                 (f"YCoCg {ycc[0]} Y{ycc[1]} C{ycc[2]}" if ycc else f"{kind} {''.join(map(str, bits))}"))
+                 ("インデックス 256 色" if fmt == "Index 256" else f"{kind} {''.join(map(str, bits))}"))
 
     def _route_changed(self):
         self.log("INFO", f"送信経路: {'有線 (' + self.com.get() + ')' if self.route.get() == 'serial' else 'Wi-Fi'}")
@@ -1045,7 +1038,8 @@ class GateApp:
 
     # ---- 試験の設定を覚えておく (models/gate_ui.json。起動し直しても残す) -----------------------
     def _ui_vars(self) -> dict:
-        return {"arm_runs": self.arm_runs, "mirror_fmt": self.mirror_fmt, "mirror_ent": self.mirror_ent, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
+        return {"arm_runs": self.arm_runs, "mirror_fmt": self.mirror_fmt, "mirror_ent": self.mirror_ent,
+                "threshold": self.threshold, "dither": self.dither, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
                 "shuttle_wait": self.shuttle_wait, "shuttle_axis": self.shuttle_axis, "mouse_mode": self.mouse_mode,
                 "explore_radius": self.explore_radius, "explore_step": self.explore_step,
                 "explore_minutes": self.explore_minutes}
@@ -1062,8 +1056,12 @@ class GateApp:
             d = json.loads(self._ui_settings_path().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             d = {}
-        if d.get("mirror_fmt") not in FORMATS:  # 古い・なくなった形式は覚えていないことにする
+        if d.get("mirror_fmt") not in FORMATS:  # 古い・なくなった形式 (343 / YCoCg など) は覚えていないことにする
             d.pop("mirror_fmt", None)
+        if d.get("mirror_ent") not in ENTROPY_MODES:  # ハフマン (外した) など
+            d.pop("mirror_ent", None)
+        if d.get("dither") not in DITHERS:
+            d.pop("dither", None)
         for k, var in self._ui_vars().items():
             if k in d:
                 try:
@@ -1565,6 +1563,7 @@ class GateApp:
         if self.live is not None:
             self.live.fmt = self.mirror_fmt.get()
             self.live.threshold = int(self.threshold.get())
+            self.live.dither = self.dither.get()
             self.live.fps_target = float(self.fps.get())
             self.live.mode = self.capture_mode.get()
             if self.sender is not None:

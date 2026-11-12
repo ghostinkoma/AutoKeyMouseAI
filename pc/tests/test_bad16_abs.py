@@ -1,5 +1,5 @@
-"""BadCodec YCoCg 版 (ver 5): C エンコーダ → ESP32 と同じ C++ デコーダ (firmware の bad16.h) で、
-エンコーダが計算した液晶の絵 (last_display) とぴったり同じになる。可逆は RGB565 そのものに戻る。"""
+"""BadCodec の前フレーム不要版 (ver 3 / 7) と tANS: C エンコーダ → ESP32 と同じ C++ デコーダ (firmware の bad16.h)
+で、エンコーダが計算した液晶の絵 (last_display) とぴったり同じになる。"""
 import shutil
 import struct
 import subprocess
@@ -12,7 +12,7 @@ import pytest
 PC = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PC))
 
-from akm.bad16 import YccEncoder, parse_ycc, to565  # noqa: E402
+from akm.bad16 import to565  # noqa: E402
 
 
 def frames_of(seed=0, n=6):
@@ -39,7 +39,7 @@ def decoder(tmp_path_factory):
     gxx = shutil.which("g++")
     if not gxx or (sys.platform != "win32" and not shutil.which("gcc")):
         pytest.skip("g++ / gcc が無い")
-    exe = tmp_path_factory.mktemp("ycc") / "bad16_decode_test"
+    exe = tmp_path_factory.mktemp("bad16") / "bad16_decode_test"
     fw = PC.parent / "firmware" / "AutoKeyMouse"
     subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(PC / "tests" / "bad16_decode_test.cpp"),
                     str(fw / "bad_decode.cpp"), str(fw / "entropy.cpp")], check=True)
@@ -54,65 +54,49 @@ def run_decoder(exe, frames):
     return [np.frombuffer(out[i * n:(i + 1) * n], "<u2").reshape(135, 240) for i in range(len(frames))]
 
 
-@pytest.mark.parametrize("mode,ny,nc,gray", [("420", 6, 5, True), ("420", 4, 4, True), ("444", 6, 5, True),
-                                             ("444", 5, 4, False), ("420", 5, 3, False), ("lossless", 6, 7, True)])
-def test_ycc_roundtrip_matches_esp32_decoder(decoder, mode, ny, nc, gray):
-    enc = YccEncoder(mode, ny, nc, gray)
-    srcs = frames_of()
+def test_mono_single_plane_matches_esp32_decoder(decoder):
+    """白黒 1 ビット: bit15 の 1 面だけ送り (mask 0x8000)、ESP32 が白 / 黒に広げる。ディザの模様もそのまま"""
+    from akm.bad16 import Encoder
+    from akm.gate_live import to_mono
+
+    cv2 = pytest.importorskip("cv2")
+    enc = Encoder(bits=(1, 1, 1))
     datas, expect = [], []
-    for f in srcs:
-        datas.append(enc.encode(f))
-        expect.append(enc.last_display.copy())
-    assert datas[0][:3] == b"B6\x05" and datas[0][3] & 1 and not datas[1][3] & 1
-    assert len(datas[-1]) < 20  # 変化なし: SKIP だけ
+    for f in frames_of():
+        bw = cv2.cvtColor(to_mono(f, 128, "Bayer 4x4"), cv2.COLOR_GRAY2BGR)
+        datas.append(enc.encode(bw))
+        expect.append(enc.last_display[:135].copy())
+        assert set(np.unique(expect[-1])) <= {0, 0xFFFF}
+    assert datas[0][:3] == b"B6\x03" and datas[0][4:6] == b"\x00\x80"
     got = run_decoder(decoder, datas)
     for i, (g, e) in enumerate(zip(got, expect)):
-        assert (g == e).all(), f"frame {i}: {int((g != e).sum())} 画素違う"
-    if mode == "lossless":
-        for g, f in zip(got, srcs):
-            assert (g == to565(f)).all()  # 可逆: RGB565 そのもの
+        assert (g == e).all(), f"frame {i}"
+    assert (got[0] == 0xFFFF).any() and (got[0] == 0).any()
 
 
-def test_ycc_is_close_to_source():
-    """非可逆でも元の色に近い (4:2:0 Y6C5 の平均誤差は 8 ビット換算で数段階)"""
-    enc = YccEncoder("420", 6, 5)
-    f = frames_of(n=1)[0]
-    enc.encode(f)
-    d = enc.last_display.astype(np.int32)
-    r, g, b = (d >> 11) << 3, ((d >> 5) & 63) << 2, (d & 31) << 3
-    err = np.abs(np.stack([b, g, r], -1) - f.astype(np.int32)).mean()
-    assert err < 8, err
+def test_bayer_dither_is_stable_and_keeps_brightness():
+    """組織的ディザ: 同じ絵なら同じ模様 (差分が効く)、白の割合が明るさに比例する"""
+    from akm.gate_live import to_mono
+
+    pytest.importorskip("cv2")
+    for k in (4, 8):
+        for v in (32, 96, 160, 224):
+            img = np.full((135, 240, 3), v, np.uint8)
+            a, b = to_mono(img, 128, f"Bayer {k}x{k}"), to_mono(img, 128, f"Bayer {k}x{k}")
+            assert (a == b).all()
+            assert abs((a == 255).mean() - v / 256) < 1.0 / (k * k) + 1e-6
+    img = np.full((135, 240, 3), 100, np.uint8)
+    assert (to_mono(img, 128, "なし") == 0).all() and (to_mono(img, 90, "なし") == 255).all()
 
 
-def test_parse_ycc():
-    assert parse_ycc("YCoCg 420 Y6C5") == ("420", 6, 5)
-    assert parse_ycc("YCoCg 444 Y6 C5") == ("444", 6, 5)
-    assert parse_ycc("YCoCg 可逆") == ("lossless", 6, 7)
-    assert parse_ycc("BadCodec 343") is None
-
-
-def test_ycc_sends_only_changed_8x8(decoder):
-    """1 画素だけ変わったら、16x16 のうち変わった 8x8 だけを送る (前は 16x16 を丸ごと)"""
-    enc = YccEncoder("420", 6, 5)
-    a = frames_of(n=1)[0]
-    b = a.copy()
-    b[5, 5] = (255, 0, 255)  # 左上のマクロブロックの左上の 8x8 だけ
-    d0, e0 = enc.encode(a), enc.last_display.copy()
-    d1, e1 = enc.encode(b), enc.last_display.copy()
-    assert d1[7] == 0x01  # 最初のマクロブロック: 左上の 8x8 だけ
-    got = run_decoder(decoder, [d0, d1])
-    assert (got[0] == e0).all() and (got[1] == e1).all()
-    assert len(d1) < 7 + 1 + 6 * 9 + 2 * 5 * 9 + 8  # mask + Y 6 面 + 色差 10 面 (1 ブロックずつ) + SKIP
-
-
-@pytest.mark.parametrize("kind", ["huff", "tans"])
-@pytest.mark.parametrize("make", ["rgb343", "rgb565", "ycc420"])
+@pytest.mark.parametrize("kind", ["tans"])
+@pytest.mark.parametrize("make", ["rgb343", "rgb565", "index"])
 def test_entropy_wrap_roundtrip(decoder, kind, make):
-    """BadCodec のフレームをハフマン / tANS で包んでも、ESP32 と同じコードで同じ絵に戻る (小さくもなる)"""
-    from akm.bad16 import Encoder, entropy_wrap
+    """BadCodec のフレームを tANS で包んでも、ESP32 と同じコードで同じ絵に戻る (小さくもなる)"""
+    from akm.bad16 import Encoder, IndexEncoder, entropy_wrap
 
     enc = {"rgb343": lambda: Encoder(bits=(3, 4, 3), gray=True), "rgb565": lambda: Encoder(bits=(5, 6, 5), gray=True),
-           "ycc420": lambda: YccEncoder("420", 6, 5)}[make]()
+           "index": lambda: IndexEncoder()}[make]()
     srcs = frames_of()
     raw, wrapped, expect = [], [], []
     for f in srcs:
@@ -120,7 +104,7 @@ def test_entropy_wrap_roundtrip(decoder, kind, make):
         raw.append(d)
         wrapped.append(entropy_wrap(d, kind))
         expect.append(enc.last_display[:135].copy())
-    assert wrapped[0][:2] == (b"BH" if kind == "huff" else b"BA")
+    assert wrapped[0][:2] == b"BA"
     assert len(wrapped[0]) < len(raw[0])
     got = run_decoder(decoder, wrapped)
     for i, (g, e) in enumerate(zip(got, expect)):
@@ -155,12 +139,12 @@ int main() {
     subprocess.run([gxx, "-std=c++17", "-O1", "-o", str(exe), str(src),
                     str(PC.parent / "firmware" / "AutoKeyMouse" / "entropy.cpp")], check=True)
     rng = np.random.default_rng(1)
-    for kind in ("huff", "tans"):
+    for kind in ("tans",):
         for data in (bytes(rng.integers(0, 4, 5000, dtype=np.uint8)),          # 偏りが大きい
                      bytes(rng.geometric(0.05, 20000).clip(0, 255).astype(np.uint8)),  # 長い裾
                      bytes([7]) * 3000 + bytes([9]) * 5):                          # ほぼ 1 種類
             w = entropy_wrap(data, kind)
-            assert w[:2] in (b"BH", b"BA") and len(w) < len(data)
+            assert w[:2] == b"BA" and len(w) < len(data)
             out = subprocess.run([str(exe)], input=w, capture_output=True, check=True).stdout
             assert out == data, kind
 
@@ -186,5 +170,5 @@ def test_index_color_roundtrip(decoder):
     got = run_decoder(decoder, datas)
     for i, (g, e) in enumerate(zip(got, expect)):
         assert (g == e).all(), f"frame {i}: {int((g != e).sum())} 画素違う"
-    got = run_decoder(decoder, [entropy_wrap(d, "huff") for d in datas])  # ハフマンで包んでも同じ
+    got = run_decoder(decoder, [entropy_wrap(d, "tans") for d in datas])  # tANS で包んでも同じ
     assert all((g == e).all() for g, e in zip(got, expect))

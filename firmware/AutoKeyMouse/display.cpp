@@ -216,8 +216,7 @@ __attribute__((noinline)) IRAM_ATTR int decodeAbsDma(const bad16::Header& h, Rea
     *edgeUs += d1 - d0;
     *drawUs += micros() - d1;
   };
-  // ver 4 (YCoCg) も同じ描き方 (変わったブロックだけ。16x16 を 8x8 ずつ渡してくる)
-  return h.ycc ? bad16::decodeYcc(h, read, ctx, sink) : bad16::decodeAbs(h, read, ctx, sink);
+  return bad16::decodeAbs(h, read, ctx, sink);
 }
 
 IRAM_ATTR void dmaBlock(int x, int y, int rows, const uint16_t* px) {
@@ -595,7 +594,7 @@ int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
         gTft.writePixels(px, 8 * rows);
         drawUs += micros() - d0;
       };
-      n = h.ycc ? bad16::decodeYcc(h, read, ctx, sink) : bad16::decodeAbs(h, read, ctx, sink);
+      n = bad16::decodeAbs(h, read, ctx, sink);
       gTft.endWrite();
     }
     uint32_t waited = recvUs ? *recvUs - recv0 : 0;

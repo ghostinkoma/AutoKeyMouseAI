@@ -541,89 +541,9 @@ API int bad16_encode_abs(const uint16_t *curr, const uint16_t *prev, int w, int 
 }
 
 /* ------------------------------------------------------------------------------------------------
- * BadCodec YCoCg 版 (コンテナ ver 5。pc/akm/bad16.py の YccEncoder)。前フレーム不要 (液晶に残る絵を使う)。
- * 16x16 のマクロブロック単位。変わらないマクロブロックは SKIP (0x80-0xBF = n+1 個)。変わったものは
- *   mask: 1 バイト (0x01-0x0F)。変わった 8x8 (bit0 左上・bit1 右上・bit2 左下・bit3 右下)。この 8x8 だけ送り・描く
- *   Y   : mask の 8x8 それぞれに、Y の面 bit0 → bit(ny-1) の 8x8 命令 1 つずつ
- *   色差: 4:2:0 なら Co の面 bit0..、Cg の面 bit0.. を 8x8 (= マクロブロック全体の半分の解像度) 1 つずつ
- *         4:4:4 なら mask の 8x8 それぞれに Co の面、Cg の面
- * 値 (Y / Co / Cg) は呼び出し側で量子化・Gray 符号化済みの 0..255 (ny / nc ビット)。
- * Y は w x h、色差は 4:2:0 なら (w/2) x (h/2)、4:4:4 なら w x h。w, h は 16 の倍数。
- * ------------------------------------------------------------------------------------------------ */
-static void plane_block(const uint8_t *v, int stride, int x0, int y0, int bit, blk_t c) {
-  for (int y = 0; y < 8; y++)
-    for (int x = 0; x < 8; x++) c[y][x] = (uint8_t)(v[(y0 + y) * stride + x0 + x] >> bit & 1);
-}
-
-static int region_diff(const uint8_t *a, const uint8_t *b, int stride, int x0, int y0, int n) {
-  for (int y = 0; y < n; y++)
-    if (memcmp(a + (y0 + y) * stride + x0, b + (y0 + y) * stride + x0, n) != 0) return 1;
-  return 0;
-}
-
-API int bad16_encode_ycc(const uint8_t *Y, const uint8_t *Co, const uint8_t *Cg, const uint8_t *pY,
-                         const uint8_t *pCo, const uint8_t *pCg, int w, int h, int sub420, int ny, int nc,
-                         uint8_t *out, int out_cap, int *changed_blocks) {
-  if (!g_scan_ready) build_scan_paths();
-  if (w % 16 || h % 16 || ny < 1 || ny > 8 || nc < 1 || nc > 8) return -1;
-  int nbx = w / 16, nby = h / 16, n = 0, skip = 0, changed = 0;
-  int cw = sub420 ? w / 2 : w, cm = sub420 ? 8 : 16;  /* 色差の横幅 / 1 マクロブロックの色差の大きさ */
-#define PUT(v) do { if (n >= out_cap) return -1; out[n++] = (uint8_t)(v); } while (0)
-#define FLUSH_SKIP() do { while (skip > 0) { int k = skip > 64 ? 64 : skip; PUT(0x80 | (k - 1)); skip -= k; } } while (0)
-#define EMIT(v, stride, x0, y0, nb) \
-  for (int bit = 0; bit < (nb); bit++) { blk_t c; uint8_t op[9]; plane_block(v, stride, x0, y0, bit, c); \
-    int k = encode_block_abs(c, op); for (int i = 0; i < k; i++) PUT(op[i]); }
-  for (int my = 0; my < nby; my++)
-    for (int mx = 0; mx < nbx; mx++) {
-      int cx = mx * cm, cy = my * cm;
-      /* 変わった 8x8 (左上 bit0・右上 bit1・左下 bit2・右下 bit3)。色差は、その 8x8 にかかる部分で見る */
-      int mask = 0;
-      for (int s = 0; s < 4; s++) {
-        int x8 = mx * 16 + (s & 1) * 8, y8 = my * 16 + (s >> 1) * 8;
-        int d;
-        if (pY == NULL) {
-          d = 1;
-        } else if (sub420) {
-          int qx = cx + (s & 1) * 4, qy = cy + (s >> 1) * 4;
-          d = region_diff(Y, pY, w, x8, y8, 8) || region_diff(Co, pCo, cw, qx, qy, 4) ||
-              region_diff(Cg, pCg, cw, qx, qy, 4);
-        } else {
-          d = region_diff(Y, pY, w, x8, y8, 8) || region_diff(Co, pCo, cw, x8, y8, 8) ||
-              region_diff(Cg, pCg, cw, x8, y8, 8);
-        }
-        if (d) mask |= 1 << s;
-      }
-      if (!mask) { skip++; continue; }
-      FLUSH_SKIP();
-      changed++;
-      PUT(mask);  /* 0x01-0x0F: どの 8x8 が続くか (SKIP 0x80-0xBF と重ならない) */
-      for (int s = 0; s < 4; s++)
-        if (mask >> s & 1) { EMIT(Y, w, mx * 16 + (s & 1) * 8, my * 16 + (s >> 1) * 8, ny) }
-      if (sub420) {  /* 色差は 8x8 1 つでマクロブロック全体 (変わった 8x8 の色はここから取る) */
-        EMIT(Co, cw, cx, cy, nc)
-        EMIT(Cg, cw, cx, cy, nc)
-      } else {
-        for (int s = 0; s < 4; s++) {
-          if (!(mask >> s & 1)) continue;
-          int x0 = cx + (s & 1) * 8, y0 = cy + (s >> 1) * 8;
-          EMIT(Co, cw, x0, y0, nc)
-          EMIT(Cg, cw, x0, y0, nc)
-        }
-      }
-    }
-  FLUSH_SKIP();
-#undef EMIT
-#undef PUT
-#undef FLUSH_SKIP
-  if (changed_blocks) *changed_blocks = changed;
-  return n;
-}
-
-/* ------------------------------------------------------------------------------------------------
  * 1 フレームをまるごとエントロピー符号にする (BadCodec の出力 'B' '6' ... をさらに小さく)。
  * ESP32 は受け取りながら 1 バイトずつ戻し、そのまま BadCodec の展開に渡す (firmware/AutoKeyMouse/entropy.cpp)。
- *   ハフマン: 'B' 'H' 1 maxLen  元の長さ(u32 LE)  符号長 256 個 (4 ビットずつ, 下位ニブルが偶数番の記号) 128B
- *             続けてビット列 (上位ビットから)。符号は正準ハフマン (同じ長さは記号の小さい順)
+ *   (ハフマン 'B' 'H' は外した: tANS の方が小さく、ESP32 でも軽かった)
  *   tANS     : 'B' 'A' 1 R  元の長さ(u32 LE)  記号の数-1 (u8)  (記号 u8, 回数 u16 LE) x 記号の数
  *             続けてビット列 (上位ビットから): 最初の状態 R ビット、以後 1 記号ごとに表の nb ビット
  *             表は L = 2^R。記号を step = L/2 + L/8 + 3 で散らして並べる (FSE と同じ)
@@ -650,65 +570,6 @@ static int bw_flush(bw_t *w) {
     w->bits = 0;
   }
   return w->n;
-}
-
-/* 符号長 (最大 maxLen)。普通のハフマンで長すぎたら回数を半分にして作り直す */
-static void huff_lengths(const uint32_t *freq0, int maxLen, uint8_t *len) {
-  uint32_t freq[256];
-  memcpy(freq, freq0, sizeof(freq));
-  for (;;) {
-    int nsym = 0, idx[256];
-    for (int s = 0; s < 256; s++) { len[s] = 0; if (freq[s]) idx[nsym++] = s; }
-    if (nsym == 0) return;
-    if (nsym == 1) { len[idx[0]] = 1; return; }
-    /* 節点: 0..nsym-1 = 葉, それ以降 = 内部。親を覚えて深さを数える */
-    uint64_t w[512]; int parent[512], alive[512], nn = nsym;
-    for (int i = 0; i < nsym; i++) { w[i] = freq[idx[i]]; alive[i] = 1; parent[i] = -1; }
-    for (int m = 0; m < nsym - 1; m++) {
-      int a = -1, b = -1;
-      for (int i = 0; i < nn; i++) {
-        if (!alive[i]) continue;
-        if (a < 0 || w[i] < w[a]) { b = a; a = i; } else if (b < 0 || w[i] < w[b]) { b = i; }
-      }
-      alive[a] = alive[b] = 0;
-      w[nn] = w[a] + w[b]; alive[nn] = 1; parent[nn] = -1;
-      parent[a] = parent[b] = nn;
-      nn++;
-    }
-    int maxd = 0;
-    for (int i = 0; i < nsym; i++) {
-      int d = 0;
-      for (int p = i; parent[p] >= 0; p = parent[p]) d++;
-      len[idx[i]] = (uint8_t)d;
-      if (d > maxd) maxd = d;
-    }
-    if (maxd <= maxLen) return;
-    for (int s = 0; s < 256; s++) if (freq[s]) freq[s] = (freq[s] + 1) / 2;
-  }
-}
-
-API int bad_entropy_huff(const uint8_t *in, int n, uint8_t *out, int cap, int maxLen) {
-  if (maxLen < 1 || maxLen > 12 || cap < 136) return -1;
-  uint32_t freq[256] = {0};
-  for (int i = 0; i < n; i++) freq[in[i]]++;
-  uint8_t len[256];
-  huff_lengths(freq, maxLen, len);
-  /* 正準ハフマンの符号 */
-  int bl[16] = {0};
-  for (int s = 0; s < 256; s++) bl[len[s]]++;
-  bl[0] = 0;
-  uint32_t next[16], code = 0, sc[256];
-  for (int l = 1; l <= 15; l++) { code = (code + bl[l - 1]) << 1; next[l] = code; }
-  for (int s = 0; s < 256; s++) sc[s] = len[s] ? next[len[s]]++ : 0;
-  int k = 0;
-  out[k++] = 'B'; out[k++] = 'H'; out[k++] = 1; out[k++] = (uint8_t)maxLen;
-  out[k++] = (uint8_t)n; out[k++] = (uint8_t)(n >> 8); out[k++] = (uint8_t)(n >> 16); out[k++] = (uint8_t)(n >> 24);
-  for (int s = 0; s < 256; s += 2) out[k++] = (uint8_t)(len[s] | len[s + 1] << 4);
-  bw_t bw = {out + k, cap - k, 0, 0, 0};
-  for (int i = 0; i < n; i++)
-    if (bw_put(&bw, sc[in[i]], len[in[i]]) < 0) return -1;
-  int m = bw_flush(&bw);
-  return m < 0 ? -1 : k + m;
 }
 
 static int highbit32(uint32_t v) { int r = 0; while (v >>= 1) r++; return r; }

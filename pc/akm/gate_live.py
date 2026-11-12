@@ -45,10 +45,38 @@ class Snapshot:
 
 
 # 送る形式 (仲介アプリのミラーのタブ)。BadCodec のカラーは R G B のビット数 (565 = RGB565 そのまま・可逆)
-FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit",
-           "YCoCg 420 Y6C5", "YCoCg 420 Y6C4", "YCoCg 420 Y5C4", "YCoCg 420 Y4C4", "YCoCg 420 Y5C3",
-           "YCoCg 444 Y6C5", "Index 256", "JPEG")  # YCoCg 可逆は小さくならず展開が一番重いので出さない (YccEncoder("lossless") はある)
-_YCC_PREVIEW: dict = {}
+FORMATS = ("Index 256", "BadCodec 565", "JPEG", "BadCodec 1bit")
+# 白黒 1 ビットのディザ。組織的ディザ (Bayer) は模様が場所で決まるので、動かない所は前のフレームと同じ
+# (= 変わったブロックだけ送る BadCodec と相性が良い)。誤差拡散 (Floyd-Steinberg) は 1 画素の変化で模様が
+# 広く変わってちらつき、差分が効かなくなるので使わない
+DITHERS = ("なし", "Bayer 4x4", "Bayer 8x8")
+
+
+def _bayer(n: int) -> np.ndarray:
+    m = np.array([[0, 2], [3, 1]])
+    while m.shape[0] < n:
+        m = np.block([[4 * m, 4 * m + 2], [4 * m + 3, 4 * m + 1]])
+    return m
+
+
+_BAYER = {"Bayer 4x4": _bayer(4), "Bayer 8x8": _bayer(8)}
+
+
+def to_mono(small: np.ndarray, threshold: int, dither: str = "なし") -> np.ndarray:
+    """白黒 (0 / 255 の 1 チャンネル)。threshold: しきい値 (ディザでは明るさの中心。128 で元のまま)"""
+    g = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    m = _BAYER.get(dither)
+    if m is None:
+        return np.where(g > threshold, 255, 0).astype(np.uint8)
+    n = m.shape[0]
+    t = (m.astype(np.float32) + 0.5) * (256.0 / (n * n))  # 0..256 に均等に並んだしきい値
+    h, w = g.shape
+    t = np.tile(t, ((h + n - 1) // n, (w + n - 1) // n))[:h, :w]
+    v = g.astype(np.float32) + (128 - int(threshold))
+    return np.where(v > t, 255, 0).astype(np.uint8)
+
+
+_PREVIEW: dict = {}
 
 
 def color_bits(fmt: str) -> tuple[int, int, int] | None:
@@ -77,31 +105,18 @@ def from565(img565: np.ndarray) -> np.ndarray:
     return out
 
 
-def to_send_format(small: np.ndarray, fmt: str, threshold: int) -> tuple[np.ndarray, int]:
+def to_send_format(small: np.ndarray, fmt: str, threshold: int, dither: str = "なし") -> tuple[np.ndarray, int]:
     """送る形式に合わせた見た目 (ESP32 の液晶に出るのと同じ色) と、おおよその 1 枚の大きさ (バイト。差分で縮む前)。"""
     if fmt.startswith("BadCodec 1bit"):
-        g = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        bw = np.where(g > threshold, 255, 0).astype(np.uint8)
+        bw = to_mono(small, threshold, dither)
         return cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR), SEND_W * SEND_H // 8
     if fmt == "Index 256":  # インデックスカラー: パレットの色 (使い回し・作り直しも送るときと同じ)
         from .bad16 import IndexEncoder
 
-        enc = _YCC_PREVIEW.get("index")
+        enc = _PREVIEW.get("index")
         if enc is None:
-            enc = _YCC_PREVIEW["index"] = IndexEncoder()
+            enc = _PREVIEW["index"] = IndexEncoder()
         return from565(enc.display(small)), SEND_W * SEND_H
-    if fmt.startswith("YCoCg"):  # YCoCg 版: ESP32 と同じ計算で液晶の色を出す
-        from .bad16 import YCC_H, YccEncoder, parse_ycc
-
-        p = parse_ycc(fmt)
-        enc = _YCC_PREVIEW.get(p)
-        if enc is None:
-            enc = _YCC_PREVIEW[p] = YccEncoder(*p)
-        h = small.shape[0]
-        src = np.concatenate([small, np.repeat(small[-1:], YCC_H - h, axis=0)], axis=0)
-        disp = enc._channels(src)[3][:h]
-        per_px = enc.ny + 2 * enc.nc / (4 if p[0] == "420" else 1)
-        return from565(disp), int(SEND_W * SEND_H * per_px / 8)
     bits = color_bits(fmt)
     if bits is not None:
         from .bad16 import replicate565, to565
@@ -128,6 +143,7 @@ class LiveFeed:
         self.hud = self.cfg.get("hud") or {}
         self.fmt = "BadCodec 1bit"
         self.threshold = 60
+        self.dither = "なし"  # 白黒のディザ (DITHERS)
         self.fps_target = 15.0
         self.mode = "obs"          # "obs" / "window"
         self.hwnd = 0
@@ -208,7 +224,7 @@ class LiveFeed:
                 img, snap.method = self._grab(hwnd, full=False)
                 t1 = time.monotonic()
                 small = compose(img, [])
-                snap.preview, _ = to_send_format(small, self.fmt, self.threshold)
+                snap.preview, _ = to_send_format(small, self.fmt, self.threshold, self.dither)
                 t2 = time.monotonic()
                 snap.size = self._full_size if self.mode == "obs" and self._full_size[0] else (img.shape[1], img.shape[0])
                 snap.timing = {"grab": (t1 - t0) * 1000, "make": (t2 - t1) * 1000}

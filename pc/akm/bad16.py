@@ -43,14 +43,9 @@ def _lib():
         lib.bad16_encode_abs.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint16,
                                          ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
         lib.bad16_encode_abs.restype = ctypes.c_int
-        for fn in ("bad_entropy_huff", "bad_entropy_tans"):
-            if hasattr(lib, fn):
-                getattr(lib, fn).argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
-                getattr(lib, fn).restype = ctypes.c_int
-        if hasattr(lib, "bad16_encode_ycc"):
-            lib.bad16_encode_ycc.argtypes = [ctypes.c_void_p] * 6 + [ctypes.c_int] * 5 + [
-                ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-            lib.bad16_encode_ycc.restype = ctypes.c_int
+        if hasattr(lib, "bad_entropy_tans"):
+            lib.bad_entropy_tans.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+            lib.bad_entropy_tans.restype = ctypes.c_int
         _LIB = lib
     return _LIB
 
@@ -142,14 +137,17 @@ class Encoder:
     受信側に (面の数 + 1) x 4KB 要る)。"""
 
     def __init__(self, drop_bits: int = 0, bits: tuple[int, int, int] | None = None, prev_free: bool = True,
-                 gray: bool = False, hold: float = 0.6):
+                 gray: bool = False, hold: float = 0.6, mono: bool = True):
         self.bits = tuple(bits) if bits else bits_of_drop(drop_bits)
         self.prev_free = prev_free
-        self.gray = gray and prev_free  # Gray 符号は ver 3 だけ (frame-stream-10 以降)
+        # 白黒 (1, 1, 1): bit15 の 1 面だけ送り、ESP32 が白 / 黒に広げる (mask 0x8000 + rep。frame-stream-37 以降)。
+        # 前は R G B の最上位 3 面に同じ絵を送っていた (mono=False)
+        self.mono = prev_free and self.bits == (1, 1, 1) and mono
+        self.gray = gray and prev_free and not self.mono  # Gray 符号は ver 3 だけ (frame-stream-10 以降)
         # 色を減らすとき (ver 3): 四捨五入で段階を選び、ESP32 は送らない下位ビットを上位ビットの複製で埋める
         # (flags bit2。白が白になり暗部がつぶれない)。hold: 前の段階から hold 段以内の変化なら前の段階のまま
         # (段階の境目で色が行き来するちらつきを防ぐ。変化ブロックも減る)
-        self.smooth = prev_free and self.bits != (5, 6, 5)
+        self.smooth = prev_free and self.bits != (5, 6, 5) and not self.mono
         self.hold = hold
         self._q_prev: list[np.ndarray] | None = None
         self.last_display: np.ndarray | None = None  # 液晶に出る RGB565 (136x240, テスト用)
@@ -162,12 +160,18 @@ class Encoder:
         self.force_key = True
 
     def _mask(self) -> int:
-        return mask_of(self.bits)
+        return 0x8000 if self.mono else mask_of(self.bits)
 
     def encode(self, bgr: np.ndarray) -> bytes:
         assert bgr.shape[:2] == (135, W), bgr.shape
         mask = self._mask()
         src = np.concatenate([bgr, bgr[-1:]], axis=0)
+        if self.mono:  # 明るさ 128 以上を白 (仲介アプリは 2 値化・ディザ済みの白黒の絵を渡す)
+            s16 = src.astype(np.uint16)
+            lum = s16[..., 2] * 77 + s16[..., 1] * 150 + s16[..., 0] * 29
+            img = np.where(lum >= 128 * 256, 0xFFFF, 0).astype(np.uint16)
+            self.last_display = img
+            return self._encode_abs(np.ascontiguousarray(img), mask)
         if self.smooth:
             img = self._quantize(src)
             self.last_display = replicate565(img, self.bits)
@@ -218,136 +222,8 @@ class Encoder:
             raise RuntimeError("bad16_encode_abs failed")
         self.changed_blocks = ch.value
         self.prev565 = img
-        flags = (1 if key else 0) | (2 if self.gray else 0) | (4 if self.smooth else 0)
+        flags = (1 if key else 0) | (2 if self.gray else 0) | (4 if self.smooth or self.mono else 0)
         return b"B6\x03" + bytes([flags]) + struct.pack("<H", mask) + out[:n].tobytes()
-
-
-# ------------------------------------------------------------------ YCoCg 版 (ver 4) --
-# 明るさ (Y) と色差 (Co, Cg) に分けてからビット面にする。RGB の 3 色は同じ輪郭を持つので、RGB のまま面にすると
-# 輪郭が 3 回送られる。YCoCg なら輪郭は Y に集まり、色差の面はほとんど平ら (小さく圧縮できる)。
-# 色差は 4:2:0 (縦横半分) にもできる。戻すのは足し算だけ (t = Y - Cg, G = Y + Cg, B = t - Co, R = t + Co)。
-#
-# コンテナ: 'B' '6' 5 flags mode ny nc + 本体 (pc/native/bad_encode.c の bad16_encode_ycc)
-#   16x16 単位で、変わったものは先頭 1 バイトに「どの 8x8 が変わったか」。変わった 8x8 だけ送り・描く
-#   flags bit0 = キーフレーム, bit1 = 各値を Gray 符号にしてある
-#   mode 0 = 4:4:4 / 1 = 4:2:0 (どちらも非可逆: Y・色差を 8 ビットにしてから上位 ny / nc ビット)
-#        2 = 可逆 (RGB565 そのものを YCoCg-R に: Y 6 ビット、Co / Cg 7 ビット (+64)。4:4:4)
-#   画面は 240 x 144 (135 行 + 9 行の余白。16 の倍数)
-YCC_H = 144
-YCC_MODES = {"444": 0, "420": 1, "lossless": 2}
-
-
-def rep_bits(q, n: int):
-    """n ビットの値を 8 ビットに広げる (上位ビットを下位に繰り返す。ESP32 も同じ計算)"""
-    v = np.asarray(q, np.int32) << (8 - n)
-    s = n
-    while s < 8:
-        v = v | (v >> s)
-        s *= 2
-    return v & 0xFF
-
-
-def _nearest_lut(n: int) -> np.ndarray:
-    """0..255 → rep_bits で一番近くに戻る n ビットの値"""
-    reps = rep_bits(np.arange(1 << n), n)
-    return np.abs(np.arange(256)[:, None] - reps[None, :]).argmin(axis=1).astype(np.uint8)
-
-
-def gray8(v):
-    return v ^ (v >> 1)
-
-
-class YccEncoder:
-    """BadCodec YCoCg 版。mode: "444" / "420" / "lossless"。ny / nc: Y / 色差のビット数 (lossless では無視)"""
-
-    def __init__(self, mode: str = "420", ny: int = 6, nc: int = 5, gray: bool = True):
-        if mode not in YCC_MODES:
-            raise ValueError(f"mode: {mode}")
-        self.mode = mode
-        self.ny, self.nc = (6, 7) if mode == "lossless" else (int(ny), int(nc))
-        if not (1 <= self.ny <= 8 and 1 <= self.nc <= 8):
-            raise ValueError("ny / nc は 1〜8")
-        self.gray = gray
-        self.prev = None
-        self.force_key = True
-        self.changed_blocks = 0
-        self.last_display: np.ndarray | None = None  # 液晶に出る RGB565 (135x240, テスト用)
-        if mode != "lossless":
-            self._qy, self._qc = _nearest_lut(self.ny), _nearest_lut(self.nc)
-
-    def request_key(self) -> None:
-        self.force_key = True
-
-    def planes(self) -> int:
-        return self.ny + 2 * self.nc
-
-    def label(self) -> str:
-        return "YCoCg 可逆" if self.mode == "lossless" else f"YCoCg {self.mode} Y{self.ny}C{self.nc}"
-
-    def _channels(self, bgr: np.ndarray):
-        """BGR (144x240) → 量子化した Y, Co, Cg (uint8) と、液晶に出る RGB565"""
-        if self.mode == "lossless":
-            r = (bgr[..., 2] >> 3).astype(np.int32)
-            g = (bgr[..., 1] >> 2).astype(np.int32)
-            b = (bgr[..., 0] >> 3).astype(np.int32)
-            co = r - b
-            t = b + (co >> 1)
-            cg = g - t
-            y = t + (cg >> 1)
-            disp = ((r << 11) | (g << 5) | b).astype(np.uint16)
-            return y.astype(np.uint8), (co + 64).astype(np.uint8), (cg + 64).astype(np.uint8), disp
-        f = bgr.astype(np.int32)
-        b, g, r = f[..., 0], f[..., 1], f[..., 2]
-        y8 = (r + 2 * g + b + 2) >> 2
-        co8 = np.clip((r - b + 256) >> 1, 0, 255)
-        cg8 = np.clip((-r + 2 * g - b + 512 + 2) >> 2, 0, 255)
-        if self.mode == "420":  # 2x2 の平均
-            h2, w2 = co8.shape[0] // 2, co8.shape[1] // 2
-            co8 = (co8.reshape(h2, 2, w2, 2).sum(axis=(1, 3)) + 2) >> 2
-            cg8 = (cg8.reshape(h2, 2, w2, 2).sum(axis=(1, 3)) + 2) >> 2
-        qy, qco, qcg = self._qy[y8], self._qc[co8], self._qc[cg8]
-        return qy, qco, qcg, self.display(qy, qco, qcg)
-
-    def display(self, qy, qco, qcg) -> np.ndarray:
-        """ESP32 と同じ計算で、量子化した値から液晶の RGB565 を作る"""
-        y = rep_bits(qy, self.ny)
-        co = rep_bits(qco, self.nc) - 128
-        cg = rep_bits(qcg, self.nc) - 128
-        if self.mode == "420":
-            co = np.repeat(np.repeat(co, 2, axis=0), 2, axis=1)
-            cg = np.repeat(np.repeat(cg, 2, axis=0), 2, axis=1)
-        t = y - cg
-        g = np.clip(y + cg, 0, 255)
-        b = np.clip(t - co, 0, 255)
-        r = np.clip(t + co, 0, 255)
-        return (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)).astype(np.uint16)
-
-    def encode(self, bgr: np.ndarray) -> bytes:
-        assert bgr.shape[:2] == (135, W), bgr.shape
-        src = np.concatenate([bgr, np.repeat(bgr[-1:], YCC_H - 135, axis=0)], axis=0)
-        y, co, cg, disp = self._channels(src)
-        self.last_display = disp[:135]
-        if self.gray:
-            y, co, cg = gray8(y), gray8(co), gray8(cg)
-        cur = tuple(np.ascontiguousarray(a, np.uint8) for a in (y, co, cg))
-        key = self.force_key or self.prev is None
-        self.force_key = False
-        prev = (None, None, None) if key else self.prev
-        out = np.empty(W * YCC_H * 4 + 1024, np.uint8)
-        ch = ctypes.c_int()
-        lib = _lib()
-        if not hasattr(lib, "bad16_encode_ycc"):
-            raise RuntimeError("bad_encode が古い (YCoCg 版が無い)。pc/native を作り直してください")
-        n = lib.bad16_encode_ycc(*(a.ctypes.data for a in cur),
-                                 *(None if a is None else a.ctypes.data for a in prev),
-                                 W, YCC_H, 1 if self.mode == "420" else 0, self.ny, self.nc,
-                                 out.ctypes.data, out.size, ctypes.byref(ch))
-        if n < 0:
-            raise RuntimeError("bad16_encode_ycc failed")
-        self.changed_blocks = ch.value
-        self.prev = cur
-        flags = (1 if key else 0) | (2 if self.gray else 0)
-        return b"B6\x05" + bytes([flags, YCC_MODES[self.mode], self.ny, self.nc]) + out[:n].tobytes()
 
 
 # ------------------------------------------------------------- インデックスカラー (ver 7) --
@@ -452,15 +328,15 @@ class IndexEncoder:
 
 
 # ------------------------------------------------------- 1 フレームまるごとのエントロピー符号 --
-# BadCodec の出力 ('B' '6' ...) を、さらにハフマン ('B' 'H') か tANS ('B' 'A') で小さくする。
+# BadCodec の出力 ('B' '6' ...) を、さらに tANS ('B' 'A') で小さくする (ハフマンは外した: tANS の方が小さく軽い)。
 # ESP32 は受け取りながら戻して、そのまま BadCodec の展開に渡す (firmware frame-stream-35 以降)。
-ENTROPY = {"huff": 11, "tans": 10}  # ハフマンの符号長の上限 / tANS の表の大きさ (2^10)
+ENTROPY = {"tans": 10}  # tANS の表の大きさ (2^10)
 
 
 def entropy_wrap(data: bytes, kind: str) -> bytes:
-    """kind: "huff" / "tans"。小さくならなかったら元のまま返す"""
+    """kind: "tans"。小さくならなかったら元のまま返す"""
     lib = _lib()
-    fn = {"huff": "bad_entropy_huff", "tans": "bad_entropy_tans"}[kind]
+    fn = {"tans": "bad_entropy_tans"}[kind]
     if not hasattr(lib, fn):
         raise RuntimeError("bad_encode が古い (エントロピー符号が無い)。pc/native を作り直してください")
     src = np.frombuffer(data, np.uint8)
@@ -469,20 +345,6 @@ def entropy_wrap(data: bytes, kind: str) -> bytes:
     if n < 0 or n >= len(data):
         return data
     return out[:n].tobytes()
-
-
-def parse_ycc(name: str):
-    """'YCoCg 420 Y6C5' / 'YCoCg 可逆' → (mode, ny, nc)。YCoCg でなければ None"""
-    import re
-
-    if not name.startswith("YCoCg"):
-        return None
-    if "可逆" in name or "lossless" in name:
-        return ("lossless", 6, 7)
-    m = re.search(r"(444|420)\s*Y(\d)\s*C(\d)", name)
-    if not m:
-        raise ValueError(f"YCoCg の形式: {name!r} (例 'YCoCg 420 Y6C5')")
-    return (m.group(1), int(m.group(2)), int(m.group(3)))
 
 
 # ------------------------------------------------------------- 参照デコーダ (テスト用) --

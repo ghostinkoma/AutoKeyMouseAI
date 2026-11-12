@@ -101,8 +101,8 @@ void handleFrame(uint32_t len) {
     ack('R');
     return;
   }
-  if (head[0] == 'B' && (head[1] == 'H' || head[1] == 'A')) {
-    // ハフマン / tANS で包んだ BadCodec (frame_stream.cpp と同じ)
+  if (head[0] == 'B' && head[1] == 'A') {
+    // tANS で包んだ BadCodec (frame_stream.cpp と同じ)
     ent::Dec& d = ent::dec();
     int res = ent::begin(d, head[1], readFn, &rd, len) ? display::drawBad16(ent::read, &d, d.outLeft, &rd.waitUs) : 0;
     discardRest(rd);

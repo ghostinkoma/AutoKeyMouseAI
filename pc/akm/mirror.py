@@ -68,7 +68,7 @@ class Mirror:
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
                  fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005,
                  pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5),
-                 ycc: tuple | None = None, entropy: str | None = None, palette: bool = False,
+                 entropy: str | None = None, palette: bool = False,
                  b16_gray: bool = False, link_factory=None):
         self.enabled = enabled and bool(host)
         self.url = None
@@ -103,9 +103,7 @@ class Mirror:
         # 色のビット数を 1 段ずつ下げて (面を減らして) 送り直し、最後は JPEG に戻す
         self._b16 = None
         self.b16_bits: tuple[int, int, int] = tuple(b16_bits)  # R, G, B のビット数 (5, 6, 5 = 可逆)
-        # YCoCg 版 (ver 5。frame-stream-34 以降): (mode, ny, nc)。指定すると bad16 の代わりに使う
-        self.ycc = tuple(ycc) if ycc else None
-        # BadCodec のフレームをさらに 1 フレームまるごと "huff" (ハフマン) / "tans" で包む (frame-stream-35 以降)
+        # BadCodec のフレームをさらに 1 フレームまるごと "tans" で包む (frame-stream-35 以降)
         self.entropy = entropy or None
         # インデックスカラー (256 色のパレットの番号 8 面。frame-stream-36 以降)
         self.palette = bool(palette)
@@ -283,9 +281,9 @@ class Mirror:
             data = self._encode_bc(frame)
         elif self.fmt == "bad16" and self.transport in ("tcp", "auto"):
             if self._b16 is None:
-                from .bad16 import Encoder, IndexEncoder, YccEncoder
+                from .bad16 import Encoder, IndexEncoder
 
-                self._b16 = (IndexEncoder() if self.palette else YccEncoder(*self.ycc) if self.ycc else
+                self._b16 = (IndexEncoder() if self.palette else
                              Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free, gray=self.b16_gray))
             data = self._b16.encode(frame)
             if self.entropy and data[:2] == b"B6":
@@ -398,15 +396,15 @@ class Mirror:
                     print("[mirror] 色を減らしたときのきれいな表示 (下位ビットの複製) には frame-stream-11 以降が必要です"
                           "(古いままだと暗めに表示されます)")
                 need = (10 if self.b16_gray else 9) if self.b16_prev_free else 7
-                if self.ycc:
-                    need = 34  # YCoCg 版 ver 5 (変わった 8x8 だけ)
                 if self.entropy:
-                    need = max(need, 35)  # ハフマン / tANS で包んだフレーム
+                    need = max(need, 35)  # tANS で包んだフレーム
                 if self.palette:
                     need = max(need, 36)  # インデックスカラー
+                if tuple(self.b16_bits) == (1, 1, 1) and self.b16_prev_free and not self.palette:
+                    need = max(need, 37)  # 白黒 1 面
                 if self.fmt == "bad16" and (not m or int(m.group(1)) < need):
-                    print(f"[mirror] BadCodec {'インデックスカラー' if self.palette else 'YCoCg 版' if self.ycc else '16bit 版'}"
-                          f"{'(前フレーム不要版)' if self.b16_prev_free and not self.ycc else ''}には "
+                    print(f"[mirror] BadCodec {'インデックスカラー' if self.palette else '16bit 版'}"
+                          f"{'(前フレーム不要版)' if self.b16_prev_free and not self.palette else ''}には "
                           f"frame-stream-{need} 以降が必要です。ファームウェアを書き込み直してください")
             else:
                 print("[mirror] ESP32 のファームウェアが古いです。画面が映らない場合は書き込み直してください (README 参照)")

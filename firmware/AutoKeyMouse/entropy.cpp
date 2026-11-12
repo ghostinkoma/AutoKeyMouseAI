@@ -12,15 +12,12 @@
 namespace ent {
 namespace {
 
-// 表 (ハフマンと tANS で共用。4KB)
-//   ハフマン: 2^maxLen 個 (最大 2048) の uint16 = 記号 | 符号長 << 8
-//   tANS    : 2^R 個 (最大 1024) の { 記号, nb, 次の状態の元 (u16) }
+// tANS の表: 2^R 個 (最大 1024) の { 記号, nb, 次の状態の元 (u16) }。4KB
 struct TEnt {
   uint8_t sym, nb;
   uint16_t base;
 };
-union Table {
-  uint16_t huff[2048];
+struct Table {
   TEnt tans[1024];
 };
 Table gTable;
@@ -84,32 +81,7 @@ bool begin(Dec& d, uint8_t kind, ReadFn rd, void* ctx, uint32_t len) {
   uint32_t used = 8;
   d.bitsMax = h[1];
   d.outLeft = h[2] | h[3] << 8 | h[4] << 16 | (uint32_t)h[5] << 24;
-  if (kind == 'H') {
-    int maxLen = d.bitsMax;
-    if (maxLen < 1 || maxLen > 11) return false;
-    uint8_t lens[128];
-    if (len < used + 128 || !rd(ctx, lens, 128)) return false;
-    used += 128;
-    // 正準ハフマン: 長さごとの数 → 最初の符号 → 表 (上位 maxLen ビットで引く)
-    int bl[16] = {0};
-    for (int s = 0; s < 256; s++) bl[(lens[s >> 1] >> ((s & 1) * 4)) & 15]++;
-    bl[0] = 0;
-    uint32_t next[16], code = 0;
-    for (int l = 1; l <= 15; l++) {
-      code = (code + bl[l - 1]) << 1;
-      next[l] = code;
-    }
-    memset(gTable.huff, 0, sizeof(gTable.huff));
-    for (int s = 0; s < 256; s++) {
-      int l = (lens[s >> 1] >> ((s & 1) * 4)) & 15;
-      if (!l) continue;
-      if (l > maxLen) return false;
-      uint32_t c = next[l]++;
-      uint32_t first = c << (maxLen - l), cnt = 1u << (maxLen - l);
-      if (first + cnt > (1u << maxLen)) return false;
-      for (uint32_t i = 0; i < cnt; i++) gTable.huff[first + i] = (uint16_t)(s | l << 8);
-    }
-  } else if (kind == 'A') {
+  if (kind == 'A') {
     int R = d.bitsMax;
     if (R < 6 || R > 10) return false;
     int L = 1 << R;
@@ -161,16 +133,7 @@ ENT_IRAM bool read(void* ctx, uint8_t* dst, size_t n) {
   Dec& d = *(Dec*)ctx;
   if (n > d.outLeft || d.err) return false;
   d.outLeft -= (uint32_t)n;
-  if (d.kind == 'H') {
-    const int maxLen = d.bitsMax;
-    const uint32_t mask = (1u << maxLen) - 1;
-    for (size_t i = 0; i < n; i++) {
-      if (!fill(d, maxLen)) return d.err = true, false;
-      uint16_t e = gTable.huff[(d.acc >> (d.bits - maxLen)) & mask];
-      dst[i] = (uint8_t)e;
-      d.bits -= e >> 8;
-    }
-  } else {
+  {
     for (size_t i = 0; i < n; i++) {
       const TEnt& t = gTable.tans[d.state];
       dst[i] = t.sym;
