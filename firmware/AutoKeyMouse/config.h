@@ -12,9 +12,9 @@
 #define AKM_MIRROR_ONLY 0
 #endif
 #if AKM_MIRROR_ONLY
-#define FW_VERSION "frame-stream-41-mirror"
+#define FW_VERSION "frame-stream-42-mirror"
 #else
-#define FW_VERSION "frame-stream-41"
+#define FW_VERSION "frame-stream-42"
 #endif
 #define BLE_MANUFACTURER "ghostinkoma"
 

@@ -222,8 +222,6 @@ mirror:
   gray: false              # true: 各色を Gray 符号にして送る (可逆のまま 1 割強小さい。firmware frame-stream-10 以降)
   with_prev: false         # true: 面ごとのフレーム (少し小さいが ESP32 に面の数 x 4KB 要る。S3 + PSRAM 向け)
   quality: 70              # JPEG 画質 (1-100)
-  jpeg_mode: split         # JPEG の 2 コアの使い方: split = 上下 2 つに分けて同時に展開 (既定・速い) /
-                           #   oddeven = 奇数・偶数のフレームでコアを分ける (frame-stream-41〜。Wi-Fi と取り合い遅い)
   transport: auto          # tcp = 専用ポートに接続しっぱなし (速い) / http = 1 枚ずつ POST / auto = tcp を試して http
   port: 5005
 

@@ -48,15 +48,6 @@ constexpr size_t FRAME_BUF_SIZE = 24 * 1024;
 uint8_t* acquireFrameBuffer(uint32_t waitMs);
 void releaseFrameBuffer();
 
-// JPEG を奇数・偶数のフレームで 2 つのコアに分けて展開・描画する (frame-stream-41)。
-// 受信の前に acquireJpegBuffer で置き場をもらい (async = コア 0 が受け持つ番)、受け取ったら submitJpeg に渡す
-// (async ならすぐ戻り、置き場はコア 0 が描き終えたら返す)。受け取れなかったら cancelJpegBuffer。
-// JPEG 以外 (BadCodec など) を描く前は drainJpeg で、コア 0 が描き終えるのを待つ
-uint8_t* acquireJpegBuffer(uint32_t waitMs, bool* async);
-bool submitJpeg(uint8_t* buf, size_t len, bool async);
-void cancelJpegBuffer(bool async);
-void drainJpeg();
-
 // RGB565 BE を受信しながらそのまま液晶へ流す (64,800 バイトのバッファを確保しなくて済む)
 bool rawBegin();
 bool rawWrite(const uint8_t* data, size_t len);  // 画素数を超えたら false

@@ -10,6 +10,7 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 #include <esp_rom_gpio.h>
+#include <soc/gpio_struct.h>
 #include <soc/spi_periph.h>
 
 #include "akm_tjpgd.h"
@@ -66,12 +67,10 @@ uint32_t gSpiHz = 40000000;  // 今の液晶の SPI クロック (setSpiHz)
 // spi_master を別の SPI (HSPI) で使い、同じピン (SCLK / MOSI) をそちらへつなぎ替える。CS / DC は今まで通り GPIO。
 //   * 同じ行の続いたブロックを 1 本の帯にまとめて 1 回で送る (範囲指定の命令の回数を減らす)
 //   * 帯を 2 本交互に使い、1 本を DMA で送っている間に CPU は次の帯を組み立てる (展開と描画を重ねる)
+//   * 範囲の指定 (命令 + データ x 2、書き込み命令) も画素と一緒に 6 つの送信としてキューに積み、CPU は待たずに
+//     次の展開へ戻る (frame-stream-42)。DC ピン (命令 / データ) は送信ごとに SPI の割り込み (pre_cb) が切り替える。
+//     前は範囲の指定を 1 つずつ送り終わるまで待ち、前の帯の DMA が終わるまで次の帯を積めなかった
 // 状態画面・JPEG などを Adafruit で描くときは dmaEnd() で VSPI に戻す (TftLock が自動で行う)。
-// 奇数・偶数のフレームを 2 つのコアで (frame-stream-41): コア 0 が前のフレームを描いている間に、コア 1 が次のフレームを
-// 描くことがある。液晶の同じ列を古いフレームで上書きしないよう、新しいフレームは「古いフレームが描き終えた列」より
-// 下を描くときは追いつくまで待つ
-volatile bool gAsyncActive = false;  // コア 0 がフレームを展開・描画中
-volatile int gAsyncNextY = 0;        // コア 0 のフレームが描き終えた列の下端 (この行より上は描き終わった)
 bool gDmaOn = TFT_DMA;          // 使うか (シリアルの tft dma on / off)
 bool gDmaActive = false;        // 今 HSPI につなぎ替えてある
 // HSPI のドライバー (DMA の記述子など) は最初に 1 回だけ用意して、使い終わっても返さない。
@@ -79,39 +78,78 @@ bool gDmaActive = false;        // 今 HSPI につなぎ替えてある
 bool gDmaReady = false;
 spi_device_handle_t gDmaDev = nullptr;
 uint32_t gDmaHz = 0;
-bool gDmaPending = false;       // 送信中の DMA がある
-spi_transaction_t gDmaTrans[2];
+// 送信の数 (積んだ / 終わったのを受け取った)。送信はキューの順に終わるので、番号で「ここまで終わった」が分かる
+uint32_t gDmaQueued = 0, gDmaDone = 0;
+constexpr int kDmaQueue = 16;  // キューに同時に積める送信の数 (範囲指定つきの描画 2 つ半)
+// 1 回の描画 = 範囲の命令 + データ (列・行)、書き込み命令、画素 の 6 つの送信。送り終わるまで中身を変えない
+struct DmaWin {
+  spi_transaction_t t[6];
+};
+DmaWin gWin[2];             // BadCodec の帯 (2 本) ごと
+uint32_t gSlotSeq[2] = {0, 0};  // 帯の画素の送信の番号 (これが終われば帯を書き換えてよい)
 int gDmaCur = 0;                // 今組み立てている帯 (0 / 1)
 int gRunX = -1, gRunY = 0, gRunW = 0, gRunRows = 0;  // 組み立て中の帯 (x < 0 = 無し)
 constexpr int kStrip = 240 * 8;  // 帯 1 本の画素数 (gFrameBuf の前半 / 後半)
 
 uint16_t* dmaBuf(int i) { return (uint16_t*)gFrameBuf + i * kStrip; }
 
-void dmaWait() {
-  if (!gDmaPending) return;
-  spi_transaction_t* r = nullptr;
-  spi_device_get_trans_result(gDmaDev, &r, portMAX_DELAY);
-  gDmaPending = false;
-}
-
-void dmaSend(const uint8_t* d, int n) {  // 短い送信 (命令・範囲)。DMA の送信が終わってから呼ぶ
-  spi_transaction_t t = {};
-  t.length = 8 * n;
-  if (n <= 4) {
-    t.flags = SPI_TRANS_USE_TXDATA;
-    memcpy(t.tx_data, d, n);
+// 送信の直前に (割り込みで) DC ピンを決める。t->user = 0: 命令 / 1: データ
+IRAM_ATTR void dmaPreCb(spi_transaction_t* t) {
+  const uint32_t pin = TFT_PIN_DC;
+  const bool data = (intptr_t)t->user != 0;
+  if (pin < 32) {
+    if (data) GPIO.out_w1ts = 1u << pin;
+    else GPIO.out_w1tc = 1u << pin;
   } else {
-    t.tx_buffer = d;
+    if (data) GPIO.out1_w1ts.val = 1u << (pin - 32);
+    else GPIO.out1_w1tc.val = 1u << (pin - 32);
   }
-  spi_device_polling_transmit(gDmaDev, &t);
 }
 
-void dmaCmd(uint8_t c, uint16_t a, uint16_t b) {
-  digitalWrite(TFT_PIN_DC, LOW);
-  dmaSend(&c, 1);
-  digitalWrite(TFT_PIN_DC, HIGH);
-  const uint8_t d[4] = {(uint8_t)(a >> 8), (uint8_t)a, (uint8_t)(b >> 8), (uint8_t)b};
-  dmaSend(d, 4);
+// seq 番目の送信まで終わるのを待つ
+IRAM_ATTR void dmaWaitUntil(uint32_t seq) {
+  while ((int32_t)(seq - gDmaDone) > 0) {
+    spi_transaction_t* r = nullptr;
+    spi_device_get_trans_result(gDmaDev, &r, portMAX_DELAY);
+    gDmaDone++;
+  }
+}
+
+void dmaWait() { dmaWaitUntil(gDmaQueued); }  // 積んだ送信がすべて終わるまで
+
+// 範囲を指定して画素を送る 6 つの送信を積む (待たない)。画素の送信の番号を返す。
+// w の中身と px は、返した番号が終わるまで変えないこと
+IRAM_ATTR uint32_t dmaQueueWindow(DmaWin& w, int x, int y, int ww, int h, const uint16_t* px) {
+  dmaWaitUntil(gDmaQueued - (kDmaQueue - 6));  // キューの空きを作る (積みすぎると積む側が止まる)
+  int xx = x + gTft.xStart(), yy = y + gTft.yStart();
+  const uint16_t a[2][2] = {{(uint16_t)xx, (uint16_t)(xx + ww - 1)}, {(uint16_t)yy, (uint16_t)(yy + h - 1)}};
+  const uint8_t cmd[3] = {ST77XX_CASET, ST77XX_RASET, ST77XX_RAMWR};
+  for (int i = 0; i < 6; i++) w.t[i] = {};
+  for (int k = 0; k < 2; k++) {
+    spi_transaction_t& c = w.t[2 * k];
+    c.flags = SPI_TRANS_USE_TXDATA;
+    c.length = 8;
+    c.tx_data[0] = cmd[k];
+    c.user = (void*)0;
+    spi_transaction_t& d = w.t[2 * k + 1];
+    d.flags = SPI_TRANS_USE_TXDATA;
+    d.length = 32;
+    d.tx_data[0] = a[k][0] >> 8;
+    d.tx_data[1] = a[k][0] & 0xFF;
+    d.tx_data[2] = a[k][1] >> 8;
+    d.tx_data[3] = a[k][1] & 0xFF;
+    d.user = (void*)1;
+  }
+  w.t[4].flags = SPI_TRANS_USE_TXDATA;
+  w.t[4].length = 8;
+  w.t[4].tx_data[0] = cmd[2];
+  w.t[4].user = (void*)0;
+  w.t[5].length = 16 * ww * h;
+  w.t[5].tx_buffer = px;
+  w.t[5].user = (void*)1;
+  for (int i = 0; i < 6; i++) spi_device_queue_trans(gDmaDev, &w.t[i], portMAX_DELAY);
+  gDmaQueued += 6;
+  return gDmaQueued;
 }
 
 // HSPI の液晶用の設定 (速さ) を作る。80MHz を受け付けなければ 40MHz で
@@ -119,7 +157,8 @@ esp_err_t dmaAddDevice() {
   spi_device_interface_config_t dc = {};
   dc.mode = 3;
   dc.spics_io_num = -1;  // CS は GPIO で持つ
-  dc.queue_size = 2;
+  dc.queue_size = kDmaQueue;
+  dc.pre_cb = dmaPreCb;  // DC (命令 / データ) は送信ごとに割り込みで
   dc.flags = SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_NO_DUMMY;
   dc.clock_speed_hz = (int)gSpiHz;
   esp_err_t e = spi_bus_add_device(SPI2_HOST, &dc, &gDmaDev);
@@ -179,27 +218,14 @@ bool dmaBegin() {
   return true;
 }
 
-// 組み立てた帯を送る (前の帯の DMA が終わるのを待ってから)
-void dmaFlush() {
+// 組み立てた帯を送る (キューに積むだけ。前の帯の DMA を待たない)
+IRAM_ATTR void dmaFlush() {
   if (gRunX < 0) return;
   uint16_t* buf = dmaBuf(gDmaCur);
   if (gRunW < 240) {  // 1 行 240 画素の間隔で置いたので、帯の幅に詰める
     for (int r = 1; r < gRunRows; r++) memmove(buf + r * gRunW, buf + r * 240, gRunW * 2);
   }
-  dmaWait();
-  int x = gRunX + gTft.xStart(), y = gRunY + gTft.yStart();
-  dmaCmd(ST77XX_CASET, x, x + gRunW - 1);
-  dmaCmd(ST77XX_RASET, y, y + gRunRows - 1);
-  digitalWrite(TFT_PIN_DC, LOW);
-  const uint8_t ramwr = ST77XX_RAMWR;
-  dmaSend(&ramwr, 1);
-  digitalWrite(TFT_PIN_DC, HIGH);
-  spi_transaction_t& t = gDmaTrans[gDmaCur];
-  t = {};
-  t.length = 16 * gRunW * gRunRows;
-  t.tx_buffer = buf;
-  spi_device_queue_trans(gDmaDev, &t, portMAX_DELAY);
-  gDmaPending = true;
+  gSlotSeq[gDmaCur] = dmaQueueWindow(gWin[gDmaCur], gRunX, gRunY, gRunW, gRunRows, buf);  // 積むだけ (待たない)
   gDmaCur ^= 1;
   gRunX = -1;
 }
@@ -226,7 +252,8 @@ __attribute__((noinline)) IRAM_ATTR int decodeAbsDma(const bad16::Header& h, Rea
 
 IRAM_ATTR void dmaBlock(int x, int y, int rows, const uint16_t* px) {
   if (gRunX >= 0 && (y != gRunY || x != gRunX + gRunW || rows != gRunRows)) dmaFlush();
-  if (gRunX < 0) {
+  if (gRunX < 0) {  // 新しい帯: この帯 (2 つ前に送ったもの) を送り終えてから書き換える
+    dmaWaitUntil(gSlotSeq[gDmaCur]);
     gRunX = x;
     gRunY = y;
     gRunW = 0;
@@ -240,7 +267,6 @@ IRAM_ATTR void dmaBlock(int x, int y, int rows, const uint16_t* px) {
 
 void dmaEnd() {
   if (!gDmaActive) return;
-  while (gAsyncActive) vTaskDelay(1);  // コア 0 が JPEG を描いている間は液晶を渡さない
   dmaFlush();
   dmaWait();
   digitalWrite(TFT_PIN_CS, HIGH);
@@ -411,33 +437,15 @@ SemaphoreHandle_t gSpiMx = nullptr;
 constexpr int kJpegRow = FRAME_W * 16;  // 帯 1 本の画素数 (MCU 1 列)
 struct JpegOut {
   uint16_t* strip;      // 帯 (DMA に使えるメモリ。液晶のバイト順)。取れなければ nullptr = MCU ごとに送る
-  spi_transaction_t tr;
+  DmaWin win;           // 帯の送信 (範囲指定 + 画素)
+  uint32_t seq;         // 帯の画素の送信の番号 (これが終われば帯を書き換えてよい)
   int rowY, rowH, rowW;  // 組み立て中の列 (rowW = 0: まだ無い)
   uint32_t drawUs;      // このコアが液晶へ送るのに使った時間
   alignas(4) uint16_t mcu[2][16 * 16];  // 帯が無いとき: MCU 1 つずつ交互に
-  spi_transaction_t mtr[2];
+  DmaWin mwin[2];
+  uint32_t mseq[2];
   int cur;
 };
-JpegOut* gDmaOwner = nullptr;  // 今 DMA で送っている帯の持ち主
-JpegOut gJobOut;                     // コア 0 の出力 (下で使う)
-
-// 範囲を指定して DMA を始める (gSpiMx を持って呼ぶ。前の DMA は待つ)
-IRAM_ATTR void jpegQueue(JpegOut* o, spi_transaction_t& t, const uint16_t* d, int x, int y, int w, int h) {
-  dmaWait();
-  int xx = x + gTft.xStart(), yy = y + gTft.yStart();
-  dmaCmd(ST77XX_CASET, xx, xx + w - 1);
-  dmaCmd(ST77XX_RASET, yy, yy + h - 1);
-  digitalWrite(TFT_PIN_DC, LOW);
-  const uint8_t ramwr = ST77XX_RAMWR;
-  dmaSend(&ramwr, 1);
-  digitalWrite(TFT_PIN_DC, HIGH);
-  t = {};
-  t.length = 16 * w * h;
-  t.tx_buffer = d;
-  spi_device_queue_trans(gDmaDev, &t, portMAX_DELAY);
-  gDmaPending = true;
-  gDmaOwner = o;
-}
 
 IRAM_ATTR int jpegOutDma(JDEC* jd, void* bitmap, JRECT* r) {
   JpegSrc* src = (JpegSrc*)jd->device;
@@ -451,9 +459,9 @@ IRAM_ATTR int jpegOutDma(JDEC* jd, void* bitmap, JRECT* r) {
   uint32_t t0 = micros();
   if (o.strip) {
     if (o.rowW == 0) {  // 新しい列: 前の列をまだ DMA で送っていたら待つ (帯を書き換えるので)
-      if (gDmaOwner == &o && gDmaPending) {
+      if ((int32_t)(o.seq - gDmaDone) > 0) {
         xSemaphoreTake(gSpiMx, portMAX_DELAY);
-        if (gDmaOwner == &o) dmaWait();
+        dmaWaitUntil(o.seq);
         xSemaphoreGive(gSpiMx);
       }
       o.rowY = y;
@@ -469,25 +477,22 @@ IRAM_ATTR int jpegOutDma(JDEC* jd, void* bitmap, JRECT* r) {
       int w = o.rowW > FRAME_W ? FRAME_W : o.rowW;
       if (w < FRAME_W)  // 幅が 240 より狭い JPEG: 帯を詰める
         for (int j = 1; j < o.rowH; j++) memmove(o.strip + j * w, o.strip + j * FRAME_W, w * 2);
-      if (&o != &gJobOut)  // 新しいフレーム: 古いフレーム (コア 0) がこの列を描き終えるまで待つ
-        while (gAsyncActive && gAsyncNextY < o.rowY + o.rowH) esp_rom_delay_us(20);
       xSemaphoreTake(gSpiMx, portMAX_DELAY);
-      jpegQueue(&o, o.tr, o.strip, 0, o.rowY, w, o.rowH);
+      o.seq = dmaQueueWindow(o.win, 0, o.rowY, w, o.rowH, o.strip);
       xSemaphoreGive(gSpiMx);
-      if (&o == &gJobOut) gAsyncNextY = o.rowY + o.rowH;
       o.rowW = 0;
     }
   } else {  // 帯が取れなかった: MCU ごとに
-    if (&o != &gJobOut)
-      while (gAsyncActive && gAsyncNextY < y + bh) esp_rom_delay_us(20);
     uint16_t* d = o.mcu[o.cur];
     int n = bw * bh;
+    xSemaphoreTake(gSpiMx, portMAX_DELAY);
+    dmaWaitUntil(o.mseq[o.cur]);  // この置き場 (2 つ前の MCU) を送り終えてから書き換える
+    xSemaphoreGive(gSpiMx);
     for (int i = 0; i < n; i++) d[i] = __builtin_bswap16(px[i]);
     xSemaphoreTake(gSpiMx, portMAX_DELAY);
-    jpegQueue(&o, o.mtr[o.cur], d, r->left, y, bw, bh);
+    o.mseq[o.cur] = dmaQueueWindow(o.mwin[o.cur], r->left, y, bw, bh, d);
     xSemaphoreGive(gSpiMx);
-    if (&o == &gJobOut && r->left + bw >= (int)jd->width) gAsyncNextY = y + bh;
-    o.cur ^= 1;  // もう片方の置き場は、DMA が同時に 1 つだけなので必ず送り終わっている
+    o.cur ^= 1;
   }
   o.drawUs += micros() - t0;
   return 1;
@@ -515,38 +520,25 @@ bool decodeJpegPart(const uint8_t* data, size_t len, int y0, uint32_t* work, siz
 uint32_t gJpegWork[TJPGD_WORKSPACE_SIZE / 4 + 1];  // このタスク (コア 1) 用
 JpegOut gJpegOut;
 
-// 作業タスク (コア 0): 'B' 'J' の下半分、または奇数番目のフレーム全体 (async) を展開する
+// 作業タスク (コア 0): 下半分の JPEG を展開する
 struct JpegJob {
   const uint8_t* data;
   size_t len;
   int y0;
   bool ok;
-  bool async;  // true: フレーム全体。終わったら統計に足し、置き場 (gJpegBuf2) を返す (gJobIdle)
 };
 JpegJob gJob;
+JpegOut gJobOut;
 SemaphoreHandle_t gJobGo = nullptr, gJobDone = nullptr;
-SemaphoreHandle_t gJobIdle = nullptr;  // 作業タスクが空いている (奇数番目のフレームの置き場も空いている)
 TaskHandle_t gJobTask = nullptr;
-uint8_t* gJpegBuf2 = nullptr;  // 奇数番目のフレームの置き場 (ミラー専用のビルドだけ。無ければ 1 つのコアで)
-uint32_t gJpegSeq = 0;         // 受け取った JPEG の数 (奇数 = コア 0)
-void noteShown(uint32_t totalUs, uint32_t drawUs, bool ok);  // 下で定義
 
 void jpegWorker(void*) {
   static uint32_t work[TJPGD_WORKSPACE_SIZE / 4 + 1];
   for (;;) {
     xSemaphoreTake(gJobGo, portMAX_DELAY);
     gJobOut.drawUs = 0;
-    gJobOut.rowW = 0;
-    uint32_t t0 = micros();
     gJob.ok = decodeJpegPart(gJob.data, gJob.len, gJob.y0, work, sizeof(work), &gJobOut);
-    if (gJob.async) {
-      gAsyncNextY = 1 << 15;  // 全部描いた (新しいフレームは待たなくてよい)
-      gAsyncActive = false;
-      noteShown(micros() - t0, gJobOut.drawUs, gJob.ok);
-      xSemaphoreGive(gJobIdle);
-    } else {
-      xSemaphoreGive(gJobDone);
-    }
+    xSemaphoreGive(gJobDone);
   }
 }
 
@@ -555,20 +547,13 @@ void startJpegWorker() {
   gSpiMx = xSemaphoreCreateMutex();
   gJobGo = xSemaphoreCreateBinary();
   gJobDone = xSemaphoreCreateBinary();
-  gJobIdle = xSemaphoreCreateBinary();
-  if (gJobIdle) xSemaphoreGive(gJobIdle);
-#if AKM_MIRROR_ONLY
-  // 奇数番目のフレームの置き場 (24KB)。BLE 入りのビルドはメモリに余裕が無いので、1 つのコアで描く
-  gJpegBuf2 = (uint8_t*)heap_caps_malloc(FRAME_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-#endif
   for (JpegOut* o : {&gJpegOut, &gJobOut}) {  // 帯 (MCU 1 列) を 2 本。取れなければ MCU ごとに送る
     o->strip = (uint16_t*)heap_caps_malloc(kJpegRow * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     o->rowW = 0;
   }
-  Serial.printf("[TFT] JPEG strips %s, odd/even frames on 2 cores %s (free heap %u)\n",
-                gJpegOut.strip && gJobOut.strip ? "ok" : "missing", gJpegBuf2 ? "on" : "off",
+  Serial.printf("[TFT] JPEG strips %s (free heap %u)\n", gJpegOut.strip && gJobOut.strip ? "ok" : "missing",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
-  if (!gSpiMx || !gJobGo || !gJobDone || !gJobIdle ||
+  if (!gSpiMx || !gJobGo || !gJobDone ||
       xTaskCreatePinnedToCore(jpegWorker, "jpeg1", 4096, nullptr, 2, &gJobTask, 0) != pdPASS) {
     gJobTask = nullptr;
     Serial.println("[TFT] JPEG worker (core 0) could not start: one core only");
@@ -624,15 +609,13 @@ bool drawJpegAny(const uint8_t* data, size_t len) {
   gJpegOut.rowW = gJobOut.rowW = 0;
   bool two = n == 2 && gJobTask;
   if (two) {
-    xSemaphoreTake(gJobIdle, portMAX_DELAY);  // 前の奇数番目のフレームを描き終えてから
-    gJob = {parts[1].data, parts[1].len, parts[1].y0, false, false};
+    gJob = {parts[1].data, parts[1].len, parts[1].y0, false};
     xSemaphoreGive(gJobGo);  // 下半分はコア 0 で
   }
   bool ok = decodeJpegPart(parts[0].data, parts[0].len, parts[0].y0, gJpegWork, sizeof(gJpegWork), &gJpegOut);
   uint32_t draw = gJpegOut.drawUs;
   if (two) {
     xSemaphoreTake(gJobDone, portMAX_DELAY);
-    xSemaphoreGive(gJobIdle);
     ok = ok && gJob.ok;
     if (gJobOut.drawUs > draw) draw = gJobOut.drawUs;
   } else if (n == 2) {  // 作業タスクが無い: このコアで続けて
@@ -677,77 +660,16 @@ bool showFrame(const uint8_t* data, size_t len) {
   }
   uint32_t total = micros() - t0;
   if (!jpeg) gDrawUsFrame = total;
-  noteShown(total, gDrawUsFrame, ok);
-  return ok;
-}
-
-namespace {
-portMUX_TYPE gStatMux = portMUX_INITIALIZER_UNLOCKED;
-// 1 フレーム描いた: 統計に足す (2 つのコアから呼ばれる)。展開・描画の時間はフレームごと (コア 2 つ分の合計)
-void noteShown(uint32_t totalUs, uint32_t drawUs, bool ok) {
-  portENTER_CRITICAL(&gStatMux);
   rollStats();
-  gCur.drawUs += drawUs;
-  gCur.decodeUs += totalUs > drawUs ? totalUs - drawUs : 0;
+  gCur.drawUs += gDrawUsFrame;
+  gCur.decodeUs += total > gDrawUsFrame ? total - gDrawUsFrame : 0;
   if (ok) {
     gLastFrame = millis();
     gFrameShown = true;
     ++gFrames;
     gNeedKey = false;  // JPEG は全面を描くのでキーフレームと同じ
   }
-  portEXIT_CRITICAL(&gStatMux);
-}
-}  // namespace
-
-// ---- 奇数・偶数のフレームを 2 つのコアで (frame-stream-41) ------------------------------------
-// 偶数番目: 受信タスク (コア 1) がその場で展開・描画 (置き場 = 共用バッファ)。
-// 奇数番目: 作業タスク (コア 0) に渡してすぐ戻る (置き場 = gJpegBuf2)。受信タスクはその間に次のフレームを受け取る。
-uint8_t* acquireJpegBuffer(uint32_t waitMs, bool* async) {
-  *async = false;
-  if (gJpegBuf2 && gJobTask && (gJpegSeq & 1)) {
-    if (xSemaphoreTake(gJobIdle, pdMS_TO_TICKS(waitMs)) != pdTRUE) return nullptr;
-    *async = true;
-    return gJpegBuf2;
-  }
-  return acquireFrameBuffer(waitMs);
-}
-
-void cancelJpegBuffer(bool async) {
-  if (async) xSemaphoreGive(gJobIdle);
-  else releaseFrameBuffer();
-}
-
-bool submitJpeg(uint8_t* buf, size_t len, bool async) {
-  gJpegSeq++;
-  if (async) {
-    bool jpeg = len > 2 && buf[0] == 0xFF && buf[1] == 0xD8;
-    bool dma = false;
-    if (jpeg) {
-      TftLock lock(true);
-      dma = gDmaOn && gSpiMx && dmaBegin();
-      if (dma) {
-        gRunX = -1;
-        gAsyncNextY = 0;
-        gAsyncActive = true;
-        gJob = {buf, len, 0, false, true};
-        xSemaphoreGive(gJobGo);  // コア 0 で展開・描画。置き場はコア 0 が返す
-        return true;
-      }
-    }
-    // DMA が使えない / 'B' 'J': この場で描く。'B' 'J' は作業タスクに下半分を頼むので、先に空きを返す
-    // (gJpegBuf2 はこのあと奇数番目まで使われない)
-    xSemaphoreGive(gJobIdle);
-    return showFrame(buf, len);
-  }
-  bool ok = showFrame(buf, len);
-  releaseFrameBuffer();
   return ok;
-}
-
-void drainJpeg() {
-  if (!gJobIdle || !gAsyncActive) return;
-  xSemaphoreTake(gJobIdle, portMAX_DELAY);  // コア 0 のフレームを描き終えるまで
-  xSemaphoreGive(gJobIdle);
 }
 
 uint32_t framesShown() { return gFrames; }
@@ -1162,13 +1084,6 @@ void releaseBad16() {}
 bool needKeyframe() { return false; }
 void requestKeyframe() {}
 uint8_t* acquireFrameBuffer(uint32_t) { return nullptr; }
-uint8_t* acquireJpegBuffer(uint32_t, bool* async) {
-  *async = false;
-  return nullptr;
-}
-bool submitJpeg(uint8_t*, size_t, bool) { return false; }
-void cancelJpegBuffer(bool) {}
-void drainJpeg() {}
 void releaseFrameBuffer() {}
 String frameStatsJson() { return "{}"; }
 String frameStatsLine() { return "no display"; }

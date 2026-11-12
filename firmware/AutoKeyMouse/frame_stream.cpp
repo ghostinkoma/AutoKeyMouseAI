@@ -137,7 +137,6 @@ void task(void*) {
       continue;
     }
     if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6' || head[1] == 'A')) {
-      display::drainJpeg();  // コア 0 がまだ JPEG を描いていたら終わるまで待つ
       // 受信しながら描く (フレームバッファ不要)。描き終わったら返事:
       //   'K' = OK / 'R' = 次はキーフレームが欲しい / 'E' = この形式は使えない (メモリ不足。PC は JPEG に戻す)
       Pre pre{&rd, {head[0], head[1]}, 0};
@@ -175,9 +174,7 @@ void task(void*) {
       continue;
     }
     display::releaseBad16();  // JPEG に戻った: 共用バッファを返してもらう
-    // 奇数番目のフレームはコア 0 が展開・描画する (async)。その間にこのタスクは次のフレームを受け取る
-    bool async = false;
-    uint8_t* buf = display::acquireJpegBuffer(1000, &async);
+    uint8_t* buf = display::acquireFrameBuffer(1000);
     if (!buf) {
       client.stop();
       continue;
@@ -186,13 +183,14 @@ void task(void*) {
     buf[0] = head[0];
     buf[1] = head[1];
     if (!readFn(&rd, buf + 2, len - 2)) {
-      display::cancelJpegBuffer(async);
+      display::releaseFrameBuffer();
       client.stop();
       continue;
     }
     display::noteReceive(micros() - t0, len);
     client.write((uint8_t)'K');  // 受信完了。PC はすぐ次を送ってよい (展開と次の受信が重なる)
-    if (!display::submitJpeg(buf, len, async)) Serial.println("[STREAM] frame decode failed");
+    if (!display::showFrame(buf, len)) Serial.println("[STREAM] frame decode failed");
+    display::releaseFrameBuffer();
   }
 }
 

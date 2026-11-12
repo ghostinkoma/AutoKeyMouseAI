@@ -102,7 +102,6 @@ void handleFrame(uint32_t len) {
     return;
   }
   if (head[0] == 'B' && head[1] == 'A') {
-    display::drainJpeg();
     // tANS で包んだ BadCodec (frame_stream.cpp と同じ)
     ent::Dec& d = ent::dec();
     int res = ent::begin(d, head[1], readFn, &rd, len) ? display::drawBad16(ent::read, &d, d.outLeft, &rd.waitUs) : 0;
@@ -116,7 +115,6 @@ void handleFrame(uint32_t len) {
     return;
   }
   if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6')) {
-    display::drainJpeg();
     struct Pre {
       Reader* r;
       uint8_t h[2];
@@ -148,8 +146,7 @@ void handleFrame(uint32_t len) {
     return;
   }
   display::releaseBad16();
-  bool async = false;
-  uint8_t* buf = display::acquireJpegBuffer(1000, &async);
+  uint8_t* buf = display::acquireFrameBuffer(1000);
   if (!buf) {
     discardRest(rd);
     ack('K');
@@ -161,8 +158,8 @@ void handleFrame(uint32_t len) {
   bool ok = readFn(&rd, buf + 2, len - 2);
   if (ok) display::noteReceive(micros() - t0, len);
   ack('K');  // 受け取った: PC は次を送ってよい (展開と次の受信が重なる)
-  if (!ok) display::cancelJpegBuffer(async);
-  else if (!display::submitJpeg(buf, len, async)) Serial.println("[STREAM] frame decode failed");
+  if (ok && !display::showFrame(buf, len)) Serial.println("[STREAM] frame decode failed");
+  display::releaseFrameBuffer();
 }
 
 }  // namespace

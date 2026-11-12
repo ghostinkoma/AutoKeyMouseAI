@@ -82,7 +82,7 @@ class Mirror:
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
                  fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005,
                  pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5),
-                 entropy: str | None = None, palette: bool = False, jpeg_mode: str = "split",
+                 entropy: str | None = None, palette: bool = False,
                  b16_gray: bool = False, link_factory=None):
         self.enabled = enabled and bool(host)
         self.url = None
@@ -140,10 +140,6 @@ class Mirror:
         self.errors = 0
         self.jpeg_errors = 0
         self.jpeg_split = False  # JPEG を上下 2 つに分けて送る (ESP32 が frame-stream-39 以降なら True にする)
-        # JPEG の 2 コアの使い方: "split" (既定) = 上下 2 つに分けて同時に展開 /
-        # "oddeven" = 1 枚のまま、奇数・偶数のフレームでコアを分ける (frame-stream-41 以降。コア 0 が Wi-Fi と
-        # 取り合って受信が遅れ、実測では split より遅く見た目も悪かった)
-        self.jpeg_mode = jpeg_mode if jpeg_mode in ("split", "oddeven") else "split"
         self.bytes_sent = 0   # 送れたバイト数の合計 (平均の計算用)
         self.fails = 0        # 送れなかった回数の合計
         # 計測 (直近の平均, ms)
@@ -406,13 +402,12 @@ class Mirror:
 
                 m = re.match(r"frame-stream-(\d+)", fw)
                 ver = int(m.group(1)) if m else 0
-                # 39〜40: 上下 2 つに分けて 2 つのコアで展開 / 41 以降: 1 枚のまま、奇数・偶数のフレームでコアを分ける
-                self.jpeg_split = (ver >= 39 and self.transport in ("tcp", "auto")
-                                   and not (self.jpeg_mode == "oddeven" and ver >= 41))
+                # 39 以降: 上下 2 つに分けて 2 つのコアで展開 (奇数・偶数のフレームでコアを分ける方式は、
+                # コア 0 が Wi-Fi と取り合って遅く見た目も悪かったので外した)
+                self.jpeg_split = ver >= 39 and self.transport in ("tcp", "auto")
                 if self.fmt == "jpeg":
                     print("[mirror] JPEG: " + ("上下 2 つに分けて送ります (ESP32 の 2 つのコアで展開)" if self.jpeg_split
-                                               else "1 枚で送ります (奇数・偶数のフレームを ESP32 の 2 つのコアで展開)"
-                                               if ver >= 41 else "1 枚で送ります (2 コアでの展開は frame-stream-39 以降)"))
+                                               else "1 枚で送ります (2 コアでの展開は frame-stream-39 以降)"))
                 if self.fmt == "bad16" and self.b16_gray and ver < 10:
                     # 古いファームウェアは Gray 符号を戻せず色が崩れるので、Gray 符号なしで送る
                     print("[mirror] Gray 符号には frame-stream-10 以降が必要です。今回は Gray 符号なしで送ります"
