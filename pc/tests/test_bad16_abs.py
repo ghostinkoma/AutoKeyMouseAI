@@ -156,7 +156,7 @@ def test_index_color_roundtrip(decoder):
     パレットは使い回し (差分フレームは小さい)、場面が変わったら作り直してキーフレームで送る"""
     from akm.bad16 import IndexEncoder, entropy_wrap
 
-    enc = IndexEncoder()
+    enc = IndexEncoder(partial=False)  # 作り直しの動き (部分更新は test_index_partial_palette_update)
     srcs = frames_of()
     other = np.ascontiguousarray(255 - srcs[0][:, ::-1])  # 色ががらっと変わる場面
     srcs = srcs[:4] + [other, other.copy()]
@@ -192,3 +192,39 @@ def test_rgb565_worst_case_noise_fits(decoder):
     got = run_decoder(decoder, datas)
     for g, e in zip(got, expect):
         assert (g == e).all()
+
+
+def test_index_partial_palette_update(decoder):
+    """新しい色が出てきても、パレットを作り直さず使われていない番号だけを入れ替える (キーフレームにしない)。
+    入れ替えた番号を前に描いていたブロックは送り直すので、ESP32 と同じコードでぴったり同じ絵になる"""
+    from akm.bad16 import IndexEncoder
+
+    yy, xx = np.mgrid[0:135, 0:240]
+    base = np.stack([(xx * 255 // 239), (yy * 255 // 134), ((xx + yy) * 255 // 373)], -1).astype(np.uint8)
+    frames = [base.copy() for _ in range(5)]
+    rng = np.random.default_rng(7)
+    # 2 枚目から: 左上に、パレットに無い鮮やかな色の四角 (動く)。4 枚目でまた別の色
+    for i in (1, 2, 3, 4):
+        x = 10 + 12 * i
+        col = (255, 0, 255) if i < 3 else (0, 255, 64)
+        frames[i][20:80, x:x + 60] = col
+        frames[i][20:80, x:x + 60] = np.clip(frames[i][20:80, x:x + 60].astype(int)
+                                            + rng.integers(-30, 30, (60, 60, 3)), 0, 255)
+    enc = IndexEncoder()
+    datas, expect = [], []
+    for f in frames:
+        datas.append(enc.encode(f))
+        expect.append(enc.last_display.copy())
+    assert datas[0][3] & 1  # 最初だけキーフレーム
+    assert enc.rebuilds == 1 and enc.swaps >= 1  # 作り直さず、入れ替えで済んだ
+    assert all(not d[3] & 1 for d in datas[1:])
+    swapped = [d for d in datas[1:] if d[6:38] != bytes(32)]
+    assert swapped and all(len(d) < len(datas[0]) for d in swapped)  # 全体を送るより小さい
+    got = run_decoder(decoder, datas)
+    for i, (g, e) in enumerate(zip(got, expect)):
+        assert (g == e).all(), f"frame {i}: {int((g != e).sum())} 画素違う"
+    # 部分更新なし (前と同じ) だと作り直してキーフレームになる
+    old = IndexEncoder(partial=False)
+    for f in frames:
+        old.encode(f)
+    assert old.rebuilds > 1

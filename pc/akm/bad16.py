@@ -231,25 +231,36 @@ class Encoder:
 
 # ------------------------------------------------------------- インデックスカラー (ver 7) --
 # 1 フレームを 256 色 (0 = 黒 + 255 色) のパレットの番号 8 ビットで表し、番号の 8 面を ver 3 と同じ命令で送る。
-# パレットは使い回す (同じ色は同じ番号のまま = 変わっていないブロックは送らない)。誤差が増えたら作り直して、
-# そのフレームは全体を送る (キーフレーム)。ESP32 は 8 面を組み立てて、番号でパレットを引くだけ。
+# パレットは使い回す (同じ色は同じ番号のまま = 変わっていないブロックは送らない)。ESP32 は 8 面を組み立てて、
+# 番号でパレットを引くだけ。
+# 誤差が増えたら (新しい色が出てきた)、まず「今のフレームであまり使われていない番号」だけを新しい色に入れ替える
+# (部分更新)。よく使われている色は同じ番号のままなので、変わった所と、入れ替えた番号を前に描いていたブロック
+# だけを送る。前は毎回パレットを作り直して番号が全部変わり、画面全体を送っていた (場面が続けて変わると、
+# 1 枚 25〜30KB が続いてコマが飛んだ)。入れ替えても合わない (本当に場面が変わった) ときだけ作り直す (キーフレーム)。
 # コンテナ: 'B' '6' 7 flags mask(u16 LE = 0x00FF) 変える色の印 (32B, bit i = 番号 i) 色 (RGB565 u16 LE) x 印の数
 #           + 本体 (ver 3 と同じ)。flags bit0 = キーフレーム, bit1 = 番号を Gray 符号にしてある
-IDX_REBUILD = 1.6  # 誤差 (2 乗平均) が、パレットを作ったときのこの倍を超えたら作り直す (約 2dB 悪くなったら)
+IDX_REBUILD = 1.6  # 誤差 (2 乗平均) が、基準のこの倍 + 4 を超えたらパレットを直す (約 2dB 悪くなったら)
+IDX_SWAP = (24, 64)  # 部分更新で入れ替える番号の数 (少ない方から試す。これで足りなければ場面が変わったとみなし作り直す)
+IDX_DRIFT = 2.5  # 部分更新を重ねて、基準が作り直したときの誤差のこの倍を超えたら作り直す (画質を戻す)
 
 
 class IndexEncoder:
-    def __init__(self, gray: bool = True, rebuild: float = IDX_REBUILD):
+    def __init__(self, gray: bool = True, rebuild: float = IDX_REBUILD, partial: bool = True):
         self.gray = gray
         self.rebuild = float(rebuild)
+        self.partial = bool(partial)  # False: 前と同じ (毎回作り直す)
         self.pal = None        # (256, 3) RGB 8 ビット。0 = 黒
         self.pal565 = None
         self._pim = None       # PIL の当てはめ用
-        self.ref_mse = 0.0     # パレットを作ったときの誤差
-        self.prev = None
+        self.ref_mse = 0.0     # 基準の誤差 (これより大きく悪くなったらパレットを直す)
+        self.full_mse = 0.0    # 作り直したときの誤差
+        self.prev = None       # 前のフレームの番号 (送る形 = Gray 符号のことがある)
+        self.prev_idx = None   # 前のフレームの番号 (そのまま)
         self.force_key = True
         self.changed_blocks = 0
-        self.rebuilds = 0
+        self.rebuilds = 0      # 作り直した回数 (キーフレーム)
+        self.swaps = 0         # 部分更新の回数
+        self.last_swapped = 0  # 直前のフレームで入れ替えた番号の数
         self.last_display: np.ndarray | None = None
 
     def request_key(self) -> None:
@@ -257,6 +268,15 @@ class IndexEncoder:
 
     def label(self) -> str:
         return "インデックス 256 色"
+
+    def _set_palette(self, pal: np.ndarray) -> None:
+        from PIL import Image
+
+        self.pal = pal
+        self.pal565 = ((pal[:, 0] >> 3) << 11 | (pal[:, 1] >> 2) << 5 | (pal[:, 2] >> 3)).astype(np.uint16)
+        pim = Image.new("P", (1, 1))
+        pim.putpalette(pal.astype(np.uint8).reshape(-1).tolist())
+        self._pim = pim
 
     def _build(self, rgb: np.ndarray) -> None:
         from PIL import Image
@@ -267,11 +287,7 @@ class IndexEncoder:
         # 明るさの順に並べる (番号の上位ビットが明るさに近くなり、面が少し縮む)。0 = 黒はそのまま
         y = pal[1:] @ np.array([299, 587, 114])
         pal = np.vstack([pal[:1], pal[1:][np.argsort(y, kind="stable")]])
-        self.pal = pal
-        self.pal565 = ((pal[:, 0] >> 3) << 11 | (pal[:, 1] >> 2) << 5 | (pal[:, 2] >> 3)).astype(np.uint16)
-        pim = Image.new("P", (1, 1))
-        pim.putpalette(pal.astype(np.uint8).reshape(-1).tolist())
-        self._pim = pim
+        self._set_palette(pal)
         self.rebuilds += 1
 
     def _map(self, rgb: np.ndarray):
@@ -279,19 +295,64 @@ class IndexEncoder:
 
         idx = np.asarray(Image.fromarray(rgb).quantize(palette=self._pim, dither=Image.Dither.NONE), np.uint8)
         err = self.pal[idx] - rgb.astype(np.int32)
-        return idx, float((err * err).mean())
+        return idx, float((err * err).mean()), err
 
-    def display(self, bgr: np.ndarray) -> np.ndarray:
-        """送らずに、液晶に出る絵 (RGB565) だけ (仲介アプリの送信画面用。パレットの使い回し・作り直しは同じ)"""
-        rgb = np.ascontiguousarray(bgr[..., ::-1])
+    def _swap(self, rgb: np.ndarray, idx: np.ndarray, err: np.ndarray, k: int):
+        """今のフレームであまり使われていない番号 k 個を、誤差の大きい画素の色に入れ替えた新しいパレット
+        (と入れ替えた番号)。番号 0 (黒) は変えない"""
+        from PIL import Image
+
+        e2 = (err * err).sum(axis=-1)
+        bad = rgb[e2 > np.percentile(e2, 90)]  # 合っていない画素 (誤差の大きい 1 割)
+        if len(bad) == 0:
+            return None
+        q = Image.fromarray(bad.reshape(1, -1, 3).astype(np.uint8)).quantize(
+            colors=k, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+        cols = np.array(q.getpalette()[:k * 3], np.int32).reshape(-1, 3)
+        used = np.unique(np.asarray(q, np.uint8))
+        cols = cols[used[used < len(cols)]]
+        if len(cols) == 0:
+            return None
+        count = np.bincount(idx.reshape(-1), minlength=256)
+        count[0] = 1 << 30  # 黒は残す
+        slots = np.argsort(count, kind="stable")[:len(cols)]  # 使われていない順
+        pal = self.pal.copy()
+        pal[slots] = cols
+        return pal, slots
+
+    def _update(self, rgb: np.ndarray, key: bool):
+        """パレットを決めて番号を付ける → (番号, キーフレームか, 入れ替えた番号 (部分更新のとき))"""
         if self.pal is None:
             self._build(rgb)
-            idx, self.ref_mse = self._map(rgb)
-        else:
-            idx, mse = self._map(rgb)
-            if mse > self.ref_mse * self.rebuild + 4.0:
-                self._build(rgb)
-                idx, self.ref_mse = self._map(rgb)
+            idx, mse, _err = self._map(rgb)
+            self.ref_mse = self.full_mse = mse
+            return idx, True, None
+        idx, mse, err = self._map(rgb)
+        limit = self.ref_mse * self.rebuild + 4.0
+        if mse <= limit:
+            return idx, key, None
+        if self.partial and not key and self.ref_mse <= self.full_mse * IDX_DRIFT + 4.0:
+            old = (self.pal, self.pal565, self._pim)
+            for k in IDX_SWAP:  # 少ない入れ替えで足りれば、送り直すブロックも少ない
+                got = self._swap(rgb, idx, err, k)
+                if got is None:
+                    break
+                self._set_palette(got[0])
+                idx2, mse2, _e = self._map(rgb)
+                if mse2 <= limit:
+                    self.ref_mse = max(self.ref_mse, mse2)
+                    self.swaps += 1
+                    return idx2, False, got[1]
+                self.pal, self.pal565, self._pim = old
+        self._build(rgb)  # 入れ替えでは合わない (場面が変わった): 作り直してキーフレーム
+        idx, mse, _err = self._map(rgb)
+        self.ref_mse = self.full_mse = mse
+        return idx, True, None
+
+    def display(self, bgr: np.ndarray) -> np.ndarray:
+        """送らずに、液晶に出る絵 (RGB565) だけ (仲介アプリの送信画面用。パレットの使い回し・入れ替えは同じ)"""
+        rgb = np.ascontiguousarray(bgr[..., ::-1])
+        idx, _key, _slots = self._update(rgb, False)
         return self.pal565[idx]
 
     def encode(self, bgr: np.ndarray) -> bytes:
@@ -300,21 +361,18 @@ class IndexEncoder:
         rgb = np.ascontiguousarray(src[..., ::-1])
         key = self.force_key or self.pal is None
         self.force_key = False
-        new_pal = False
-        if self.pal is None:
-            self._build(rgb)
-            new_pal = True
-        idx, mse = self._map(rgb)
-        if not new_pal and mse > self.ref_mse * self.rebuild + 4.0:  # 場面が変わった: パレットを作り直す
-            self._build(rgb)
-            idx, mse = self._map(rgb)
-            new_pal = key = True
-        if new_pal:
-            self.ref_mse = mse
+        idx, key, slots = self._update(rgb, key)
+        self.last_swapped = 0 if slots is None else len(slots)
         self.last_display = self.pal565[idx][:135]
         v = (idx ^ (idx >> 1)) if self.gray else idx
         cur = np.ascontiguousarray(v, np.uint16)
         prev = None if key else self.prev
+        if prev is not None and slots is not None:
+            # 入れ替えた番号を前に描いていた画素: 液晶には古い色が残っているので、そのブロックは送り直す
+            # (その画素の前の番号を今の番号と必ず違う値にして、「変わった」ことにする)
+            prev = prev.copy()
+            hit = np.isin(self.prev_idx, slots)
+            prev[hit] = cur[hit] ^ 1
         out = np.empty(ABS_CAP, np.uint8)
         ch = ctypes.c_int()
         n = _lib().bad16_encode_abs(cur.ctypes.data, None if prev is None else prev.ctypes.data, W, H, 0x00FF,
@@ -323,9 +381,17 @@ class IndexEncoder:
             raise RuntimeError("bad16_encode_abs failed")
         self.changed_blocks = ch.value
         self.prev = cur
-        # パレット: キーフレームは全部、それ以外は送らない (使い回し)
-        bitmap = (b"\xff" * 32) if key else bytes(32)
-        colors = self.pal565.astype("<u2").tobytes() if key else b""
+        self.prev_idx = idx
+        # パレット: キーフレームは全部、部分更新は入れ替えた番号だけ、それ以外は送らない (使い回し)
+        if key:
+            bitmap, colors = b"\xff" * 32, self.pal565.astype("<u2").tobytes()
+        elif slots is not None:
+            bits = np.zeros(256, np.uint8)
+            bits[slots] = 1
+            bitmap = np.packbits(bits, bitorder="little").tobytes()
+            colors = self.pal565[np.sort(slots)].astype("<u2").tobytes()
+        else:
+            bitmap, colors = bytes(32), b""
         flags = (1 if key else 0) | (2 if self.gray else 0)
         return b"B6\x07" + bytes([flags]) + struct.pack("<H", 0x00FF) + bitmap + colors + out[:n].tobytes()
 
