@@ -11,10 +11,14 @@
 #ifndef AKM_MIRROR_ONLY
 #define AKM_MIRROR_ONLY 0
 #endif
+// ビルドの種類の印 (platformio.ini の -DAKM_FW_TAG。例 "-wnd4")。仲介アプリのログで、どのビルドか分かるように
+#ifndef AKM_FW_TAG
+#define AKM_FW_TAG ""
+#endif
 #if AKM_MIRROR_ONLY
-#define FW_VERSION "frame-stream-42-mirror"
+#define FW_VERSION "frame-stream-42-mirror" AKM_FW_TAG
 #else
-#define FW_VERSION "frame-stream-42"
+#define FW_VERSION "frame-stream-42" AKM_FW_TAG
 #endif
 #define BLE_MANUFACTURER "ghostinkoma"
 
