@@ -68,7 +68,7 @@ class Mirror:
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
                  fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005,
                  pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5),
-                 ycc: tuple | None = None, entropy: str | None = None,
+                 ycc: tuple | None = None, entropy: str | None = None, palette: bool = False,
                  b16_gray: bool = False, link_factory=None):
         self.enabled = enabled and bool(host)
         self.url = None
@@ -107,6 +107,8 @@ class Mirror:
         self.ycc = tuple(ycc) if ycc else None
         # BadCodec のフレームをさらに 1 フレームまるごと "huff" (ハフマン) / "tans" で包む (frame-stream-35 以降)
         self.entropy = entropy or None
+        # インデックスカラー (256 色のパレットの番号 8 面。frame-stream-36 以降)
+        self.palette = bool(palette)
         self._key_sent = False  # 包んだフレームがキーフレームか (包むと先頭の flags が見えないので覚えておく)
         # True: 前フレーム不要版 (ver 3)。ESP32 は変わったブロックを直接液晶へ描くのでメモリ不足にならない。
         # False: 面ごとのフレーム (ver 2)。少し小さいが ESP32 に (面の数 + 1) x 4KB 要る
@@ -281,9 +283,9 @@ class Mirror:
             data = self._encode_bc(frame)
         elif self.fmt == "bad16" and self.transport in ("tcp", "auto"):
             if self._b16 is None:
-                from .bad16 import Encoder, YccEncoder
+                from .bad16 import Encoder, IndexEncoder, YccEncoder
 
-                self._b16 = (YccEncoder(*self.ycc) if self.ycc else
+                self._b16 = (IndexEncoder() if self.palette else YccEncoder(*self.ycc) if self.ycc else
                              Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free, gray=self.b16_gray))
             data = self._b16.encode(frame)
             if self.entropy and data[:2] == b"B6":
@@ -400,8 +402,10 @@ class Mirror:
                     need = 34  # YCoCg 版 ver 5 (変わった 8x8 だけ)
                 if self.entropy:
                     need = max(need, 35)  # ハフマン / tANS で包んだフレーム
+                if self.palette:
+                    need = max(need, 36)  # インデックスカラー
                 if self.fmt == "bad16" and (not m or int(m.group(1)) < need):
-                    print(f"[mirror] BadCodec {'YCoCg 版' if self.ycc else '16bit 版'}"
+                    print(f"[mirror] BadCodec {'インデックスカラー' if self.palette else 'YCoCg 版' if self.ycc else '16bit 版'}"
                           f"{'(前フレーム不要版)' if self.b16_prev_free and not self.ycc else ''}には "
                           f"frame-stream-{need} 以降が必要です。ファームウェアを書き込み直してください")
             else:

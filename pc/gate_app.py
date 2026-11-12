@@ -465,7 +465,8 @@ class GateApp:
         g = rb.group(t, "形式")
         # BadCodec のカラーは R G B のビット数。565 = RGB565 そのまま (可逆・一番きれい・1 枚が一番大きい)
         labels = {"BadCodec 565": "RGB565 (可逆)", "BadCodec 343": "RGB 343 (10 面)", "BadCodec 332": "RGB 332 (8 面)",
-                  "BadCodec 1bit": "白黒 (1 ビット)", "YCoCg 可逆": "YCoCg 可逆 (RGB565 そのもの)", "JPEG": "JPEG"}
+                  "BadCodec 1bit": "白黒 (1 ビット)", "YCoCg 可逆": "YCoCg 可逆 (RGB565 そのもの)",
+                  "Index 256": "インデックス 256 色 (8 面)", "JPEG": "JPEG"}
         for f in FORMATS:  # YCoCg (明るさ + 色差。frame-stream-34 以降): "YCoCg 4:2:0 Y6 C5" のように出す
             if f not in labels and f.startswith("YCoCg"):
                 _, sub, yc = f.split()
@@ -489,7 +490,8 @@ class GateApp:
                      state="readonly").pack(side=tk.LEFT)
         # YCoCg = 明るさ + 色差 (firmware frame-stream-34 以降)
         # さらに = BadCodec の 1 フレームをハフマン / tANS で包む (frame-stream-35 以降)
-        ttk.Label(g, text="YCoCg: fw34〜 / さらに: fw35〜",
+        # インデックス 256 色 = パレットの番号 8 面 (frame-stream-36 以降)
+        ttk.Label(g, text="YCoCg: fw34〜 / さらに: fw35〜\nインデックス: fw36〜",
                   style="Caption.TLabel").grid(row=2, column=0, sticky="w")
         g = rb.group(t, "2値化")
         ttk.Label(g, text="しきい値").grid(row=0, column=0, sticky="w")
@@ -729,7 +731,9 @@ class GateApp:
         # BadCodec: 選んだ色のビット数で送る (1bit は送信画面と同じ白黒の絵を各色 1 ビット = 3 面で)
         bits = color_bits(fmt)
         ycc = None
-        if fmt.startswith("YCoCg"):
+        if fmt == "Index 256":  # インデックスカラー (frame-stream-36 以降)
+            kind, bits = "bad16", (5, 6, 5)
+        elif fmt.startswith("YCoCg"):
             from akm.bad16 import parse_ycc
 
             kind, bits, ycc = "bad16", (5, 6, 5), parse_ycc(fmt)
@@ -753,6 +757,7 @@ class GateApp:
                              transport="tcp",
                              port=int(mcfg.get("port", 5005)), b16_bits=bits, ycc=ycc,
                              entropy=ENTROPY_MODES.get(self.mirror_ent.get()) if kind == "bad16" else None,
+                             palette=fmt == "Index 256",
                              # 有線は 1 枚ずつ返事を待つ (ESP32 の受信バッファ 8KB を溢れさせない)
                              pipeline=1 if wired else 2, link_factory=link,
                              b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))

@@ -350,6 +350,107 @@ class YccEncoder:
         return b"B6\x05" + bytes([flags, YCC_MODES[self.mode], self.ny, self.nc]) + out[:n].tobytes()
 
 
+# ------------------------------------------------------------- インデックスカラー (ver 7) --
+# 1 フレームを 256 色 (0 = 黒 + 255 色) のパレットの番号 8 ビットで表し、番号の 8 面を ver 3 と同じ命令で送る。
+# パレットは使い回す (同じ色は同じ番号のまま = 変わっていないブロックは送らない)。誤差が増えたら作り直して、
+# そのフレームは全体を送る (キーフレーム)。ESP32 は 8 面を組み立てて、番号でパレットを引くだけ。
+# コンテナ: 'B' '6' 7 flags mask(u16 LE = 0x00FF) 変える色の印 (32B, bit i = 番号 i) 色 (RGB565 u16 LE) x 印の数
+#           + 本体 (ver 3 と同じ)。flags bit0 = キーフレーム, bit1 = 番号を Gray 符号にしてある
+IDX_REBUILD = 1.6  # 誤差 (2 乗平均) が、パレットを作ったときのこの倍を超えたら作り直す (約 2dB 悪くなったら)
+
+
+class IndexEncoder:
+    def __init__(self, gray: bool = True, rebuild: float = IDX_REBUILD):
+        self.gray = gray
+        self.rebuild = float(rebuild)
+        self.pal = None        # (256, 3) RGB 8 ビット。0 = 黒
+        self.pal565 = None
+        self._pim = None       # PIL の当てはめ用
+        self.ref_mse = 0.0     # パレットを作ったときの誤差
+        self.prev = None
+        self.force_key = True
+        self.changed_blocks = 0
+        self.rebuilds = 0
+        self.last_display: np.ndarray | None = None
+
+    def request_key(self) -> None:
+        self.force_key = True
+
+    def label(self) -> str:
+        return "インデックス 256 色"
+
+    def _build(self, rgb: np.ndarray) -> None:
+        from PIL import Image
+
+        q = Image.fromarray(rgb).quantize(colors=255, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+        pal = np.array(q.getpalette()[:255 * 3], np.int32).reshape(-1, 3)
+        pal = np.vstack([np.zeros((1, 3), np.int32), pal, np.zeros((max(0, 255 - len(pal)), 3), np.int32)])[:256]
+        # 明るさの順に並べる (番号の上位ビットが明るさに近くなり、面が少し縮む)。0 = 黒はそのまま
+        y = pal[1:] @ np.array([299, 587, 114])
+        pal = np.vstack([pal[:1], pal[1:][np.argsort(y, kind="stable")]])
+        self.pal = pal
+        self.pal565 = ((pal[:, 0] >> 3) << 11 | (pal[:, 1] >> 2) << 5 | (pal[:, 2] >> 3)).astype(np.uint16)
+        pim = Image.new("P", (1, 1))
+        pim.putpalette(pal.astype(np.uint8).reshape(-1).tolist())
+        self._pim = pim
+        self.rebuilds += 1
+
+    def _map(self, rgb: np.ndarray):
+        from PIL import Image
+
+        idx = np.asarray(Image.fromarray(rgb).quantize(palette=self._pim, dither=Image.Dither.NONE), np.uint8)
+        err = self.pal[idx] - rgb.astype(np.int32)
+        return idx, float((err * err).mean())
+
+    def display(self, bgr: np.ndarray) -> np.ndarray:
+        """送らずに、液晶に出る絵 (RGB565) だけ (仲介アプリの送信画面用。パレットの使い回し・作り直しは同じ)"""
+        rgb = np.ascontiguousarray(bgr[..., ::-1])
+        if self.pal is None:
+            self._build(rgb)
+            idx, self.ref_mse = self._map(rgb)
+        else:
+            idx, mse = self._map(rgb)
+            if mse > self.ref_mse * self.rebuild + 4.0:
+                self._build(rgb)
+                idx, self.ref_mse = self._map(rgb)
+        return self.pal565[idx]
+
+    def encode(self, bgr: np.ndarray) -> bytes:
+        assert bgr.shape[:2] == (135, W), bgr.shape
+        src = np.concatenate([bgr, bgr[-1:]], axis=0)
+        rgb = np.ascontiguousarray(src[..., ::-1])
+        key = self.force_key or self.pal is None
+        self.force_key = False
+        new_pal = False
+        if self.pal is None:
+            self._build(rgb)
+            new_pal = True
+        idx, mse = self._map(rgb)
+        if not new_pal and mse > self.ref_mse * self.rebuild + 4.0:  # 場面が変わった: パレットを作り直す
+            self._build(rgb)
+            idx, mse = self._map(rgb)
+            new_pal = key = True
+        if new_pal:
+            self.ref_mse = mse
+        self.last_display = self.pal565[idx][:135]
+        v = (idx ^ (idx >> 1)) if self.gray else idx
+        cur = np.ascontiguousarray(v, np.uint16)
+        prev = None if key else self.prev
+        out = np.empty(W * H * 2 + 1024, np.uint8)
+        ch = ctypes.c_int()
+        n = _lib().bad16_encode_abs(cur.ctypes.data, None if prev is None else prev.ctypes.data, W, H, 0x00FF,
+                                    out.ctypes.data, out.size, ctypes.byref(ch))
+        if n < 0:
+            raise RuntimeError("bad16_encode_abs failed")
+        self.changed_blocks = ch.value
+        self.prev = cur
+        # パレット: キーフレームは全部、それ以外は送らない (使い回し)
+        bitmap = (b"\xff" * 32) if key else bytes(32)
+        colors = self.pal565.astype("<u2").tobytes() if key else b""
+        flags = (1 if key else 0) | (2 if self.gray else 0)
+        return b"B6\x07" + bytes([flags]) + struct.pack("<H", 0x00FF) + bitmap + colors + out[:n].tobytes()
+
+
 # ------------------------------------------------------- 1 フレームまるごとのエントロピー符号 --
 # BadCodec の出力 ('B' '6' ...) を、さらにハフマン ('B' 'H') か tANS ('B' 'A') で小さくする。
 # ESP32 は受け取りながら戻して、そのまま BadCodec の展開に渡す (firmware frame-stream-35 以降)。

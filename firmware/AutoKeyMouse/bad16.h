@@ -137,6 +137,8 @@ inline const uint64_t* spread() {
 //   ver 1: 'B' '6' 1 flags                … 16 面すべて、面ごとの BadCodec フレーム (前フレームが要る)
 //   ver 2: 'B' '6' 2 flags mask(u16 LE)   … mask の面だけ、面ごとの BadCodec フレーム (前フレームが要る)
 //   ver 3: 'B' '6' 3 flags mask(u16 LE)   … 前フレーム不要のブロックストリーム (decodeAbs)
+//   ver 7: 'B' '6' 7 flags mask(=0x00FF) 印 32B 色 … インデックスカラー。本体は ver 3 と同じ (decodeAbs)
+//          8 面 = パレットの番号 (Gray 符号のことがある)。印の番号の色 (RGB565 u16 LE) でパレットを書き換える
 //   ver 5: 'B' '6' 5 flags mode ny nc     … YCoCg 版。前フレーム不要、16x16 のマクロブロック (decodeYcc)
 //          (ver 4 は 16x16 を丸ごと送っていた試作。今は受け付けない)
 struct Header {
@@ -145,10 +147,17 @@ struct Header {
   bool rep = false;        // flags bit2 (ver 3): 送られない下位ビットを上位ビットの複製で埋めて表示する
   bool abs = false;        // ver 3
   uint16_t mask = 0xFFFF;  // 送られてくるビット面 (bit b = RGB565 の bit b)。無い面は常に 0
+  bool indexed = false;    // ver 7: インデックスカラー (8 面 = パレットの番号)
   bool ycc = false;        // ver 5 (YCoCg)
   uint8_t mode = 0;        // ver 5: 0 = 4:4:4 / 1 = 4:2:0 / 2 = 可逆 (RGB565 の YCoCg-R)
   uint8_t ny = 0, nc = 0;  // ver 5: Y / 色差のビット数
 };
+
+// インデックスカラーのパレット (512B)。ver 7 のヘッダーで書き換え、次のフレームでも使い回す
+inline uint16_t* palette() {
+  static uint16_t p[256];
+  return p;
+}
 
 inline int planesIn(uint16_t mask) {
   int n = 0;
@@ -176,6 +185,21 @@ inline bool readHeader(ReadFn read, void* ctx, Header& h) {
     h.nc = m[2];
     h.mask = 0xFFFF;
     return h.mode <= 2 && h.ny >= 1 && h.ny <= 8 && h.nc >= 1 && h.nc <= 8;
+  }
+  if (b[2] == 7) {  // インデックスカラー: mask + パレットの書き換え
+    uint8_t m[2], bits[32];
+    if (!read(ctx, m, 2) || !read(ctx, bits, 32)) return false;
+    h.abs = h.indexed = true;
+    h.rep = false;
+    h.mask = (uint16_t)(m[0] | m[1] << 8);
+    uint16_t* pal = palette();
+    for (int i = 0; i < 256; i++) {
+      if (!(bits[i >> 3] >> (i & 7) & 1)) continue;
+      uint8_t c[2];
+      if (!read(ctx, c, 2)) return false;
+      pal[i] = (uint16_t)(c[0] | c[1] << 8);
+    }
+    return h.mask == 0x00FF;
   }
   if (b[2] != 2 && b[2] != 3) return false;
   h.abs = b[2] == 3;
@@ -320,7 +344,11 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       }
     }
     uint32_t c1 = BAD16_CYCLES();
-    if (h.gray) {
+    if (h.indexed) {
+      if (h.gray)  // 番号 (8 ビット) の Gray 符号 → 2 進
+        for (int b = 6; b >= 0; b--)
+          for (int y = 0; y < 8; y++) rm[y][b] ^= rm[y][b + 1];
+    } else if (h.gray) {
       // Gray 符号 → 2 進: 各色の上の桁から「1 つ上の桁 (2 進に戻した後) と XOR」。面の 1 行 = 1 バイトのまま計算できる
       // (B = bit0-4, G = bit5-10, R = bit11-15。送られていない下位の面は 0 のまま)
       static const uint8_t lo[3] = {0, 5, 11}, hi[3] = {4, 10, 15};
@@ -330,7 +358,7 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
           for (int y = 0; y < 8; y++) rm[y][b] ^= rm[y][b + 1];
         }
     }
-    if (h.rep) {
+    if (h.rep && !h.indexed) {
       // 送られない下位の面を上位の面の複製で埋める (R3 なら bit12 = bit15, bit11 = bit14)
       static const uint8_t lo[3] = {0, 5, 11}, hi[3] = {4, 10, 15};
       for (int c = 0; c < 3; c++) {
@@ -355,6 +383,10 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
         p[k] = (uint16_t)(((l0 >> (8 * k)) & 0xFF) | (((h0 >> (8 * k)) & 0xFF) << 8));
         p[k + 4] = (uint16_t)(((l1 >> (8 * k)) & 0xFF) | (((h1 >> (8 * k)) & 0xFF) << 8));
       }
+    }
+    if (h.indexed) {  // 番号 → 色
+      const uint16_t* pal = palette();
+      for (int i = 0; i < 64; i++) px[i] = pal[px[i] & 0xFF];
     }
     uint32_t c2 = BAD16_CYCLES();
     prof().parse += c1 - c0;

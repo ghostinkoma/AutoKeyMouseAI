@@ -163,3 +163,28 @@ int main() {
             assert w[:2] in (b"BH", b"BA") and len(w) < len(data)
             out = subprocess.run([str(exe)], input=w, capture_output=True, check=True).stdout
             assert out == data, kind
+
+
+def test_index_color_roundtrip(decoder):
+    """インデックスカラー (ver 7): ESP32 と同じコードで、PC が計算した液晶の絵とぴったり同じ。
+    パレットは使い回し (差分フレームは小さい)、場面が変わったら作り直してキーフレームで送る"""
+    from akm.bad16 import IndexEncoder, entropy_wrap
+
+    enc = IndexEncoder()
+    srcs = frames_of()
+    other = np.ascontiguousarray(255 - srcs[0][:, ::-1])  # 色ががらっと変わる場面
+    srcs = srcs[:4] + [other, other.copy()]
+    datas, expect = [], []
+    for f in srcs:
+        datas.append(enc.encode(f))
+        expect.append(enc.last_display.copy())
+    assert datas[0][:3] == b"B6\x07" and datas[0][3] & 1
+    # 2 枚目 → 3 枚目は四角が動くだけ: パレットは送らず、変わった所だけ
+    assert not datas[1][3] & 1 and not datas[2][3] & 1 and len(datas[2]) < len(datas[0]) // 3
+    assert datas[4][3] & 1 and enc.rebuilds == 2  # 場面が変わった: 作り直してキーフレーム
+    assert len(datas[5]) < 60  # 変化なし
+    got = run_decoder(decoder, datas)
+    for i, (g, e) in enumerate(zip(got, expect)):
+        assert (g == e).all(), f"frame {i}: {int((g != e).sum())} 画素違う"
+    got = run_decoder(decoder, [entropy_wrap(d, "huff") for d in datas])  # ハフマンで包んでも同じ
+    assert all((g == e).all() for g, e in zip(got, expect))
