@@ -4,7 +4,7 @@
 決まったデータを送るだけ」になる。変換の時点で、Wi-Fi で送れる量 (kbps) に収まるよう 1 枚ずつ調整する:
   * 量の残り (1 秒に kbps ずつ貯まる。上限は数枚分) より大きい 1 枚は出さず、次の 1 枚にまとめる
     (差分は「液晶に出ている絵」との差で作り直すので崩れない)。続けて max_skip 枚飛ばしたら、大きくても出す
-  * key_every 秒ごとに画面全体 (キーフレーム) を入れる (途中から再生するとき用)
+  * key_every 秒ごとに画面全体 (キーフレーム) を入れる (遅れたとき・通信が途切れたときにそこから続ける)
 
 流れ: (URL なら yt-dlp で取得) → FFmpeg で 240x135 (縦横比を保って黒帯)・BGR で受け取る → 符号化 → .bad
 
@@ -195,7 +195,7 @@ class EncodeStats:
     biggest: int = 0
 
 
-def encode_frames(frames, fmt: str, fps: float, kbps: float, writer: Writer, key_every: float = 10.0,
+def encode_frames(frames, fmt: str, fps: float, kbps: float, writer: Writer, key_every: float = 3.0,
                   max_skip: int = 6, burst: float = 3.0, log=None) -> EncodeStats:
     """1 枚ずつ符号化して writer に足す。1 秒に kbps KB ずつ貯まる量 (上限は burst 枚分) を超える 1 枚は出さない
     (状態を戻して次の 1 枚にまとめる)。kbps <= 0 なら調整しない"""
@@ -235,8 +235,8 @@ def encode_frames(frames, fmt: str, fps: float, kbps: float, writer: Writer, key
     return st
 
 
-def encode_file(src: Path, out: Path, fmt: str = "index", fps: float = 0.0, kbps: float = 380.0,
-                start: float = 0.0, duration: float = 0.0, key_every: float = 10.0, log=print) -> EncodeStats:
+def encode_file(src: Path, out: Path, fmt: str = "index", fps: float = 0.0, kbps: float = 340.0,
+                start: float = 0.0, duration: float = 0.0, key_every: float = 3.0, log=print) -> EncodeStats:
     fps = fps or probe_fps(src)
     log(f"変換: {src.name} → {out.name} ({fmt}, {fps:.3f}fps, 上限 {kbps:g}KB/s)")
     w = Writer(out, fmt, fps)
@@ -261,6 +261,8 @@ class PlayStats:
     bytes: int = 0
     late_ms: float = 0.0    # 予定の時刻より遅れて送った分 (最大)
     resets: int = 0         # ESP32 が「全体が欲しい」と言った回数
+    skipped_to_key: int = 0  # 遅れすぎて、次の画面全体まで飛ばした回数
+    reconnects: int = 0     # 通信が途切れて、つなぎ直した回数
 
 
 def check_firmware(host: str, fmt: str, log=print) -> None:
@@ -281,16 +283,51 @@ def check_firmware(host: str, fmt: str, log=print) -> None:
         raise RuntimeError(f"この形式 ({fmt}) には frame-stream-{need} 以降が必要です (今: {fw or '不明'})")
 
 
+def index_frames(path: Path) -> list[tuple[int, int, int, bool]]:
+    """(時刻 ms, ファイルの位置, 長さ, 画面全体か) の一覧 (中身は読まない。途中から送り直すとき用)"""
+    out = []
+    with open(path, "rb") as f:
+        pos = HEAD.size
+        while True:
+            f.seek(pos)
+            b = f.read(FRAME.size + 4)
+            if len(b) < FRAME.size:
+                break
+            t, n = FRAME.unpack(b[:FRAME.size])
+            d = b[FRAME.size:]
+            key = d[:2] != b"B6" or (len(d) >= 4 and bool(d[3] & 1))  # JPEG ('B' 'J' / FF D8) は毎回全体
+            out.append((t, pos + FRAME.size, n, key))
+            pos += FRAME.size + n
+    return out
+
+
 def play(path: Path, host: str, port: int = 5005, loop: bool = False, speed: float = 1.0, pipeline: int = 2,
-         log=print, stop=None) -> PlayStats:
+         catch_up_ms: float = 500.0, log=print, stop=None) -> PlayStats:
     """.bad を元の時刻に合わせて ESP32 へ送る (今のミラーと同じ TCP の送り方: 'AKMF' 長さ 中身 → 返事 1 バイト)。
-    差分のフレームは飛ばせないので、遅れたら遅れたまま送り続ける (追いつけば元の時刻に戻る)"""
+    差分のフレームは途中を飛ばせないので、遅れが catch_up_ms を超えたら、今の時刻より後の画面全体の 1 枚まで
+    飛ばして追いつく。返事が途切れた・切れたら、つなぎ直して次の画面全体の 1 枚から続ける"""
     h = read_header(path)
     check_firmware(host, h.fmt, log)
-    sock = socket.create_connection((host, port), timeout=5)
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    frames = index_frames(path)
+    if not frames:
+        raise RuntimeError("フレームがありません")
+    keys = [i for i, fr in enumerate(frames) if fr[3]]
     st = PlayStats()
+    log(f"再生: {path.name} ({h.fmt}, {h.fps:.3f}fps, {h.frames} 枚 / 元 {h.source_frames} 枚、"
+        f"画面全体 {len(keys)} 枚) → {host}:{port}")
+    sock = None
     inflight = 0
+
+    def connect():
+        nonlocal sock, inflight
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        sock = socket.create_connection((host, port), timeout=5)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        inflight = 0
 
     def ack():
         nonlocal inflight
@@ -303,24 +340,63 @@ def play(path: Path, host: str, port: int = 5005, loop: bool = False, speed: flo
         elif not b:
             raise ConnectionError("ESP32 が接続を切りました")
 
-    log(f"再生: {path.name} ({h.fmt}, {h.fps:.3f}fps, {h.frames} 枚 / 元 {h.source_frames} 枚) → {host}:{port}")
+    def next_key(i: int, t_ms: float) -> int | None:
+        """i 以降で、時刻 t_ms 以後の最初の画面全体の 1 枚"""
+        for k in keys:
+            if k >= i and frames[k][0] >= t_ms:
+                return k
+        return None
+
+    connect()
+    f = open(path, "rb")
     try:
         while True:
             t0 = time.monotonic()
             win_t, win_n, win_b = t0, 0, 0
-            for t_ms, data in read_frames(path):
+            i = 0
+            while i < len(frames):
                 if stop is not None and stop():
                     return st
+                t_ms, pos, n, _key = frames[i]
                 due = t0 + t_ms / 1000.0 / speed
                 wait = due - time.monotonic()
                 if wait > 0:
                     time.sleep(wait)
+                elif -wait * 1000 > catch_up_ms:  # 遅れすぎ: 今の時刻より後の画面全体まで飛ばす
+                    now_ms = (time.monotonic() - t0) * 1000 * speed
+                    k = next_key(i + 1, now_ms)
+                    if k is not None:
+                        st.skipped_to_key += 1
+                        i = k
+                        continue
+                    st.late_ms = max(st.late_ms, -wait * 1000)
                 else:
                     st.late_ms = max(st.late_ms, -wait * 1000)
-                sock.sendall(b"AKMF" + struct.pack("<I", len(data)) + data)
-                inflight += 1
-                while inflight >= max(1, pipeline):
-                    ack()
+                f.seek(pos)
+                data = f.read(n)
+                try:
+                    sock.sendall(b"AKMF" + struct.pack("<I", len(data)) + data)
+                    inflight += 1
+                    while inflight >= max(1, pipeline):
+                        ack()
+                except (OSError, ConnectionError) as e:  # 途切れた: つなぎ直して、次の画面全体から
+                    st.reconnects += 1
+                    log(f"  ESP32 との通信が途切れました ({e})。つなぎ直します")
+                    for n_try in range(10):  # すぐ 1 回、だめなら 1 秒おきに
+                        try:
+                            time.sleep(0.2 if n_try == 0 else 1.0)
+                            connect()
+                            break
+                        except OSError:
+                            continue
+                    else:
+                        raise
+                    now_ms = (time.monotonic() - t0) * 1000 * speed
+                    k = next_key(i + 1, now_ms)
+                    if k is None:
+                        break
+                    i = k
+                    continue
                 st.sent += 1
                 st.bytes += len(data)
                 win_n += 1
@@ -329,12 +405,15 @@ def play(path: Path, host: str, port: int = 5005, loop: bool = False, speed: flo
                 if now - win_t >= 10:
                     lag = max(0.0, now - due) * 1000
                     log(f"  {t_ms / 1000:6.1f} 秒: {win_n / (now - win_t):5.1f}fps {win_b / (now - win_t) / 1024:5.0f}KB/s "
-                        f"遅れ {lag:4.0f}ms")
+                        f"遅れ {lag:4.0f}ms" + (f" 追いついた {st.skipped_to_key} 回" if st.skipped_to_key else ""))
                     win_t, win_n, win_b = now, 0, 0
+                i += 1
             if not loop:
                 break
         while inflight:
             ack()
     finally:
-        sock.close()
+        f.close()
+        if sock is not None:
+            sock.close()
     return st

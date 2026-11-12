@@ -103,3 +103,64 @@ def test_play_sends_all_frames_to_fake_esp32(tmp_path, video, monkeypatch):
     st = badvideo.play(out, "127.0.0.1", port, speed=4.0, log=lambda *a: None)
     th.join(5)
     assert st.sent == len(want) and got == want
+
+
+def _fake_esp(behave):
+    """偽の ESP32。behave(接続の番号, そのフレームの番号, 中身) → None (返事 'K') / "close" (切る)"""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(2)
+    got = []
+
+    def run():
+        conn = 0
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            f = c.makefile("rb")
+            k = 0
+            while True:
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    break
+                d = f.read(struct.unpack("<I", hdr[4:])[0])
+                got.append((conn, d))
+                if behave(conn, k, d) == "close":
+                    break
+                c.sendall(b"K")
+                k += 1
+            f.close()  # makefile も閉じないと、相手には切れたことが伝わらない
+            c.close()
+            conn += 1
+
+    threading.Thread(target=run, daemon=True).start()
+    return srv, got
+
+
+def test_play_catches_up_and_reconnects(tmp_path, video, monkeypatch):
+    out = tmp_path / "v.index.bad"
+    badvideo.encode_file(video, out, "index", 24.0, 0, key_every=0.5, log=lambda *a: None)
+    monkeypatch.setattr(badvideo, "check_firmware", lambda *a, **k: None)
+    is_key = lambda d: d[:2] == b"B6" and d[3] & 1  # noqa: E731
+    # 遅い ESP32 (1 枚 120ms): 遅れが 200ms を超えたら、次の画面全体まで飛ばす
+    import time as _t
+
+    srv, got = _fake_esp(lambda c, k, d: _t.sleep(0.12))
+    st = badvideo.play(out, "127.0.0.1", srv.getsockname()[1], catch_up_ms=200, log=lambda *a: None)
+    srv.close()
+    assert st.skipped_to_key > 0 and st.sent < 96
+    frames = [d for _c, d in got]
+    allf = [d for _t2, d in badvideo.read_frames(out)]
+    # 飛ばした直後は必ず画面全体 (途中の差分だけを送ると液晶が崩れる)
+    pos = [allf.index(d) for d in frames]
+    for a, b in zip(pos, pos[1:]):
+        assert b == a + 1 or is_key(allf[b])
+    # 途中で切れる ESP32 (最初の接続の 10 枚目で切る): つなぎ直して、画面全体から続ける
+    srv, got = _fake_esp(lambda c, k, d: "close" if c == 0 and k == 10 else None)
+    st = badvideo.play(out, "127.0.0.1", srv.getsockname()[1], speed=2.0, log=lambda *a: None)
+    srv.close()
+    assert st.reconnects == 1
+    first_after = next(d for c, d in got if c == 1)
+    assert is_key(first_after)
