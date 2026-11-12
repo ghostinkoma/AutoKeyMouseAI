@@ -53,7 +53,7 @@ try:
 except Exception as _e:  # noqa: BLE001
     cv2 = LiveFeed = MapSource = None
     LIVE_ERROR = f"{type(_e).__name__}: {_e}"
-    FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit", "YCoCg 420 Y6C5", "JPEG")
+    FORMATS = ("BadCodec 565", "BadCodec 343", "BadCodec 332", "BadCodec 1bit", "YCoCg 420 Y6C5", "Index 256", "JPEG")
 
     def color_bits(fmt):
         tail = fmt.split()[-1]
@@ -297,7 +297,7 @@ class GateApp:
         self.vhid = None           # 仮想 HID (akm.virtual_hid.VirtualHid)。初めて使うときに作る
         self.shuttle = None        # 往復テスト (akm.shuttle_test.ShuttleTest)
         self.auto_refresh = tk.BooleanVar(value=True)
-        self.mirror_fmt = tk.StringVar(value="BadCodec 343")  # 既定はカラー。config の mirror.color で変わる
+        self.mirror_fmt = tk.StringVar(value="Index 256")  # 既定はインデックス 256 色。config の mirror.color で変わり、選んだものは覚えておく
         self.mirror_ent = tk.StringVar(value="なし")  # BadCodec のフレームをさらに包む: なし / ハフマン / tANS
         self.threshold = tk.IntVar(value=100)
         self.fps = tk.IntVar(value=15)
@@ -312,7 +312,7 @@ class GateApp:
         self.map_view = 96         # マップに出す広さ (マス)。ホイールで変える
         self.cfg = load_cfg()
         self.capture_mode = tk.StringVar(value=self.cfg_capture_default())
-        mc = str((self.cfg.get("mirror") or {}).get("color", "343"))
+        mc = str((self.cfg.get("mirror") or {}).get("color", "Index 256"))  # 仲介アプリで選んだもの (gate_ui.json) が優先
         if f"BadCodec {mc}" in FORMATS:
             self.mirror_fmt.set(f"BadCodec {mc}")
         elif mc in FORMATS:  # 例 "YCoCg 420 Y6C5"
@@ -1045,7 +1045,7 @@ class GateApp:
 
     # ---- 試験の設定を覚えておく (models/gate_ui.json。起動し直しても残す) -----------------------
     def _ui_vars(self) -> dict:
-        return {"arm_runs": self.arm_runs, "mirror_ent": self.mirror_ent, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
+        return {"arm_runs": self.arm_runs, "mirror_fmt": self.mirror_fmt, "mirror_ent": self.mirror_ent, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
                 "shuttle_wait": self.shuttle_wait, "shuttle_axis": self.shuttle_axis, "mouse_mode": self.mouse_mode,
                 "explore_radius": self.explore_radius, "explore_step": self.explore_step,
                 "explore_minutes": self.explore_minutes}
@@ -1062,6 +1062,8 @@ class GateApp:
             d = json.loads(self._ui_settings_path().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             d = {}
+        if d.get("mirror_fmt") not in FORMATS:  # 古い・なくなった形式は覚えていないことにする
+            d.pop("mirror_fmt", None)
         for k, var in self._ui_vars().items():
             if k in d:
                 try:
