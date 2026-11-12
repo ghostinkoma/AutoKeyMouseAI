@@ -174,3 +174,21 @@ def test_index_color_roundtrip(decoder):
         assert (g == e).all(), f"frame {i}: {int((g != e).sum())} 画素違う"
     got = run_decoder(decoder, [entropy_wrap(d, "tans") for d in datas])  # tANS で包んでも同じ
     assert all((g == e).all() for g, e in zip(got, expect))
+
+
+def test_rgb565_worst_case_noise_fits(decoder):
+    """画面全体が細かいノイズ (16 面すべて MASTER_BLOCK) でも符号化に失敗せず、ESP32 と同じ絵に戻る
+    (前は 66KB の置き場があふれて bad16_encode_abs failed になった)"""
+    from akm.bad16 import Encoder
+
+    rng = np.random.default_rng(3)
+    enc = Encoder(bits=(5, 6, 5))
+    frames = [rng.integers(0, 256, (135, 240, 3), dtype=np.uint8) for _ in range(2)]
+    datas, expect = [], []
+    for f in frames:
+        datas.append(enc.encode(f))
+        expect.append(enc.last_display[:135].copy())
+    assert len(datas[0]) > 240 * 136 * 2  # RGB565 そのものより大きい
+    got = run_decoder(decoder, datas)
+    for g, e in zip(got, expect):
+        assert (g == e).all()

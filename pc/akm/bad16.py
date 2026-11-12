@@ -23,6 +23,9 @@ from pathlib import Path
 import numpy as np
 
 W, H = 240, 136  # 135 行 + 1 (8 の倍数)
+# 前フレーム不要版 (ver 3 / 7) の本体の最大: 8x8 が 510 個 x 16 面 x 9 バイト (MASTER_BLOCK) ≒ 73KB。
+# RGB565 そのもの (64.8KB) より大きくなることがある (細かい模様が画面全体で変わったとき)
+ABS_CAP = (W // 8) * (H // 8) * 16 * 9 + 4096
 _LIB = None
 
 
@@ -214,7 +217,7 @@ class Encoder:
         key = self.force_key or self.prev565 is None
         self.force_key = False
         prev = None if key else self.prev565
-        out = np.empty(W * H * 2 + 1024, np.uint8)
+        out = np.empty(ABS_CAP, np.uint8)
         ch = ctypes.c_int()
         n = _lib().bad16_encode_abs(img.ctypes.data, None if prev is None else prev.ctypes.data, W, H, mask,
                                     out.ctypes.data, out.size, ctypes.byref(ch))
@@ -312,7 +315,7 @@ class IndexEncoder:
         v = (idx ^ (idx >> 1)) if self.gray else idx
         cur = np.ascontiguousarray(v, np.uint16)
         prev = None if key else self.prev
-        out = np.empty(W * H * 2 + 1024, np.uint8)
+        out = np.empty(ABS_CAP, np.uint8)
         ch = ctypes.c_int()
         n = _lib().bad16_encode_abs(cur.ctypes.data, None if prev is None else prev.ctypes.data, W, H, 0x00FF,
                                     out.ctypes.data, out.size, ctypes.byref(ch))
