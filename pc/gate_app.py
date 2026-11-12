@@ -474,27 +474,35 @@ class GateApp:
 
         def pick(_e=None):
             f = by_label[fmt_label.get()]
-            self.mirror_fmt.set(f)
+            self.mirror_fmt.set(f)  # 欄の有効・無効は _sync_fmt_widgets (mirror_fmt を見張っている)
             self.log("INFO", f"送信形式: {fmt_label.get()}")  # 送っている途中なら sender_status が送り直す
-            ent_box.configure(state=tk.DISABLED if f == "JPEG" else tk.NORMAL)
 
         cb = ttk.Combobox(g, textvariable=fmt_label, values=names, width=24, state="readonly")
         cb.grid(row=0, column=0, sticky="w")
         cb.bind("<<ComboboxSelected>>", pick)
-        # tANS = BadCodec の 1 フレームをまるごと tANS で包む (frame-stream-35 以降)。インデックスで 2〜3 割小さくなる
-        ent_box = ttk.Checkbutton(g, text="tANS で圧縮", variable=self.mirror_ent, onvalue="tANS", offvalue="なし")
-        ent_box.grid(row=1, column=0, sticky="w", pady=(2, 0))
-        if self.mirror_fmt.get() == "JPEG":
-            ent_box.configure(state=tk.DISABLED)
-        ttk.Label(g, text="インデックス: fw36〜 / 白黒: fw37〜", style="Caption.TLabel").grid(row=2, column=0, sticky="w")
+        # tANS = BadCodec の 1 フレームをまるごと tANS で包む (frame-stream-35 以降)。インデックスで 2〜3 割小さくなる。
+        # 白黒は 1 枚が小さく Wi-Fi に余裕があるので包まない (戻す手間だけ増える)。JPEG は圧縮済み
+        self._ent_box = ttk.Checkbutton(g, text="tANS で圧縮", variable=self.mirror_ent, onvalue="tANS", offvalue="なし")
+        self._ent_box.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self._ent_cap = ttk.Label(g, text="", style="Caption.TLabel")
+        self._ent_cap.grid(row=2, column=0, sticky="w")
         g = rb.group(t, "白黒 1 ビット")
-        ttk.Label(g, text="しきい値").grid(row=0, column=0, sticky="w")
-        ttk.Scale(g, from_=0, to=255, variable=self.threshold, length=140).grid(row=1, column=0)
-        ttk.Label(g, textvariable=self.threshold).grid(row=1, column=1)
+        self._mono_widgets = [ttk.Label(g, text="しきい値"),
+                              ttk.Scale(g, from_=0, to=255, variable=self.threshold, length=140),
+                              ttk.Label(g, textvariable=self.threshold)]
+        self._mono_widgets[0].grid(row=0, column=0, sticky="w")
+        self._mono_widgets[1].grid(row=1, column=0)
+        self._mono_widgets[2].grid(row=1, column=1)
         df = ttk.Frame(g)
         df.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
-        ttk.Label(df, text="ディザ").pack(side=tk.LEFT)
-        ttk.Combobox(df, textvariable=self.dither, values=list(DITHERS), width=6, state="readonly").pack(side=tk.LEFT)
+        self._mono_widgets.append(ttk.Label(df, text="ディザ"))
+        self._mono_widgets[-1].pack(side=tk.LEFT)
+        self._dither_box = ttk.Combobox(df, textvariable=self.dither, values=list(DITHERS), width=6, state="readonly")
+        self._dither_box.pack(side=tk.LEFT)
+        self._mono_cap = ttk.Label(g, text="", style="Caption.TLabel")
+        self._mono_cap.grid(row=3, column=0, columnspan=2, sticky="w")
+        self.mirror_fmt.trace_add("write", lambda *_: self._sync_fmt_widgets())
+        self._sync_fmt_widgets()
         g = rb.group(t, "送信経路")
         for i, (v, text) in enumerate((("wifi", "Wi-Fi"), ("serial", "有線 (COM)"))):
             ttk.Radiobutton(g, text=text, value=v, variable=self.route,
@@ -749,15 +757,15 @@ class GateApp:
                              # HTTP に逃げない (逃げると 1 枚ずつの POST が並行して届き、液晶が詰まる)
                              transport="tcp",
                              port=int(mcfg.get("port", 5005)), b16_bits=bits,
-                             entropy=ENTROPY_MODES.get(self.mirror_ent.get()) if kind == "bad16" else None,
+                             entropy=ENTROPY_MODES.get(self._ent_effective()) if kind == "bad16" else None,
                              palette=fmt == "Index 256",
                              # 有線は 1 枚ずつ返事を待つ (ESP32 の受信バッファ 8KB を溢れさせない)
                              pipeline=1 if wired else 2, link_factory=link,
                              b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))
         self.sender.set_lines([])  # 液晶にはゲームの画面だけを出す
-        ent = self.mirror_ent.get() if kind == "bad16" else "なし"
+        ent = self._ent_effective() if kind == "bad16" else "なし"
         self.sender_fmt = fmt
-        self.sender_ent = self.mirror_ent.get()
+        self.sender_ent = self._ent_effective()
         self.sender_route = self.route.get()
         self._fps_begin(fmt + ("" if ent == "なし" else f" +{ent}"))
         if host:
@@ -884,7 +892,7 @@ class GateApp:
         if m.sent == 0:
             return ("接続中…" if m.errors == 0 else f"送れません ({m.errors})", "#e09000" if m.errors == 0 else "#d32f2f")
         if (getattr(self, "sender_fmt", "") != self.mirror_fmt.get()
-                or getattr(self, "sender_ent", "なし") != self.mirror_ent.get()):
+                or getattr(self, "sender_ent", "なし") != self._ent_effective()):
             self.start_sending()  # 形式を変えたら送り直す
         return (f"{m.fps:4.1f} fps {m.last_bytes / 1024:.1f}KB", "#2e7d32" if m.errors == 0 else "#e09000")
 
@@ -1035,6 +1043,27 @@ class GateApp:
                             f"{t.name} が前面になりました" if ok else
                             f"{t.name} を前面にできませんでした (今の前面 hwnd {fg or 0:#010x} '{window_title(fg)}')")
         return ok
+
+    # ---- 送信形式に合わせた欄の有効・無効 ------------------------------------------------
+    def _ent_effective(self) -> str:
+        """実際に使う圧縮: 白黒・JPEG は tANS を使わない (チェックは他の形式のために覚えておく)"""
+        return "なし" if self.mirror_fmt.get() in ("JPEG", "BadCodec 1bit") else self.mirror_ent.get()
+
+    def _sync_fmt_widgets(self):
+        if not hasattr(self, "_ent_box"):
+            return
+        f = self.mirror_fmt.get()
+        ent_ok = f not in ("JPEG", "BadCodec 1bit")
+        self._ent_box.state(["!disabled"] if ent_ok else ["disabled"])
+        self._ent_cap.configure(text={"JPEG": "JPEG は圧縮済みなので使いません",
+                                      "BadCodec 1bit": "白黒は小さいので使いません"}.get(f, "BadCodec の 1 枚を包む (fw35〜)"))
+        self._ent_cap.state(["!disabled"] if ent_ok else ["disabled"])
+        mono = f == "BadCodec 1bit"
+        for w in self._mono_widgets:
+            w.state(["!disabled"] if mono else ["disabled"])
+        self._dither_box.configure(state="readonly" if mono else "disabled")
+        self._mono_cap.configure(text="白黒のときだけ使います (fw37〜)" if not mono else "8x8 = BadCodec のブロックにそろえたディザ")
+        self._mono_cap.state(["!disabled"] if mono else ["disabled"])
 
     # ---- 試験の設定を覚えておく (models/gate_ui.json。起動し直しても残す) -----------------------
     def _ui_vars(self) -> dict:

@@ -292,6 +292,7 @@ __attribute__((always_inline))  // 呼び出し元 (ESP32 では IRAM に置い�
 inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
   constexpr int NBX = W / 8, NBY = H / 8, TOTAL = NBX * NBY;
   uint16_t px[64];
+  const bool mono = h.rep && h.mask == 0x8000;  // 白黒 1 面
   int ptr = 0, drawn = 0;
   while (ptr < TOTAL) {
     uint8_t op;
@@ -330,52 +331,59 @@ inline int decodeAbs(const Header& h, ReadFn read, void* ctx, Sink sink) {
       }
     }
     uint32_t c1 = BAD16_CYCLES();
-    if (h.indexed) {
-      if (h.gray)  // 番号 (8 ビット) の Gray 符号 → 2 進
-        for (int b = 6; b >= 0; b--)
-          for (int y = 0; y < 8; y++) rm[y][b] ^= rm[y][b + 1];
-    } else if (h.gray) {
-      // Gray 符号 → 2 進: 各色の上の桁から「1 つ上の桁 (2 進に戻した後) と XOR」。面の 1 行 = 1 バイトのまま計算できる
-      // (B = bit0-4, G = bit5-10, R = bit11-15。送られていない下位の面は 0 のまま)
-      static const uint8_t lo[3] = {0, 5, 11}, hi[3] = {4, 10, 15};
-      for (int c = 0; c < 3; c++)
-        for (int b = hi[c] - 1; b >= lo[c]; b--) {
-          if (!(h.mask >> b & 1)) break;
-          for (int y = 0; y < 8; y++) rm[y][b] ^= rm[y][b + 1];
+    if (mono) {
+      // 白黒 1 面 (frame-stream-37 以降): bit15 の 1 面だけ届く。ビットが 1 なら白 (0xFFFF)、0 なら黒。
+      // 16 面に写して転置する普通の道を通らない (1 画素 1 回の符号拡張だけ)
+      for (int y = 0; y < 8; y++) {
+        uint32_t r = rm[y][15];
+        uint16_t* p = px + y * 8;
+        for (int x = 0; x < 8; x++) p[x] = (uint16_t)(0u - ((r >> x) & 1u));
+      }
+    } else {
+      if (h.indexed) {
+        if (h.gray)  // 番号 (8 ビット) の Gray 符号 → 2 進
+          for (int b = 6; b >= 0; b--)
+            for (int y = 0; y < 8; y++) rm[y][b] ^= rm[y][b + 1];
+      } else if (h.gray) {
+        // Gray 符号 → 2 進: 各色の上の桁から「1 つ上の桁 (2 進に戻した後) と XOR」。面の 1 行 = 1 バイトのまま計算できる
+        // (B = bit0-4, G = bit5-10, R = bit11-15。送られていない下位の面は 0 のまま)
+        static const uint8_t lo[3] = {0, 5, 11}, hi[3] = {4, 10, 15};
+        for (int c = 0; c < 3; c++)
+          for (int b = hi[c] - 1; b >= lo[c]; b--) {
+            if (!(h.mask >> b & 1)) break;
+            for (int y = 0; y < 8; y++) rm[y][b] ^= rm[y][b + 1];
+          }
+      }
+      if (h.rep && !h.indexed) {
+        // 送られない下位の面を上位の面の複製で埋める (R3 なら bit12 = bit15, bit11 = bit14)
+        static const uint8_t lo[3] = {0, 5, 11}, hi[3] = {4, 10, 15};
+        for (int c = 0; c < 3; c++) {
+          int n = 0;
+          while (n <= hi[c] - lo[c] && (h.mask >> (hi[c] - n) & 1)) n++;
+          if (n == 0) continue;
+          for (int b = hi[c] - n; b >= lo[c]; b--)
+            for (int y = 0; y < 8; y++) rm[y][b] = rm[y][b + n];
         }
-    }
-    if (h.rep && h.mask == 0x8000) {
-      // 白黒 1 面 (frame-stream-37 以降): bit15 の 1 面だけ届く。全部の面に写して白 (0xFFFF) / 黒 (0) にする
-      for (int y = 0; y < 8; y++) memset(rm[y], rm[y][15], 16);
-    } else if (h.rep && !h.indexed) {
-      // 送られない下位の面を上位の面の複製で埋める (R3 なら bit12 = bit15, bit11 = bit14)
-      static const uint8_t lo[3] = {0, 5, 11}, hi[3] = {4, 10, 15};
-      for (int c = 0; c < 3; c++) {
-        int n = 0;
-        while (n <= hi[c] - lo[c] && (h.mask >> (hi[c] - n) & 1)) n++;
-        if (n == 0) continue;
-        for (int b = hi[c] - n; b >= lo[c]; b--)
-          for (int y = 0; y < 8; y++) rm[y][b] = rm[y][b + n];
       }
-    }
-    // 画素を組む = ビットの行列の転置。1 行の「面 0〜7 x 画素 0〜7」(8x8 ビット) を転置すると
-    // 「画素 0〜7 x 下位 8 ビット」になる。面 8〜15 で上位 8 ビット。1 行に転置 2 回で 8 画素
-    for (int y = 0; y < 8; y++) {
-      uint64_t L, Hh;
-      memcpy(&L, &rm[y][0], 8);   // バイト b = 面 b (リトルエンディアン)
-      memcpy(&Hh, &rm[y][8], 8);  // バイト b = 面 8 + b
-      L = detail::transpose8(L);  // バイト x = 画素 x の下位 8 ビット
-      Hh = detail::transpose8(Hh);  // バイト x = 画素 x の上位 8 ビット
-      uint32_t l0 = (uint32_t)L, l1 = (uint32_t)(L >> 32), h0 = (uint32_t)Hh, h1 = (uint32_t)(Hh >> 32);
-      uint16_t* p = px + y * 8;
-      for (int k = 0; k < 4; k++) {
-        p[k] = (uint16_t)(((l0 >> (8 * k)) & 0xFF) | (((h0 >> (8 * k)) & 0xFF) << 8));
-        p[k + 4] = (uint16_t)(((l1 >> (8 * k)) & 0xFF) | (((h1 >> (8 * k)) & 0xFF) << 8));
+      // 画素を組む = ビットの行列の転置。1 行の「面 0〜7 x 画素 0〜7」(8x8 ビット) を転置すると
+      // 「画素 0〜7 x 下位 8 ビット」になる。面 8〜15 で上位 8 ビット。1 行に転置 2 回で 8 画素
+      for (int y = 0; y < 8; y++) {
+        uint64_t L, Hh;
+        memcpy(&L, &rm[y][0], 8);   // バイト b = 面 b (リトルエンディアン)
+        memcpy(&Hh, &rm[y][8], 8);  // バイト b = 面 8 + b
+        L = detail::transpose8(L);  // バイト x = 画素 x の下位 8 ビット
+        Hh = detail::transpose8(Hh);  // バイト x = 画素 x の上位 8 ビット
+        uint32_t l0 = (uint32_t)L, l1 = (uint32_t)(L >> 32), h0 = (uint32_t)Hh, h1 = (uint32_t)(Hh >> 32);
+        uint16_t* p = px + y * 8;
+        for (int k = 0; k < 4; k++) {
+          p[k] = (uint16_t)(((l0 >> (8 * k)) & 0xFF) | (((h0 >> (8 * k)) & 0xFF) << 8));
+          p[k + 4] = (uint16_t)(((l1 >> (8 * k)) & 0xFF) | (((h1 >> (8 * k)) & 0xFF) << 8));
+        }
       }
-    }
-    if (h.indexed) {  // 番号 → 色
-      const uint16_t* pal = palette();
-      for (int i = 0; i < 64; i++) px[i] = pal[px[i] & 0xFF];
+      if (h.indexed) {  // 番号 → 色
+        const uint16_t* pal = palette();
+        for (int i = 0; i < 64; i++) px[i] = pal[px[i] & 0xFF];
+      }
     }
     uint32_t c2 = BAD16_CYCLES();
     prof().parse += c1 - c0;
