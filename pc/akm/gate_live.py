@@ -46,10 +46,12 @@ class Snapshot:
 
 # 送る形式 (仲介アプリのミラーのタブ)。BadCodec のカラーは R G B のビット数 (565 = RGB565 そのまま・可逆)
 FORMATS = ("Index 256", "BadCodec 565", "JPEG", "BadCodec 1bit")
-# 白黒 1 ビットのディザ。組織的ディザ (Bayer) は模様が場所で決まるので、動かない所は前のフレームと同じ
-# (= 変わったブロックだけ送る BadCodec と相性が良い)。誤差拡散 (Floyd-Steinberg) は 1 画素の変化で模様が
-# 広く変わってちらつき、差分が効かなくなるので使わない
-DITHERS = ("なし", "Bayer 4x4", "Bayer 8x8")
+# 白黒 1 ビットのディザ。BadCodec の仕様 (8x8 のブロック) に合わせ、8x8 の組織的ディザ (Bayer) を
+# ブロックの区切りにそろえて敷く: 同じ明るさの 8x8 は必ず同じ模様 (= 0〜64 個が白の 65 段階) になり、
+# 模様は場所で決まるので動かない所は前のフレームと同じ (変わったブロックだけ送る差分が効く)。
+# 誤差拡散 (Floyd-Steinberg) は 1 画素の変化で模様が広く変わってちらつき、差分が効かなくなるので使わない
+DITHERS = ("なし", "8x8")
+BLOCK = 8  # BadCodec のブロック
 
 
 def _bayer(n: int) -> np.ndarray:
@@ -59,19 +61,17 @@ def _bayer(n: int) -> np.ndarray:
     return m
 
 
-_BAYER = {"Bayer 4x4": _bayer(4), "Bayer 8x8": _bayer(8)}
+# 8x8 のしきい値 (0..256 に均等に 64 段)。画面の左上 (= BadCodec のブロックの区切り) から敷く
+_BAYER8 = ((_bayer(BLOCK).astype(np.float32) + 0.5) * (256.0 / (BLOCK * BLOCK)))
 
 
 def to_mono(small: np.ndarray, threshold: int, dither: str = "なし") -> np.ndarray:
     """白黒 (0 / 255 の 1 チャンネル)。threshold: しきい値 (ディザでは明るさの中心。128 で元のまま)"""
     g = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    m = _BAYER.get(dither)
-    if m is None:
+    if dither != "8x8":
         return np.where(g > threshold, 255, 0).astype(np.uint8)
-    n = m.shape[0]
-    t = (m.astype(np.float32) + 0.5) * (256.0 / (n * n))  # 0..256 に均等に並んだしきい値
     h, w = g.shape
-    t = np.tile(t, ((h + n - 1) // n, (w + n - 1) // n))[:h, :w]
+    t = np.tile(_BAYER8, ((h + BLOCK - 1) // BLOCK, (w + BLOCK - 1) // BLOCK))[:h, :w]
     v = g.astype(np.float32) + (128 - int(threshold))
     return np.where(v > t, 255, 0).astype(np.uint8)
 

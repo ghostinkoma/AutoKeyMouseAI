@@ -63,7 +63,7 @@ def test_mono_single_plane_matches_esp32_decoder(decoder):
     enc = Encoder(bits=(1, 1, 1))
     datas, expect = [], []
     for f in frames_of():
-        bw = cv2.cvtColor(to_mono(f, 128, "Bayer 4x4"), cv2.COLOR_GRAY2BGR)
+        bw = cv2.cvtColor(to_mono(f, 128, "8x8"), cv2.COLOR_GRAY2BGR)
         datas.append(enc.encode(bw))
         expect.append(enc.last_display[:135].copy())
         assert set(np.unique(expect[-1])) <= {0, 0xFFFF}
@@ -74,17 +74,19 @@ def test_mono_single_plane_matches_esp32_decoder(decoder):
     assert (got[0] == 0xFFFF).any() and (got[0] == 0).any()
 
 
-def test_bayer_dither_is_stable_and_keeps_brightness():
-    """組織的ディザ: 同じ絵なら同じ模様 (差分が効く)、白の割合が明るさに比例する"""
+def test_dither_8x8_follows_badcodec_blocks():
+    """8x8 の組織的ディザ: 同じ明るさなら全部の 8x8 ブロックが同じ模様 (ブロックの区切りにそろう)、
+    白の数 = 明るさ x 64 / 256 (65 段階)、同じ絵なら同じ模様 (差分が効く)"""
     from akm.gate_live import to_mono
 
     pytest.importorskip("cv2")
-    for k in (4, 8):
-        for v in (32, 96, 160, 224):
-            img = np.full((135, 240, 3), v, np.uint8)
-            a, b = to_mono(img, 128, f"Bayer {k}x{k}"), to_mono(img, 128, f"Bayer {k}x{k}")
-            assert (a == b).all()
-            assert abs((a == 255).mean() - v / 256) < 1.0 / (k * k) + 1e-6
+    for v in range(0, 256, 4):
+        img = np.full((136, 240, 3), v, np.uint8)
+        a = to_mono(img, 128, "8x8")
+        assert (a == to_mono(img, 128, "8x8")).all()
+        blocks = a.reshape(17, 8, 30, 8).transpose(0, 2, 1, 3).reshape(-1, 8, 8)
+        assert (blocks == blocks[0]).all()
+        assert abs(int((blocks[0] == 255).sum()) - v / 4) <= 1
     img = np.full((135, 240, 3), 100, np.uint8)
     assert (to_mono(img, 128, "なし") == 0).all() and (to_mono(img, 90, "なし") == 255).all()
 

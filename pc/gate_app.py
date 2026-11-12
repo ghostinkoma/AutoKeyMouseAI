@@ -54,7 +54,7 @@ except Exception as _e:  # noqa: BLE001
     cv2 = LiveFeed = MapSource = None
     LIVE_ERROR = f"{type(_e).__name__}: {_e}"
     FORMATS = ("Index 256", "BadCodec 565", "JPEG", "BadCodec 1bit")
-    DITHERS = ("なし", "Bayer 4x4", "Bayer 8x8")
+    DITHERS = ("なし", "8x8")
 
     def color_bits(fmt):
         tail = fmt.split()[-1]
@@ -301,7 +301,7 @@ class GateApp:
         self.mirror_fmt = tk.StringVar(value="Index 256")  # 既定はインデックス 256 色。config の mirror.color で変わり、選んだものは覚えておく
         self.mirror_ent = tk.StringVar(value="なし")  # BadCodec のフレームをさらに包む: なし / tANS
         self.threshold = tk.IntVar(value=100)
-        self.dither = tk.StringVar(value="Bayer 4x4")  # 白黒 1 ビットのディザ (akm.gate_live.DITHERS)
+        self.dither = tk.StringVar(value="8x8")  # 白黒 1 ビットのディザ (BadCodec の 8x8 にそろえた組織的ディザ)
         self.fps = tk.IntVar(value=15)
         self.com = tk.StringVar(value="COM18")
         self.host = tk.StringVar(value="")
@@ -494,7 +494,7 @@ class GateApp:
         df = ttk.Frame(g)
         df.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Label(df, text="ディザ").pack(side=tk.LEFT)
-        ttk.Combobox(df, textvariable=self.dither, values=list(DITHERS), width=10, state="readonly").pack(side=tk.LEFT)
+        ttk.Combobox(df, textvariable=self.dither, values=list(DITHERS), width=6, state="readonly").pack(side=tk.LEFT)
         g = rb.group(t, "送信経路")
         for i, (v, text) in enumerate((("wifi", "Wi-Fi"), ("serial", "有線 (COM)"))):
             ttk.Radiobutton(g, text=text, value=v, variable=self.route,
@@ -1060,6 +1060,8 @@ class GateApp:
             d.pop("mirror_fmt", None)
         if d.get("mirror_ent") not in ENTROPY_MODES:  # ハフマン (外した) など
             d.pop("mirror_ent", None)
+        if str(d.get("dither", "")).startswith("Bayer"):  # 前の版の Bayer 4x4 / 8x8 → 8x8
+            d["dither"] = "8x8"
         if d.get("dither") not in DITHERS:
             d.pop("dither", None)
         for k, var in self._ui_vars().items():
