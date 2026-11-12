@@ -72,7 +72,7 @@ def load_cfg() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# MURex のウィンドウの一覧
+# 送信先のウィンドウの一覧 (MURex + その他のウィンドウ)
 # ---------------------------------------------------------------------------
 @dataclass
 class GameWindow:
@@ -83,6 +83,9 @@ class GameWindow:
     level: str = "?"
     resets: str = "?"
     rc: str = "?"
+    kind: str = "game"     # "game" = MURex / "other" = その他のウィンドウ (VLC・ブラウザなど。映すだけ)
+    exe: str = "Main.exe"  # 実行ファイル名 (OBS の撮影先に使う)
+    cls: str = GAME_CLASS  # ウィンドウのクラス名 (同上)
 
     @classmethod
     def parse(cls, hwnd: int, pid: int, title: str) -> "GameWindow":
@@ -91,11 +94,27 @@ class GameWindow:
             return cls(hwnd, pid, title, f"(名前なし) {hwnd:#x}")
         return cls(hwnd, pid, title, m["name"], m["lv"], m["rs"], m["rc"])
 
+    @classmethod
+    def other(cls, hwnd: int, pid: int, title: str, exe: str, wcls: str) -> "GameWindow":
+        name = exe[:-4] if exe.lower().endswith(".exe") else (exe or "?")
+        return cls(hwnd, pid, title, name, kind="other", exe=exe, cls=wcls)
+
+    @property
+    def is_game(self) -> bool:
+        return self.kind == "game"
+
     def label(self, foreground: bool) -> str:
         fg = "  ← 前面" if foreground else ""
+        if not self.is_game:
+            t = self.title if len(self.title) <= 40 else self.title[:39] + "…"
+            return f"[他] {self.name[:12]:<12} {t}{fg}"
         return f"{self.name:<12} Lv{self.level:>4}  Rs{self.resets:>3}  RC{self.rc:>4}   PID {self.pid}{fg}"
 
 
+DUMMY_OTHER_WINDOWS = [
+    GameWindow.other(0x00A1B2C4, 41000, "sample.mp4 - VLC media player", "vlc.exe", "Qt5QWindowIcon"),
+    GameWindow.other(0x00A1B2D8, 41200, "YouTube - Google Chrome", "chrome.exe", "Chrome_WidgetWin_1"),
+]
 DUMMY_WINDOWS = [
     GameWindow.parse(0x007B0634, 30560, "MURex Client || Tiffany || Lv: 400 || Rs: 50 || RC: 71 || GC: 0 || AC: 2,235"),
     GameWindow.parse(0x0176045C, 24956, "MURex Client || Thanatos || Lv: 400 || Rs: 50 || RC: 18 || GC: 0 || AC: 470"),
@@ -121,12 +140,30 @@ if IS_WINDOWS:
     _user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
     _user32.GetAncestor.restype = wintypes.HWND
     _user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    _user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    _user32.GetWindow.restype = wintypes.HWND
+    _user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    _user32.GetWindowLongW.restype = ctypes.c_long
+    _user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 
 
-def list_game_windows() -> list[GameWindow]:
+# その他のウィンドウから外すもの: このアプリ自身・デスクトップ・タスクバーなど映しても意味の無いもの
+OTHER_SKIP_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow",
+                      "ApplicationFrameWindow_Hidden", "TkTopLevel", "Tk"}
+OTHER_MIN_W, OTHER_MIN_H = 160, 90  # これより小さいウィンドウは出さない (ツールの小窓など)
+
+
+def list_game_windows(include_other: bool = False) -> list[GameWindow]:
+    """MURex のウィンドウ。include_other=True なら、その他の見えているウィンドウ (VLC・ブラウザなど) も後ろに付ける"""
     if not IS_WINDOWS:
-        return list(DUMMY_WINDOWS)
-    found: list[GameWindow] = []
+        return list(DUMMY_WINDOWS) + (list(DUMMY_OTHER_WINDOWS) if include_other else [])
+    import os
+
+    from akm.screen import process_name
+
+    games: list[GameWindow] = []
+    others: list[GameWindow] = []
+    me = os.getpid()
 
     @_ENUMPROC
     def cb(hwnd, _):
@@ -134,17 +171,40 @@ def list_game_windows() -> list[GameWindow]:
             return True
         buf = ctypes.create_unicode_buffer(256)
         _user32.GetClassNameW(hwnd, buf, 256)
-        if buf.value != GAME_CLASS:
+        wcls = buf.value
+        if wcls != GAME_CLASS and not include_other:
             return True
         title = ctypes.create_unicode_buffer(512)
         _user32.GetWindowTextW(hwnd, title, 512)
         pid = wintypes.DWORD()
         _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        found.append(GameWindow.parse(int(hwnd), int(pid.value), title.value))
+        if wcls == GAME_CLASS:
+            games.append(GameWindow.parse(int(hwnd), int(pid.value), title.value))
+            return True
+        if (not title.value or wcls in OTHER_SKIP_CLASSES or int(pid.value) == me
+                or _user32.GetWindow(hwnd, 4)  # GW_OWNER: ダイアログなど持ち主のある窓
+                or _user32.GetWindowLongW(hwnd, -20) & 0x80  # GWL_EXSTYLE の WS_EX_TOOLWINDOW
+                or _cloaked(hwnd)):  # 別の仮想デスクトップ以外で隠れている UWP の窓など
+            return True
+        r = wintypes.RECT()
+        if not _user32.GetClientRect(hwnd, ctypes.byref(r)) or r.right < OTHER_MIN_W or r.bottom < OTHER_MIN_H:
+            return True
+        others.append(GameWindow.other(int(hwnd), int(pid.value), title.value, process_name(int(hwnd)), wcls))
         return True
 
     _user32.EnumWindows(cb, 0)
-    return found
+    others.sort(key=lambda w: (w.name.lower(), w.title.lower()))
+    return games + others
+
+
+def _cloaked(hwnd) -> bool:
+    """DWM で隠されている (起動していない UWP アプリの窓など)。別の仮想デスクトップの窓は出す"""
+    try:
+        v = ctypes.c_int(0)
+        ctypes.windll.dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), 14, ctypes.byref(v), 4)  # DWMWA_CLOAKED
+        return v.value not in (0, 2)  # 2 = DWM_CLOAKED_SHELL (別の仮想デスクトップ)
+    except Exception:
+        return False
 
 
 def foreground_hwnd(windows: list[GameWindow]) -> int | None:
@@ -298,6 +358,7 @@ class GateApp:
         self.vhid = None           # 仮想 HID (akm.virtual_hid.VirtualHid)。初めて使うときに作る
         self.shuttle = None        # 往復テスト (akm.shuttle_test.ShuttleTest)
         self.auto_refresh = tk.BooleanVar(value=True)
+        self.show_other = tk.BooleanVar(value=False)  # 送信先の一覧に MURex 以外のウィンドウも出す
         self.mirror_fmt = tk.StringVar(value="Index 256")  # 既定はインデックス 256 色。config の mirror.color で変わり、選んだものは覚えておく
         self.mirror_ent = tk.StringVar(value="なし")  # BadCodec のフレームをさらに包む: なし / tANS
         self.threshold = tk.IntVar(value=100)
@@ -397,7 +458,7 @@ class GateApp:
 
         # ホーム: 送信先の選択とゲート
         t = rb.tab("ホーム")
-        g = rb.group(t, "送信先ウィンドウ (MURex)")
+        g = rb.group(t, "送信先ウィンドウ")
         self.win_list = tk.Listbox(g, height=4, width=62, exportselection=False, font=self.mono,
                                    activestyle="none", selectbackground="#2b7de9")
         self.win_list.grid(row=0, column=0, rowspan=2, sticky="nsew")
@@ -406,6 +467,9 @@ class GateApp:
         side.grid(row=0, column=1, rowspan=2, sticky="ns", padx=(4, 0))
         ttk.Button(side, text="更新", command=self.refresh_windows).pack(fill=tk.X)
         ttk.Checkbutton(side, text="自動 (1秒)", variable=self.auto_refresh).pack(anchor="w", pady=(4, 0))
+        # その他のウィンドウ (VLC・ブラウザなど): 液晶に映すだけ (ゲートや試験・マップ・HP は使わない)
+        ttk.Checkbutton(side, text="その他の\nウィンドウも", variable=self.show_other,
+                        command=self.refresh_windows).pack(anchor="w")
         ttk.Checkbutton(side, text="前面に出して\n実行する", variable=self.bring_front).pack(anchor="w")
 
         g = rb.group(t, "ゲート")
@@ -901,20 +965,20 @@ class GateApp:
 
     # ---- 送信先ウィンドウ ---------------------------------------------------
     def refresh_windows(self):
-        self.windows = list_game_windows()
+        self.windows = list_game_windows(bool(self.show_other.get()))
         fg = foreground_hwnd(self.windows)
         self.win_list.delete(0, tk.END)
         for w in self.windows:
             self.win_list.insert(tk.END, w.label(w.hwnd == fg))
         t = self.target()
         if t is not None:
-            if t.name != self.target_name:  # ゲーム内でキャラクターを変えた (同じウィンドウ) / クライアントを再起動した
+            if t.is_game and t.name != self.target_name:  # ゲーム内でキャラクターを変えた (同じウィンドウ) / クライアントを再起動した
                 self.log("INFO", f"送信先のキャラクターが {self.target_name} → {t.name} に変わりました (同じウィンドウを撮り続けます)")
                 self.target_name = t.name
             self.target_hwnd = t.hwnd
             self.win_list.selection_set(self.windows.index(t))
-            if self.live is not None:  # タイトル (キャラクター名・レベル) の変化も OBS に伝える
-                self.live.set_target(t.hwnd, t.name, t.title, t.pid)
+            if self.live is not None:  # タイトル (キャラクター名・レベル・動画の名前) の変化も OBS に伝える
+                self._live_target(t)
         elif self.target_name and self.armed.get():
             self.log("WARN", f"送信先 {self.target_name} のウィンドウが見つかりません。停止します")
             self.disarm()
@@ -925,8 +989,19 @@ class GateApp:
         hwnd = getattr(self, "target_hwnd", None)
         t = next((w for w in self.windows if w.hwnd == hwnd), None) if hwnd else None
         if t is None and self.target_name:
-            t = next((w for w in self.windows if w.name == self.target_name), None)
+            t = next((w for w in self.windows if w.is_game and w.name == self.target_name), None)
         return t
+
+    def _live_target(self, w: GameWindow) -> None:
+        self.live.set_target(w.hwnd, w.name, w.title, w.pid, kind=w.kind, exe=w.exe, cls=w.cls)
+
+    def _target_is_game(self, what: str) -> bool:
+        """ゲート・試験は MURex のウィンドウだけ。その他のウィンドウ (VLC など) は映すだけ"""
+        t = self.target()
+        if t is not None and not t.is_game:
+            self.log_threadsafe("WARN", f"送信先がゲーム以外のウィンドウ ({t.name}) なので{what}は使えません (液晶に映すだけです)")
+            return False
+        return True
 
     def on_select_window(self, _):
         sel = self.win_list.curselection()
@@ -938,17 +1013,23 @@ class GateApp:
                 self.disarm()
             self.target_name = w.name
             self.target_hwnd = w.hwnd
-            self.log("INFO", f"送信先を {w.name} (PID {w.pid}, hwnd {w.hwnd:#010x}) にしました")
+            if w.is_game:
+                self.log("INFO", f"送信先を {w.name} (PID {w.pid}, hwnd {w.hwnd:#010x}) にしました")
+            else:
+                self.log("INFO", f"送信先をゲーム以外のウィンドウ「{w.title}」({w.exe}, hwnd {w.hwnd:#010x}) にしました。"
+                                 "液晶に映すだけで、ゲート・試験・マップ・HP は使いません")
             if self.auto_send.get() and self.sender is None and self.host.get().strip():
                 self.root.after(500, self.start_sending)
             if self.live is not None:
-                self.live.set_target(w.hwnd, w.name, w.title, w.pid)
+                self._live_target(w)
                 self.snap = None
                 self.draw_map()
 
     def arm(self, activate: bool = True):
         if not self.target():
             self.log("WARN", "送信先のウィンドウを一覧から選んでください")
+            return
+        if not self._target_is_game("ゲート (ARM)"):
             return
         self.armed.set(True)
         self._armed = True
@@ -1068,7 +1149,7 @@ class GateApp:
     # ---- 試験の設定を覚えておく (models/gate_ui.json。起動し直しても残す) -----------------------
     def _ui_vars(self) -> dict:
         return {"arm_runs": self.arm_runs, "mirror_fmt": self.mirror_fmt, "mirror_ent": self.mirror_ent,
-                "threshold": self.threshold, "dither": self.dither, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
+                "threshold": self.threshold, "dither": self.dither, "show_other": self.show_other, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
                 "shuttle_wait": self.shuttle_wait, "shuttle_axis": self.shuttle_axis, "mouse_mode": self.mouse_mode,
                 "explore_radius": self.explore_radius, "explore_step": self.explore_step,
                 "explore_minutes": self.explore_minutes}
@@ -1277,6 +1358,8 @@ class GateApp:
         t = self.target()
         if t is None:
             self.log_threadsafe("WARN", "送信先のウィンドウ (例 Thanatos) を一覧から選んでください")
+            return None
+        if not self._target_is_game(what):
             return None
         if self.live is None:
             self.log_threadsafe("ERR", "画面の撮影が動いていないので、現在地を読めません")

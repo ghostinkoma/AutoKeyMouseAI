@@ -151,3 +151,34 @@ def test_source_per_client_follows_character_change(monkeypatch):
     b = o.ensure(30560, "MURex Client || Thanatos || Lv: 400")
     assert a == b == "AKM 30560"
     assert fake.calls == ["create", "set"] and "Thanatos" in fake.inputs[a][2]["window"]
+
+
+def test_other_window_uses_window_capture_and_follows_title(monkeypatch):
+    """その他のウィンドウ (VLC・ブラウザ): ウィンドウキャプチャ (WGC)、同じ実行ファイルの中でタイトルが一番近い窓。
+    動画を変えてタイトルが変わったら撮影先を書き直す。ゲームキャプチャを作っても、動いている窓のソースは消さない"""
+    fake = FakeObs()
+    install(monkeypatch, fake)
+    monkeypatch.setattr("akm.obs_windows.process_alive", lambda pid: True)
+    o = ObsWindows({}, log=lambda lv, m: None)
+    src = o.ensure_window(4100, "a.mp4 - VLC media player", "Qt5QWindowIcon", "vlc.exe")
+    scene, kind, st = fake.inputs[src]
+    assert src == "AKM win 4100" and kind == "window_capture"
+    assert (st["method"], st["priority"], st["cursor"], st["client_area"]) == (2, 2, False, True)
+    assert st["window"] == "a.mp4 - VLC media player:Qt5QWindowIcon:vlc.exe"
+    o.ensure_window(4100, "a.mp4 - VLC media player", "Qt5QWindowIcon", "vlc.exe")
+    assert fake.calls == ["create"]
+    o.ensure_window(4100, "b.mp4 - VLC media player", "Qt5QWindowIcon", "vlc.exe")
+    assert fake.calls == ["create", "set"] and fake.inputs[src][2]["window"].startswith("b.mp4")
+    o.ensure(30560, "MURex Client || Tiffany || Lv: 400")
+    assert src in fake.inputs and "AKM 30560" in fake.inputs
+
+
+def test_other_windows_are_listed_after_games():
+    import gate_app
+
+    games = gate_app.list_game_windows()
+    both = gate_app.list_game_windows(include_other=True)
+    assert all(w.is_game for w in games) and both[:len(games)] == games
+    others = both[len(games):]
+    assert others and all(not w.is_game for w in others)
+    assert others[0].label(False).startswith("[他] ")

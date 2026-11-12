@@ -1,4 +1,5 @@
-"""OBS のゲームキャプチャで、MURex のウィンドウをキャラクターごとに撮る (obs-websocket 経由)。
+"""OBS で撮る (obs-websocket 経由)。MURex はゲームキャプチャでキャラクターごとに、その他のウィンドウ (VLC・ブラウザなど)
+はウィンドウキャプチャで。
 
 OBS のゲームキャプチャは、OBS の DLL (graphics-hook) をゲームに入れて描画そのものを受け取る。
 そのため別の仮想デスクトップにあっても・他のウィンドウが重なっていても撮れ、Windows 10 の黄色い枠も出ない。
@@ -33,6 +34,8 @@ SCENE = "AKM Capture"
 SOURCE_PREFIX = "AKM "
 GAME_CLASS = "MURex Client"
 PRIORITY_TITLE = 1  # OBS: ウィンドウのタイトルが一致するものだけ (0 = 同じクラス、2 = 同じ実行ファイルも可)
+PRIORITY_EXE = 2    # OBS: 同じ実行ファイルの中でタイトルが一番近いもの (動画・タブでタイトルが変わる窓向け)
+WINDOW_SOURCE_PREFIX = SOURCE_PREFIX + "win "  # その他のウィンドウ (VLC・ブラウザなど) のウィンドウキャプチャ
 
 
 def obs_window_string(title: str, cls: str = GAME_CLASS, exe: str = "Main.exe") -> str:
@@ -213,17 +216,42 @@ class ObsWindows:
         self._known[src] = want
         return src
 
+    def ensure_window(self, client, title: str, cls: str, exe: str) -> str:
+        """その他のウィンドウ (VLC・ブラウザなど) を OBS のウィンドウキャプチャ (Windows Graphics Capture) で撮る。
+        ゲームキャプチャはブラウザ・動画プレーヤーにうまく入れないことがある。ほかの窓が重なっていても撮れる。
+        動画やタブを変えるとタイトルが変わるので、同じ実行ファイルの中でタイトルが一番近い窓を選ばせ、撮影先も書き直す"""
+        with self._lock:
+            src = f"{WINDOW_SOURCE_PREFIX}{client}"
+            want = obs_window_string(title, cls, exe)
+            if self._known.get(src) == want:
+                return src
+            c = self.client()
+            self._ensure_scene(c)
+            settings = {"window": want, "method": 2, "priority": PRIORITY_EXE, "cursor": False,
+                        "client_area": True, "compatibility": False}  # method 2 = Windows 10 (WGC)
+            names = {i.get("inputName") for i in c.get_input_list(None).inputs}
+            if src in names:
+                c.set_input_settings(src, settings, True)
+            else:
+                self._cleanup(c, names, keep=src)
+                c.create_input(SCENE, src, "window_capture", settings, True)
+                self.log("INFO", f"OBS にウィンドウキャプチャ '{src}' を作りました ({exe})")
+            self._known[src] = want
+            return src
+
     def _cleanup(self, c, names, keep: str) -> None:
         """終了したクライアントの 'AKM <プロセス ID>' と、キャラクター名で作っていた古い 'AKM <名前>' を消す"""
         for n in names:
             if not n or not n.startswith(SOURCE_PREFIX) or n == keep:
                 continue
             tail = n[len(SOURCE_PREFIX):]
+            if tail.startswith("win "):  # その他のウィンドウのウィンドウキャプチャ ("AKM win <プロセス ID>")
+                tail = tail[4:]
             if tail.isdigit() and process_alive(int(tail)):
                 continue
             try:
                 c.remove_input(n)
-                self.log("INFO", f"OBS の使っていないゲームキャプチャ '{n}' を消しました")
+                self.log("INFO", f"OBS の使っていないキャプチャ '{n}' を消しました")
             except Exception:
                 pass
 

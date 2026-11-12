@@ -150,6 +150,9 @@ class LiveFeed:
         self.name = ""             # キャラクター名 (表示用)
         self.pid = 0               # ゲームのクライアントのプロセス ID (OBS のソース名に使う)
         self.title = ""            # 今のウィンドウのタイトル (OBS の撮影先に使う)
+        self.kind = "game"         # "game" = MURex / "other" = その他のウィンドウ (映すだけ。解析しない)
+        self.exe = "Main.exe"      # その他のウィンドウ: 実行ファイル名・クラス名 (OBS のウィンドウキャプチャの撮影先)
+        self.cls = ""
         self._obs = None
         self._obs_err = ""
         self._obs_wait_since = 0.0  # OBS がゲームをつかむのを待ち始めた時刻
@@ -183,12 +186,15 @@ class LiveFeed:
             self.log("WARN", f"現在地の読み取り (OCR) は使えません: {e}")
 
     # ---- 操作 (UI のスレッドから) -------------------------------------------------
-    def set_target(self, hwnd: int, name: str = "", title: str = "", pid: int = 0) -> None:
-        """送信先のウィンドウ。同じウィンドウでキャラクター名・タイトルが変わったときは、撮影先 (OBS) だけ合わせる"""
+    def set_target(self, hwnd: int, name: str = "", title: str = "", pid: int = 0, kind: str = "game",
+                   exe: str = "Main.exe", cls: str = "") -> None:
+        """送信先のウィンドウ。同じウィンドウでキャラクター名・タイトルが変わったときは、撮影先 (OBS) だけ合わせる。
+        kind="other" (VLC・ブラウザなど) は OBS のウィンドウキャプチャで撮り、現在地・HP は読まない"""
         with self._lock:
             self.title = title or self.title
             self.name = name or self.name
             self.pid = pid or self.pid
+            self.kind, self.exe, self.cls = kind, exe, cls
             if hwnd != self.hwnd:
                 self.hwnd = hwnd
                 self._trail = []
@@ -250,7 +256,7 @@ class LiveFeed:
         while not self._stop.is_set():
             self._stop.wait(self._loc_every)
             hwnd = self.hwnd
-            if not hwnd:
+            if not hwnd or self.kind != "game":  # その他のウィンドウは映すだけ (現在地・HP は読まない)
                 continue
             try:
                 t0 = time.monotonic()
@@ -300,7 +306,10 @@ class LiveFeed:
             if self._obs is None:
                 self._obs = ObsWindows(self.cfg.get("obs"), log=self.log)
             try:
-                src = self._obs.ensure(self.pid or self.name, self.title)
+                if self.kind == "game":
+                    src = self._obs.ensure(self.pid or self.name, self.title)
+                else:
+                    src = self._obs.ensure_window(self.pid or self.hwnd, self.title, self.cls, self.exe)
                 fw, fh = self._full_size
                 if full or not fw:  # 原寸 (初回は縦横比を知るためにも)
                     img = self._obs.grab(src)
@@ -316,9 +325,11 @@ class LiveFeed:
                     if not self._obs_wait_since:
                         self._obs_wait_since = now
                     waited = now - self._obs_wait_since
-                    msg = "OBS がゲームの画面をつかむのを待っています"
+                    what = "ゲーム" if self.kind == "game" else "ウィンドウ"
+                    msg = f"OBS が{what}の画面をつかむのを待っています"
                     if waited > 10:
-                        msg += (f" ({waited:.0f} 秒)。OBS を管理者として実行しているか・ゲームを最小化していないか・"
+                        msg += (f" ({waited:.0f} 秒)。" + ("OBS を管理者として実行しているか・" if self.kind == "game" else "") +
+                                f"{what}を最小化していないか・"
                                 "OBS のソース 'AKM ...' のプロパティでウィンドウが選ばれているか確認してください")
                     if waited > 10 and self._obs_err != "wait":
                         self._obs_err = "wait"
@@ -332,7 +343,7 @@ class LiveFeed:
                 raise RuntimeError(f"OBS: {msg}") from e
             self._obs_err = ""
             self._obs_wait_since = 0.0
-            if float(img.max()) < 8:
+            if float(img.max()) < 8 and self.kind == "game":
                 raise RuntimeError("OBS の画像が真っ黒です (ゲームに入れていない。OBS を管理者として実行していますか)")
             return img, f"obs ({src})"
         # 選んだウィンドウだけを撮る (タイトルで探し直さない)。画面から撮る方式には戻さない:
@@ -346,9 +357,11 @@ class LiveFeed:
         if img is None:
             img = capture_window(hwnd)
             method = "printwindow"
-            if img is None or float(img.max()) <= 8:
+            if img is None or (float(img.max()) <= 8 and self.kind == "game"):
                 raise RuntimeError("ウィンドウから撮れません (真っ黒)。Main.exe は管理者で動いているので、"
                                    "このアプリも管理者の PowerShell から起動するか、撮影方式を OBS にしてください")
+            if img is None:
+                raise RuntimeError("ウィンドウから撮れません。撮影方式を OBS にしてください")
         with self._lock:  # 解析スレッドが原寸を使う
             self._last_full, self._last_full_ts = img, time.monotonic()
         return img, method
