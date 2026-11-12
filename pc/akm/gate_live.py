@@ -42,6 +42,7 @@ class Snapshot:
     error: str = ""
     trail: list = field(default_factory=list)  # このウィンドウで読めた現在地の履歴 [(map, x, y)]
     timing: dict = field(default_factory=dict)  # 1 枚にかかった時間 (ms): grab 撮影 / make 縮小・形式 / analyze 解析
+    seq: int = 0                        # 何枚目の画面か (新しい画面が来たら増える。同じ絵を 2 回送らないため)
 
 
 # 送る形式 (仲介アプリのミラーのタブ)。BadCodec のカラーは R G B のビット数 (565 = RGB565 そのまま・可逆)
@@ -211,6 +212,15 @@ class LiveFeed:
         with self._lock:
             return self._snap
 
+    def wait_newer(self, seq: int, timeout: float) -> Snapshot:
+        """seq より新しい画面が来るまで待って返す (来なければ timeout 秒後に今のものを返す)"""
+        end = time.monotonic() + timeout
+        while True:
+            snap = self.latest()
+            if snap.seq != seq or time.monotonic() >= end:
+                return snap
+            time.sleep(0.002)
+
     def stop(self) -> None:
         self._stop.set()
 
@@ -218,16 +228,32 @@ class LiveFeed:
     def _run(self):
         last = time.monotonic()
         fps = 0.0
+        seq = 0
+        wgc_seen = -1  # ウィンドウから直接撮るとき: 最後に使った画面の番号
+        made = 0.0     # 最後に送信画面を作った時刻
         while not self._stop.is_set():
             t0 = time.monotonic()
             hwnd = self.hwnd
             if not hwnd:
                 time.sleep(0.2)
                 continue
+            # ウィンドウから直接撮るときは、新しい画面を受け取る間隔を送る fps に合わせる
+            # (固定の 50ms = 20fps だと、動画が PC 側でコマ落ちしていた)
+            self.screen.wgc_interval_ms = max(8, int(1000 / max(1.0, self.fps_target)) - 2)
+            if self.mode != "obs":
+                wgc = self.screen._wgc
+                # (画面が止まっていると新しい画面は来ないので、0.5 秒に 1 回は作り直す: 窓が閉じた等を見つけるため)
+                if (wgc is not None and wgc.hwnd == hwnd and not wgc.closed and wgc.frames == wgc_seen
+                        and t0 - made < 0.5):
+                    self._stop.wait(0.003)  # まだ新しい画面が来ていない: 同じ絵は作らない (少し待って見直す)
+                    continue
             snap = Snapshot(hwnd=hwnd, ts=time.time())
             try:
                 self._check_window(hwnd)
                 img, snap.method = self._grab(hwnd, full=False)
+                wgc = self.screen._wgc
+                if self.mode != "obs" and wgc is not None:
+                    wgc_seen = wgc.frames
                 t1 = time.monotonic()
                 small = compose(img, [])
                 snap.preview, _ = to_send_format(small, self.fmt, self.threshold, self.dither)
@@ -240,6 +266,9 @@ class LiveFeed:
                 snap.fps = fps
             except Exception as e:
                 snap.error = str(e)
+            seq += 1
+            snap.seq = seq
+            made = t0
             with self._lock:
                 snap.loc, snap.hp, snap.mp = self._loc, self._hp, self._mp
                 snap.trail = list(self._trail)

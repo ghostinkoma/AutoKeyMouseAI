@@ -943,8 +943,13 @@ class GateApp:
             self.log("INFO", "ESP32 への送信を止めました")
 
     def _sender_grab(self):
-        """送信スレッドから呼ばれる: 送信画面と同じ 240x135 の絵 (形式に合わせて加工済み)"""
-        snap = self.live.latest() if self.live is not None else None
+        """送信スレッドから呼ばれる: 送信画面と同じ 240x135 の絵 (形式に合わせて加工済み)。
+        前に送ったものより新しい画面が来るまで待つ (撮影と送信を別々の間隔で回すと、同じ絵を 2 回送ったり
+        1 枚飛ばしたりしてコマ落ちに見える)。画面が止まっていれば 0.25 秒ごとに今の絵を送る"""
+        if self.live is None:
+            raise RuntimeError("no frame")
+        snap = self.live.wait_newer(getattr(self, "_sent_seq", -1), 0.25)
+        self._sent_seq = snap.seq
         if snap is None or snap.preview is None:
             raise RuntimeError(snap.error if snap is not None and snap.error else "no frame")
         return snap.preview

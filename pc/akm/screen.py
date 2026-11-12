@@ -261,17 +261,21 @@ class WgcCapture:
     切り替えたりしても撮れる。最新の 1 枚を保持し、latest() で取り出す。
     """
 
-    def __init__(self, hwnd: int):
+    def __init__(self, hwnd: int, interval_ms: int = 50):
+        """interval_ms: 新しい画面を受け取る最短の間隔 (Windows 11)。ゲームの解析だけなら 50 (20fps) で足りるが、
+        液晶ミラーで動画を映すときは送る fps に合わせる (50 のままだと 20fps で頭打ちになり、PC 側でコマが落ちる)"""
         from windows_capture import WindowsCapture  # 無ければ ImportError
 
         self.hwnd = hwnd
+        self.interval_ms = int(interval_ms)
         self._lock = threading.Lock()
         self._frame: np.ndarray | None = None
         self._t = 0.0
+        self.frames = 0  # 受け取った画面の数 (新しい画面が来たかを見分ける)
         self.closed = False
         # 枠の非表示 (draw_border=False) と撮影間隔の指定 (minimum_update_interval) は Windows 11 のみ対応。
         # Windows 10 では開始時に例外になるので、言われたものを外してやり直す
-        kw = dict(cursor_capture=False, window_hwnd=hwnd, minimum_update_interval=50, draw_border=False)
+        kw = dict(cursor_capture=False, window_hwnd=hwnd, minimum_update_interval=self.interval_ms, draw_border=False)
         for _ in range(3):
             try:
                 self.control = self._start(WindowsCapture(**kw))
@@ -291,10 +295,13 @@ class WgcCapture:
             if self.closed:
                 control.stop()
                 return
-            img = np.ascontiguousarray(frame.frame_buffer[:, :, :3])
+            # BGRA のまま丸ごと写す (速い memcpy)。色の 4 つ目を落とすのは使うときに 1 回だけ (latest)。
+            # 前は来るたびに [:, :, :3] を詰め直していて、大きな窓だと 1 枚数 ms かかり他のスレッドを待たせた
+            img = np.array(frame.frame_buffer, copy=True)
             with self._lock:
                 self._frame = img
                 self._t = time.monotonic()
+                self.frames += 1
 
         @cap.event
         def on_closed():
@@ -313,7 +320,11 @@ class WgcCapture:
             return None
         x, y = max(0, x), max(0, y)
         out = img[y : y + h, x : x + w]
-        return out if out.shape[0] >= h // 2 and out.shape[1] >= w // 2 else img
+        if not (out.shape[0] >= h // 2 and out.shape[1] >= w // 2):
+            out = img
+        import cv2
+
+        return cv2.cvtColor(out, cv2.COLOR_BGRA2BGR) if out.ndim == 3 and out.shape[2] == 4 else out
 
     def stop(self) -> None:
         self.closed = True
@@ -519,6 +530,7 @@ class GameScreen:
         self._wgc: WgcCapture | None = None
         self._wgc_failed = False
         self._wgc_started = 0.0
+        self.wgc_interval_ms = 50  # Windows Graphics Capture の最短の間隔 (液晶ミラーは送る fps に合わせて変える)
         self._pw_black = 0
         self._method = ""
         self._wgc_lock = threading.Lock()
@@ -570,12 +582,13 @@ class GameScreen:
         with self._wgc_lock:
             if self._wgc_failed:
                 return None
-            if self._wgc is not None and (self._wgc.hwnd != hwnd or self._wgc.closed):
+            if self._wgc is not None and (self._wgc.hwnd != hwnd or self._wgc.closed
+                                          or self._wgc.interval_ms != self.wgc_interval_ms):
                 self._wgc.stop()
                 self._wgc = None
             if self._wgc is None:
                 try:
-                    self._wgc = WgcCapture(hwnd)
+                    self._wgc = WgcCapture(hwnd, self.wgc_interval_ms)
                     self._wgc_started = time.monotonic()
                 except ImportError:
                     self._wgc_failed = True
