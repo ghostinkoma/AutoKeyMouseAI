@@ -16,9 +16,9 @@
 #define AKM_FW_TAG ""
 #endif
 #if AKM_MIRROR_ONLY
-#define FW_VERSION "frame-stream-45-mirror" AKM_FW_TAG
+#define FW_VERSION "frame-stream-46-mirror" AKM_FW_TAG
 #else
-#define FW_VERSION "frame-stream-45" AKM_FW_TAG
+#define FW_VERSION "frame-stream-46" AKM_FW_TAG
 #endif
 #define BLE_MANUFACTURER "ghostinkoma"
 
