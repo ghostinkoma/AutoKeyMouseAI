@@ -1,6 +1,6 @@
 // 液晶ミラーの受信: 受け取りと展開を別々のタスクで (試験用ビルド esp32_mirror_rx、-DAKM_RX_TASK=1)
-//   受け取り (rxTask, コア 0): ソケットの recv で待ち受けて、届いた分をすぐ溜め (StreamBuffer) に入れる。
-//     返事 (K / R / E / T) もここで送る (1 つのソケットを触るのはこのタスクだけ)。Wi-Fi の処理もコア 0
+//   受け取り (rxTask, コア 1・優先度 2): ソケットの recv で待ち受けて、届いた分をすぐ溜め (StreamBuffer) に入れる。
+//     返事 (K / R / E / T) は展開側から同じソケットへ直接送る (lwIP の全二重)
 //   展開 (task, コア 1): 溜めから読んで展開・描画する。手元に 512 バイトの置き場を持ち、空になったときだけ
 //     溜めからまとめて取り出す (前の試作 frame-stream-45 は 1〜9 バイトずつ数千回取り出し、そのたびに
 //     もう片方のコアを起こしていて、ミラーが止まった)
@@ -27,11 +27,6 @@ constexpr size_t kRing = 24 * 1024;               // 溜め (受け取り → �
 constexpr size_t kChunk = 512;                    // 展開側が 1 回に取り出す量
 
 StreamBufferHandle_t gRing = nullptr;
-QueueHandle_t gAcks = nullptr;  // 展開 → 受け取り: 送る返事
-struct Ack {
-  uint8_t n;
-  uint8_t b[7];
-};
 
 volatile bool gClient = false;
 volatile uint32_t gSession = 0;  // 接続の番号 (受け取り側がつないだら増やす)
@@ -44,10 +39,15 @@ volatile uint32_t gRxBytes = 0, gRxCalls = 0, gAcksSent = 0, gRingHigh = 0, gFra
 volatile uint32_t gDecWaitUs = 0;  // 展開側がデータを待った時間 (合計)
 const char* volatile gLastEnd = "-";  // 最後に接続が終わった理由
 
+volatile int gFd = -1;  // 今の接続のソケット (受け取り側がつないだら決める)
+
+// 返事は展開側から直接送る (ESP-IDF の lwIP は、1 つのソケットを「片方のタスクが受け取り、もう片方が送る」
+// 使い方に対応している: LWIP_NETCONN_FULLDUPLEX)。受け取り側の recv の待ち (最大 20ms) で返事が遅れない
 void ack(const uint8_t* b, uint8_t n) {
-  Ack a{n, {}};
-  memcpy(a.b, b, n);
-  if (xQueueSend(gAcks, &a, pdMS_TO_TICKS(200)) != pdTRUE) gLastEnd = "ack queue full";
+  int fd = gFd;
+  if (fd < 0) return;
+  if (send(fd, b, n, 0) == n) gAcksSent = gAcksSent + 1;
+  else gLastEnd = "ack send failed";
 }
 void ack(uint8_t c) { ack(&c, 1); }
 
@@ -149,14 +149,7 @@ bool speedTest(uint32_t len) {
   return true;
 }
 
-// ---- 受け取り (コア 0) ----------------------------------------------------------------
-void sendAcks(int fd) {
-  Ack a;
-  while (xQueueReceive(gAcks, &a, 0) == pdTRUE) {
-    send(fd, a.b, a.n, 0);
-    gAcksSent = gAcksSent + 1;
-  }
-}
+// ---- 受け取り -----------------------------------------------------------------------
 
 void report() {
   static uint32_t last = 0;
@@ -174,7 +167,7 @@ void rxTask(void*) {
   WiFiServer server(FRAME_STREAM_PORT);
   bool started = false;
   WiFiClient client;
-  static uint8_t buf[2920];  // TCP の 2 つ分
+  static uint8_t buf[4096];
   for (;;) {
     report();
     if (!WiFi.isConnected()) {
@@ -191,6 +184,7 @@ void rxTask(void*) {
                     (unsigned)kRing);
     }
     if (!client || !client.connected()) {
+      gFd = -1;
       if (client) {
         client.stop();
         if (!gKill) gLastEnd = "PC closed";
@@ -207,7 +201,6 @@ void rxTask(void*) {
       }
       client.setNoDelay(true);
       xStreamBufferReset(gRing);
-      xQueueReset(gAcks);
       gKill = false;
       gIdle = false;
       gEof = false;
@@ -215,13 +208,13 @@ void rxTask(void*) {
       gSession = gSession + 1;
       Serial.printf("[RX] client %s connected (session %lu)\n", client.remoteIP().toString().c_str(),
                     (unsigned long)gSession);
-      // 受け取りは recv で直接待つ (2ms で時間切れ → 返事を送りに戻る)。select で待つと、データが届いても
+      // 受け取りは recv で直接待つ (20ms で時間切れ → 返事を送りに戻る。返事は展開のたびにも送る)。select で待つと、データが届いても
       // 知らせがほとんど来ず、受け取りが 1 秒に 20KB まで落ちた (試作 47)。recv で待つ形は速さの試験で 940KB/s 出た
-      struct timeval rt = {0, 2000};
+      struct timeval rt = {0, 20000};
       setsockopt(client.fd(), SOL_SOCKET, SO_RCVTIMEO, &rt, sizeof(rt));
+      gFd = client.fd();
     }
     int fd = client.fd();
-    sendAcks(fd);
     if (gKill) {  // 展開側がやめた (形式の誤りなど)
       client.stop();
       gLastEnd = "decoder stopped";
@@ -239,10 +232,7 @@ void rxTask(void*) {
     size_t off = 0;
     while (off < (size_t)r) {  // 溜めがいっぱいなら空くまで待つ (その間も返事は送る)
       off += xStreamBufferSend(gRing, buf + off, r - off, pdMS_TO_TICKS(2));
-      if (off < (size_t)r) {
-        sendAcks(fd);
-        if (gKill) break;
-      }
+      if (off < (size_t)r && gKill) break;
     }
     size_t used = xStreamBufferBytesAvailable(gRing);
     if (used > gRingHigh) gRingHigh = used;
@@ -354,13 +344,14 @@ void task(void*) {
 void begin() {
 #if HAS_TFT
   gRing = xStreamBufferCreate(kRing, 1);
-  gAcks = xQueueCreate(16, sizeof(Ack));
-  if (!gRing || !gAcks) {
+  if (!gRing) {
     Serial.println("[RX] no memory for the receive ring");
     return;
   }
-  // 受け取り: コア 0 (Wi-Fi の処理と同じ側)。展開より少し高い優先度で、届いたらすぐ溜めに入れる
-  xTaskCreatePinnedToCore(rxTask, "frame_rx", 6144, nullptr, 3, nullptr, 0);
+  // 受け取り: コア 1・優先度 2 (展開より上)。届いたら展開を一瞬止めて溜めに入れ、待っている間は展開が進む。
+  // コア 0・優先度 3 に置いた試作 (47・48) は、受け取りが 1 秒に 20〜50KB しか出なかった
+  // (同じ recv をコア 1 の優先度 1 で回した速さの試験は 940KB/s 出ている)
+  xTaskCreatePinnedToCore(rxTask, "frame_rx", 6144, nullptr, 2, nullptr, 1);
   // 展開: Arduino の loop() と同じコア 1・同じ優先度
   xTaskCreatePinnedToCore(task, "frame_stream", 4096, nullptr, 1, nullptr, 1);
 #endif
