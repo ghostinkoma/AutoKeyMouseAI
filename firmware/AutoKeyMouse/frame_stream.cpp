@@ -1,6 +1,7 @@
 #include "frame_stream.h"
 
 #include <WiFi.h>
+#include <lwip/sockets.h>
 
 #include "config.h"
 #include "display.h"
@@ -29,6 +30,51 @@ bool readAll(WiFiClient& c, uint8_t* dst, size_t n, uint32_t timeoutMs) {
       t0 = millis();
     }
   }
+  return true;
+}
+
+// Wi-Fi の速さの試験 (tools/wifi_speed.py): len バイトを受け取って捨てるだけ。返事は 'T' + 受け取りにかかった時間 (us)
+//   'AKMT': 今のミラーと同じ受け取り方 (届いていなければ 1ms 寝て見直す)
+//   'AKMU': 待ち受け (ソケットの recv で、届いたらすぐ起きる)
+bool speedTest(WiFiClient& c, uint32_t len, bool blocking) {
+  static uint8_t buf[4096];
+  uint32_t t0 = micros(), left = len;
+  if (blocking) {
+    // Arduino の受信の溜め (_rxBuffer) に入っている分を先に読む。その後はソケットから直接
+    while (left && c.available() > 0) {
+      int r = c.read(buf, min((uint32_t)sizeof(buf), min(left, (uint32_t)c.available())));
+      if (r <= 0) break;
+      left -= r;
+    }
+    int fd = c.fd();
+    struct timeval tv = {3, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    while (left) {
+      int r = recv(fd, buf, min((uint32_t)sizeof(buf), left), 0);
+      if (r <= 0) return false;
+      left -= r;
+    }
+  } else {
+    uint32_t tw = millis();
+    while (left) {
+      int a = c.available();
+      if (a <= 0) {
+        if (!c.connected() || millis() - tw > 3000) return false;
+        vTaskDelay(1);
+        continue;
+      }
+      int r = c.read(buf, min((uint32_t)sizeof(buf), min(left, (uint32_t)a)));
+      if (r > 0) {
+        left -= r;
+        tw = millis();
+      }
+    }
+  }
+  uint32_t us = micros() - t0;
+  uint8_t ack[5] = {'T', (uint8_t)us, (uint8_t)(us >> 8), (uint8_t)(us >> 16), (uint8_t)(us >> 24)};
+  c.write(ack, 5);
+  Serial.printf("[STREAM] speed test %s: %lu bytes in %lu us = %lu KB/s\n", blocking ? "recv" : "poll",
+                (unsigned long)len, (unsigned long)us, (unsigned long)((uint64_t)len * 1000000 / 1024 / (us ? us : 1)));
   return true;
 }
 
@@ -118,6 +164,11 @@ void task(void*) {
     uint8_t hdr[8];
     if (!readAll(client, hdr, 8, 0)) {  // 次のフレームが来るまで待つ (切断されたら false)
       client.stop();
+      continue;
+    }
+    if (memcmp(hdr, "AKMT", 4) == 0 || memcmp(hdr, "AKMU", 4) == 0) {  // Wi-Fi の速さの試験
+      uint32_t n = hdr[4] | hdr[5] << 8 | hdr[6] << 16 | (uint32_t)hdr[7] << 24;
+      if (!speedTest(client, n, hdr[3] == 'U')) client.stop();
       continue;
     }
     if (memcmp(hdr, "AKMF", 4) != 0) {
