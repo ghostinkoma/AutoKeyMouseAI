@@ -1,5 +1,5 @@
 // 液晶ミラーの受信: 受け取りと展開を別々のタスクで (試験用ビルド esp32_mirror_rx、-DAKM_RX_TASK=1)
-//   受け取り (rxTask, コア 1・優先度 2): ソケットの recv で待ち受けて、届いた分をすぐ溜め (StreamBuffer) に入れる。
+//   受け取り (rxTask, コア 1・優先度 5): 公式 iperf と同じく lwIP のソケットで recv だけを回して、届いた分をすぐ溜め (StreamBuffer) に入れる。
 //     返事 (K / R / E / T) は展開側から同じソケットへ直接送る (lwIP の全二重)
 //   展開 (task, コア 1): 溜めから読んで展開・描画する。手元に 512 バイトの置き場を持ち、空になったときだけ
 //     溜めからまとめて取り出す (前の試作 frame-stream-45 は 1〜9 バイトずつ数千回取り出し、そのたびに
@@ -163,79 +163,83 @@ void report() {
                 (unsigned long)(gDecWaitUs / 1000), (const char*)gLastEnd);
 }
 
+// 公式の examples/wifi/iperf (ESP-IDF) と同じ形: Arduino の WiFiServer / WiFiClient を使わず、lwIP の
+// socket → bind → listen → accept を直接使い、recv だけを回す (届くまで待つ。1 秒で時間切れ)。
+// 試作 47〜49 は 1 回ごとに client.connected() (中身は 1 バイトの覗き見 recv(MSG_PEEK)) と WiFi.isConnected() を
+// 呼び、20ms などで時間切れにしていて、受け取りが 1 秒に 5〜50KB しか出なかった
 void rxTask(void*) {
-  WiFiServer server(FRAME_STREAM_PORT);
-  bool started = false;
-  WiFiClient client;
   static uint8_t buf[4096];
+  int ls = -1;
   for (;;) {
     report();
-    if (!WiFi.isConnected()) {
-      if (client) client.stop();
-      gEof = true;
-      vTaskDelay(pdMS_TO_TICKS(500));
-      continue;
-    }
-    if (!started) {
-      server.begin();
-      server.setNoDelay(true);
-      started = true;
-      Serial.printf("[RX] mirror stream on tcp port %d (rx task core 0, ring %u bytes)\n", FRAME_STREAM_PORT,
-                    (unsigned)kRing);
-    }
-    if (!client || !client.connected()) {
-      gFd = -1;
-      if (client) {
-        client.stop();
-        if (!gKill) gLastEnd = "PC closed";
-      }
-      gEof = true;
-      if (!gIdle) {  // 展開側が前の接続を読み終えるまで待つ (溜めを空にしてから次へ)
-        vTaskDelay(pdMS_TO_TICKS(5));
+    if (ls < 0) {
+      if (!WiFi.isConnected()) {
+        vTaskDelay(pdMS_TO_TICKS(500));
         continue;
       }
-      client = server.available();
-      if (!client) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+      ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+      int one = 1;
+      setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+      sockaddr_in a = {};
+      a.sin_family = AF_INET;
+      a.sin_port = htons(FRAME_STREAM_PORT);
+      a.sin_addr.s_addr = htonl(INADDR_ANY);
+      if (ls < 0 || bind(ls, (sockaddr*)&a, sizeof(a)) < 0 || listen(ls, 1) < 0) {
+        Serial.printf("[RX] listen failed (errno %d)\n", errno);
+        if (ls >= 0) close(ls);
+        ls = -1;
+        vTaskDelay(pdMS_TO_TICKS(1000));
         continue;
       }
-      client.setNoDelay(true);
-      xStreamBufferReset(gRing);
-      gKill = false;
-      gIdle = false;
-      gEof = false;
-      gSessions = gSessions + 1;
-      gSession = gSession + 1;
-      Serial.printf("[RX] client %s connected (session %lu)\n", client.remoteIP().toString().c_str(),
-                    (unsigned long)gSession);
-      // 受け取りは recv で直接待つ (20ms で時間切れ → 返事を送りに戻る。返事は展開のたびにも送る)。select で待つと、データが届いても
-      // 知らせがほとんど来ず、受け取りが 1 秒に 20KB まで落ちた (試作 47)。recv で待つ形は速さの試験で 940KB/s 出た
-      struct timeval rt = {0, 20000};
-      setsockopt(client.fd(), SOL_SOCKET, SO_RCVTIMEO, &rt, sizeof(rt));
-      gFd = client.fd();
+      Serial.printf("[RX] mirror stream on tcp port %d (lwIP socket, rx task core 1 prio 5, ring %u bytes)\n",
+                    FRAME_STREAM_PORT, (unsigned)kRing);
     }
-    int fd = client.fd();
-    if (gKill) {  // 展開側がやめた (形式の誤りなど)
-      client.stop();
-      gLastEnd = "decoder stopped";
+    while (!gIdle) vTaskDelay(pdMS_TO_TICKS(5));  // 展開側が前の接続を読み終えるまで待つ
+    sockaddr_in peer = {};
+    socklen_t plen = sizeof(peer);
+    int fd = accept(ls, (sockaddr*)&peer, &plen);  // つながるまで待つ
+    if (fd < 0) {
+      vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
-    int r = recv(fd, buf, sizeof(buf), 0);  // 届くまで待つ (最大 2ms)
-    if (r <= 0) {
-      if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT)) continue;  // 時間切れ
-      client.stop();
-      gLastEnd = r == 0 ? "PC closed" : "recv error";
-      continue;
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    struct timeval rt = {1, 0};  // 1 秒で時間切れ (展開側が「切って」と言ったかを見るため。普段は届くまで待つ)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rt, sizeof(rt));
+    xStreamBufferReset(gRing);
+    gKill = false;
+    gIdle = false;
+    gEof = false;
+    gFd = fd;
+    gSessions = gSessions + 1;
+    gSession = gSession + 1;
+    gClient = true;
+    Serial.printf("[RX] client %s connected (session %lu)\n", inet_ntoa(peer.sin_addr), (unsigned long)gSession);
+    for (;;) {
+      int r = recv(fd, buf, sizeof(buf), 0);
+      if (r > 0) {
+        gRxBytes = gRxBytes + r;
+        gRxCalls = gRxCalls + 1;
+        size_t off = 0;
+        while (off < (size_t)r && !gKill)  // 溜めがいっぱいなら空くまで待つ (TCP の窓で PC も止まる)
+          off += xStreamBufferSend(gRing, buf + off, r - off, pdMS_TO_TICKS(100));
+        size_t used = xStreamBufferBytesAvailable(gRing);
+        if (used > gRingHigh) gRingHigh = used;
+        if (gKill) break;
+        report();  // 5 秒ごと (時刻を見るだけ)
+        continue;
+      }
+      if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && !gKill) {  // 1 秒何も来ない
+        report();
+        continue;
+      }
+      if (!gKill) gLastEnd = r == 0 ? "PC closed" : "recv error";
+      break;
     }
-    gRxBytes = gRxBytes + r;
-    gRxCalls = gRxCalls + 1;
-    size_t off = 0;
-    while (off < (size_t)r) {  // 溜めがいっぱいなら空くまで待つ (その間も返事は送る)
-      off += xStreamBufferSend(gRing, buf + off, r - off, pdMS_TO_TICKS(2));
-      if (off < (size_t)r && gKill) break;
-    }
-    size_t used = xStreamBufferBytesAvailable(gRing);
-    if (used > gRingHigh) gRingHigh = used;
+    if (gKill && strcmp((const char*)gLastEnd, "-") == 0) gLastEnd = "decoder stopped";
+    gFd = -1;
+    gEof = true;
+    close(fd);
   }
 }
 
@@ -328,8 +332,9 @@ void task(void*) {
       display::releaseFrameBuffer();
       gFrames = gFrames + 1;
     }
-    // 接続を終える: 受け取り側に切ってもらい、溜めの残りを捨てる
+    // 接続を終える: 受け取り側に切ってもらい (recv の待ちを shutdown で起こす)、溜めの残りを捨てる
     gKill = true;
+    if (gFd >= 0) shutdown(gFd, SHUT_RDWR);
     static uint8_t junk[512];
     while (pull(junk, sizeof(junk), 300, nullptr)) {
     }
@@ -348,10 +353,8 @@ void begin() {
     Serial.println("[RX] no memory for the receive ring");
     return;
   }
-  // 受け取り: コア 1・優先度 2 (展開より上)。届いたら展開を一瞬止めて溜めに入れ、待っている間は展開が進む。
-  // コア 0・優先度 3 に置いた試作 (47・48) は、受け取りが 1 秒に 20〜50KB しか出なかった
-  // (同じ recv をコア 1 の優先度 1 で回した速さの試験は 940KB/s 出ている)
-  xTaskCreatePinnedToCore(rxTask, "frame_rx", 6144, nullptr, 2, nullptr, 1);
+  // 受け取り: コア 1・優先度 5 (展開・loop より上)。届いたら展開を一瞬止めて溜めに入れ、待っている間は展開が進む
+  xTaskCreatePinnedToCore(rxTask, "frame_rx", 6144, nullptr, 5, nullptr, 1);
   // 展開: Arduino の loop() と同じコア 1・同じ優先度
   xTaskCreatePinnedToCore(task, "frame_stream", 4096, nullptr, 1, nullptr, 1);
 #endif
