@@ -21,6 +21,7 @@ namespace {
 
 WebServer gServer(80);
 Preferences gPrefs;
+int gBwMhz = 40;  // ESP32 の Wi-Fi の幅 (20 / 40MHz)。/wifibw?mhz=20 で変える (覚えておく)
 String gSsid, gPass;
 uint32_t gLastAttempt = 0;     // 最後に WiFi.begin した時刻
 uint32_t gLastUp = 0;          // 最後に STA が接続していた時刻
@@ -69,6 +70,9 @@ void connectSta() {
   // 接続処理中に begin すると "sta is connecting, cannot set config" になるので一度止める
   WiFi.disconnect();
   delay(100);
+  if (WiFi.getMode() == WIFI_OFF) WiFi.mode(WIFI_STA);
+  // 幅: 40MHz は電波が強く空いていれば速いが、弱い・混んでいると遅い段に落ちやすい (20MHz の方が安定することがある)
+  esp_wifi_set_bandwidth(WIFI_IF_STA, gBwMhz == 20 ? WIFI_BW_HT20 : WIFI_BW_HT40);
   WiFi.begin(gSsid.c_str(), gPass.c_str());
   WiFi.setTxPower(WIFI_TX_POWER);
 }
@@ -288,8 +292,23 @@ String linkJson() {
   const char* second = ap.second == WIFI_SECOND_CHAN_ABOVE ? "above" : ap.second == WIFI_SECOND_CHAN_BELOW ? "below" : "none";
   return "{\"rssi\":" + String(ap.rssi) + ",\"channel\":" + String(ap.primary) + ",\"second\":\"" + second +
          "\",\"ap_phy\":\"" + ap_phy + "\",\"sta_phy\":\"" + me + "\",\"bw\":\"" +
-         (bw == WIFI_BW_HT40 ? "HT40" : "HT20") + "\",\"bssid\":\"" +
+         (bw == WIFI_BW_HT40 ? "HT40" : "HT20") + "\",\"bw_setting\":" + String(gBwMhz) + ",\"bssid\":\"" +
          String(ap.bssid[3], HEX) + ":" + String(ap.bssid[4], HEX) + ":" + String(ap.bssid[5], HEX) + "\"}";
+}
+
+// /wifibw?mhz=20 / 40: Wi-Fi の幅を変えて (覚えて) つなぎ直す。数秒切れる
+void handleWifiBw() {
+  int mhz = gServer.arg("mhz").toInt();
+  if (mhz != 20 && mhz != 40) {
+    gServer.send(400, "text/plain", "mhz=20 or 40\n");
+    return;
+  }
+  gBwMhz = mhz;
+  gPrefs.putInt("bw", mhz);
+  gServer.send(200, "text/plain", String("OK bandwidth ") + mhz + "MHz, reconnecting\n");
+  delay(200);
+  Serial.printf("[WIFI] bandwidth %dMHz: reconnecting\n", mhz);
+  connectSta();
 }
 
 void handleStatus() {
@@ -495,6 +514,7 @@ void begin() {
   gPrefs.begin("wifi", false);
   gSsid = gPrefs.getString("ssid", "");
   gPass = gPrefs.getString("pass", "");
+  gBwMhz = gPrefs.getInt("bw", 40) == 20 ? 20 : 40;
 
   WiFi.persistent(false);
   WiFi.onEvent(onWifiEvent);
@@ -517,6 +537,7 @@ void begin() {
   gServer.on("/stop", handleStop);
   gServer.on("/status", HTTP_GET, handleStatus);
   gServer.on("/radio", HTTP_GET, handleRadio);
+  gServer.on("/wifibw", HTTP_GET, handleWifiBw);
   gServer.on("/macros", HTTP_GET, handleMacros);
   gServer.on("/save", HTTP_POST, handleSave);
   gServer.on("/settings", handleSettings);
