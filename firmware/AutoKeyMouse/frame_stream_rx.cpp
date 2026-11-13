@@ -1,5 +1,5 @@
 // 液晶ミラーの受信: 受け取りと展開を別々のタスクで (試験用ビルド esp32_mirror_rx、-DAKM_RX_TASK=1)
-//   受け取り (rxTask, コア 0): ソケットで待ち受けて (select)、届いた分をすぐ溜め (StreamBuffer) に入れる。
+//   受け取り (rxTask, コア 0): ソケットの recv で待ち受けて、届いた分をすぐ溜め (StreamBuffer) に入れる。
 //     返事 (K / R / E / T) もここで送る (1 つのソケットを触るのはこのタスクだけ)。Wi-Fi の処理もコア 0
 //   展開 (task, コア 1): 溜めから読んで展開・描画する。手元に 512 バイトの置き場を持ち、空になったときだけ
 //     溜めからまとめて取り出す (前の試作 frame-stream-45 は 1〜9 バイトずつ数千回取り出し、そのたびに
@@ -215,6 +215,10 @@ void rxTask(void*) {
       gSession = gSession + 1;
       Serial.printf("[RX] client %s connected (session %lu)\n", client.remoteIP().toString().c_str(),
                     (unsigned long)gSession);
+      // 受け取りは recv で直接待つ (2ms で時間切れ → 返事を送りに戻る)。select で待つと、データが届いても
+      // 知らせがほとんど来ず、受け取りが 1 秒に 20KB まで落ちた (試作 47)。recv で待つ形は速さの試験で 940KB/s 出た
+      struct timeval rt = {0, 2000};
+      setsockopt(client.fd(), SOL_SOCKET, SO_RCVTIMEO, &rt, sizeof(rt));
     }
     int fd = client.fd();
     sendAcks(fd);
@@ -223,20 +227,9 @@ void rxTask(void*) {
       gLastEnd = "decoder stopped";
       continue;
     }
-    fd_set rf;
-    FD_ZERO(&rf);
-    FD_SET(fd, &rf);
-    timeval tv = {0, 2000};  // 2ms ごとに返事を送りに戻る
-    int s = select(fd + 1, &rf, nullptr, nullptr, &tv);
-    if (s < 0) {
-      client.stop();
-      gLastEnd = "select error";
-      continue;
-    }
-    if (s == 0) continue;
-    int r = recv(fd, buf, sizeof(buf), 0);
+    int r = recv(fd, buf, sizeof(buf), 0);  // 届くまで待つ (最大 2ms)
     if (r <= 0) {
-      if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+      if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT)) continue;  // 時間切れ
       client.stop();
       gLastEnd = r == 0 ? "PC closed" : "recv error";
       continue;
