@@ -851,7 +851,12 @@ class GateApp:
 
             while self.sender is sender:
                 try:
-                    self.esp_stats = requests.get(f"http://{host}/status", timeout=2).json().get("mirror")
+                    j = requests.get(f"http://{host}/status", timeout=2).json()
+                    st = j.get("mirror")
+                    rssi = (j.get("link") or {}).get("rssi")  # 電波の強さ (frame-stream-44 以降)
+                    if st is not None and rssi is not None:
+                        st["rssi"] = rssi
+                    self.esp_stats = st
                 except Exception:
                     self.esp_stats = None
                 time.sleep(2)
@@ -884,7 +889,11 @@ class GateApp:
         if not samples:
             return None
         keys = ("fps", "recv_ms", "decode_ms", "draw_ms", "cpu_pct", "kbps")
-        return {k: sum(float(x.get(k, 0)) for x in samples) / len(samples) for k in keys}
+        out = {k: sum(float(x.get(k, 0)) for x in samples) / len(samples) for k in keys}
+        rs = [float(x["rssi"]) for x in samples if x.get("rssi") is not None]
+        if rs:
+            out["rssi"] = sum(rs) / len(rs)
+        return out
 
     def _fps_line(self, label: str, fmt: str, dt: float, sent: int, nbytes: int, fails: int, esp) -> str:
         fps = sent / dt if dt > 0 else 0.0
@@ -893,7 +902,8 @@ class GateApp:
                 f"{nbytes / dt / 1024 if dt > 0 else 0:.0f}KB/s 失敗{fails}")
         if esp:
             line += (f" | ESP {esp['fps']:.1f}fps 受信待ち{esp['recv_ms']:.0f} 展開{esp['decode_ms']:.0f} "
-                     f"描画{esp['draw_ms']:.0f}ms CPU{esp['cpu_pct']:.0f}%")
+                     f"描画{esp['draw_ms']:.0f}ms CPU{esp['cpu_pct']:.0f}%"
+                     + (f" 電波{esp['rssi']:.0f}dBm" if esp.get("rssi") is not None else ""))
         return line
 
     def _fps_tick(self, m):
