@@ -12,6 +12,7 @@
 #if AKM_RX_TASK
 
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <freertos/queue.h>
 #include <freertos/stream_buffer.h>
 #include <lwip/sockets.h>
@@ -23,7 +24,10 @@ namespace frame_stream {
 namespace {
 
 constexpr size_t kMax = display::FRAME_BUF_SIZE;  // JPEG の 1 枚の上限
-constexpr size_t kRing = 24 * 1024;               // 溜め (受け取り → 展開)
+// 溜め (受け取り → 展開)。24KB にすると空きメモリが 20〜30KB まで減り、Wi-Fi が届いたパケットの置き場
+// (1 つ約 1.6KB、その都度空きメモリから取る) を取れずに捨てて、TCP が送る量を絞った疑い (試作 45〜50 は
+// 受け取りが 1 秒に 45KB 前後)。8KB でも 1 枚の展開の間に十分たまる
+constexpr size_t kRing = 8 * 1024;
 constexpr size_t kChunk = 512;                    // 展開側が 1 回に取り出す量
 
 StreamBufferHandle_t gRing = nullptr;
@@ -157,10 +161,12 @@ void report() {
   last = millis();
   if (!gClient && gEof) return;
   size_t used = xStreamBufferBytesAvailable(gRing);
-  Serial.printf("[RX] recv %lu KB (%lu calls) ring %u/%u (max %lu) acks %lu frames %lu wait %lu ms last end: %s\n",
+  Serial.printf("[RX] recv %lu KB (%lu calls) ring %u/%u (max %lu) acks %lu frames %lu wait %lu ms last end: %s"
+                "  heap %u min %u block %u\n",
                 (unsigned long)(gRxBytes / 1024), (unsigned long)gRxCalls, (unsigned)used, (unsigned)kRing,
                 (unsigned long)gRingHigh, (unsigned long)gAcksSent, (unsigned long)gFrames,
-                (unsigned long)(gDecWaitUs / 1000), (const char*)gLastEnd);
+                (unsigned long)(gDecWaitUs / 1000), (const char*)gLastEnd, (unsigned)ESP.getFreeHeap(),
+                (unsigned)ESP.getMinFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 }
 
 // 公式の examples/wifi/iperf (ESP-IDF) と同じ形: Arduino の WiFiServer / WiFiClient を使わず、lwIP の
