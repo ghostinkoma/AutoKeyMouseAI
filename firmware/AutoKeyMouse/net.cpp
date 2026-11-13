@@ -1,6 +1,7 @@
 #include "net.h"
 
 #include <esp_heap_caps.h>
+#include <esp_wifi.h>
 
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -273,6 +274,24 @@ void handleRadio() {
                     ", prefer " + gPrefer + ", wifi sleep " + (WiFi.getSleep() ? "on" : "off"));
 }
 
+// 今の Wi-Fi のつながり方 (速さの原因を探す): 電波の強さ・チャンネル・規格 (b/g/n)・幅 (HT20 / HT40)
+String linkJson() {
+  wifi_ap_record_t ap = {};
+  if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return "{}";
+  uint8_t proto = 0;
+  esp_wifi_get_protocol(WIFI_IF_STA, &proto);
+  wifi_bandwidth_t bw = WIFI_BW_HT20;
+  esp_wifi_get_bandwidth(WIFI_IF_STA, &bw);
+  String ap_phy = String(ap.phy_11b ? "b" : "") + (ap.phy_11g ? "g" : "") + (ap.phy_11n ? "n" : "");
+  String me = String(proto & WIFI_PROTOCOL_11B ? "b" : "") + (proto & WIFI_PROTOCOL_11G ? "g" : "") +
+              (proto & WIFI_PROTOCOL_11N ? "n" : "");
+  const char* second = ap.second == WIFI_SECOND_CHAN_ABOVE ? "above" : ap.second == WIFI_SECOND_CHAN_BELOW ? "below" : "none";
+  return "{\"rssi\":" + String(ap.rssi) + ",\"channel\":" + String(ap.primary) + ",\"second\":\"" + second +
+         "\",\"ap_phy\":\"" + ap_phy + "\",\"sta_phy\":\"" + me + "\",\"bw\":\"" +
+         (bw == WIFI_BW_HT40 ? "HT40" : "HT20") + "\",\"bssid\":\"" +
+         String(ap.bssid[3], HEX) + ":" + String(ap.bssid[4], HEX) + ":" + String(ap.bssid[5], HEX) + "\"}";
+}
+
 void handleStatus() {
   String j = "{";
   j += "\"fw\":\"" FW_VERSION "\",";
@@ -297,6 +316,7 @@ void handleStatus() {
        ",\"ble_setting\":" + String(hid::enabledSetting() ? "true" : "false") + ",\"ble_off\":" +
        String(hid::isOff() ? "true" : "false") + ",\"prefer\":\"" + gPrefer + "\",\"wifi_sleep\":" +
        String(WiFi.getSleep() ? "true" : "false") + "}";
+  j += ",\"link\":" + linkJson();
   j += ",\"win\":" + edge_win::json();
   j += "}";
   sendJson(j);
