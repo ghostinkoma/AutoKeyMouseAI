@@ -1,5 +1,10 @@
 #include "frame_stream.h"
 
+#include "config.h"
+
+// 受け取り専用タスクの版 (試験用ビルド esp32_mirror_rx) は frame_stream_rx.cpp
+#if !AKM_RX_TASK
+
 #include <WiFi.h>
 #include <lwip/sockets.h>
 
@@ -256,4 +261,8 @@ void begin() {
 
 bool clientConnected() { return gClient; }
 
+String rxJson() { return "{}"; }
+
 }  // namespace frame_stream
+
+#endif  // !AKM_RX_TASK

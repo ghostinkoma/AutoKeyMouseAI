@@ -3,7 +3,10 @@
 // PC が接続しっぱなしで  "AKMF" + 長さ(4 バイト LE) + JPEG  を送り続ける。
 // 受け取ったらすぐ 1 バイト 'K' を返し (PC は次のフレームの準備に入れる)、そのあと展開・描画する。
 // Web サーバー (loop) とは別タスクなので、受信中もキー・マウスの命令は待たされない。
+#include <Arduino.h>
+
 namespace frame_stream {
 void begin();
 bool clientConnected();
+String rxJson();  // 受け取り専用タスクの状態 (/status の rx。試験用ビルド esp32_mirror_rx。それ以外は {})
 }  // namespace frame_stream

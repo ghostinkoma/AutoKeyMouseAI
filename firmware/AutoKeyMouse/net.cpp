@@ -11,6 +11,7 @@
 #include "ble_hid.h"
 #include "config.h"
 #include "display.h"
+#include "frame_stream.h"
 #include "edge_win.h"
 #include <esp_coexist.h>
 #include "macro.h"
@@ -336,6 +337,7 @@ void handleStatus() {
        String(hid::isOff() ? "true" : "false") + ",\"prefer\":\"" + gPrefer + "\",\"wifi_sleep\":" +
        String(WiFi.getSleep() ? "true" : "false") + "}";
   j += ",\"link\":" + linkJson();
+  j += ",\"rx\":" + frame_stream::rxJson();
   j += ",\"win\":" + edge_win::json();
   j += "}";
   sendJson(j);
