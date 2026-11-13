@@ -4,9 +4,8 @@
 
 仲介アプリのミラー・動画の再生は止めておく (同じポート 5005 を使う)。
 ESP32 は受け取って捨てるだけなので、ミラーの「受信」の速さの上限が分かる:
-  poll = (frame-stream-44) 今のミラーと同じ受け取り方 (届いていなければ 1ms 寝て見直す)
-  recv = (frame-stream-44) 待ち受け (届いたらすぐ起きる)
-  frame-stream-45 以降は、どちらもミラーと同じ「受け取り専用タスク → 溜め」の流れで測る (2 回測るのと同じ)
+  poll = 今のミラーと同じ受け取り方 (届いていなければ 1ms 寝て見直す)
+  recv = 待ち受け (届いたらすぐ起きる)
 """
 import argparse
 import os
@@ -59,7 +58,7 @@ def main():
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     n = int(a.mb * 1024 * 1024)
     print(f"{host}:{a.port} に {a.mb:g}MB を {a.rounds} 回ずつ送ります")
-    for mode, name in ((b"AKMT", "poll (45〜: 受け取りタスク)"), (b"AKMU", "recv (45〜: 受け取りタスク)")):
+    for mode, name in ((b"AKMT", "poll (今のミラーの受け取り方)"), (b"AKMU", "recv (待ち受け)")):
         res = [one(sock, mode, n) for _ in range(a.rounds)]
         pc = [r[0] for r in res]
         esp = [r[1] for r in res]

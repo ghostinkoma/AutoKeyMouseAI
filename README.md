@@ -50,18 +50,20 @@ py -3.12 -m pip install -U platformio                 # PlatformIO は Python 3.
 cd D:\hobby\AutoKeyMouseAI\firmware
 # チップと Flash 容量の確認 (モニタは閉じておく)
 py -3.12 -m platformio pkg exec -p tool-esptoolpy -- esptool.py --port COM18 flash_id
-# 書き込み (-e は基板に合わせる: esp32 / esp32_4mb / esp32s3)
-py -3.12 -m platformio run -e esp32 -t upload --upload-port COM18
+# 書き込み (-e は基板に合わせる: esp32_mirror / esp32_4mb / esp32s3)
+py -3.12 -m platformio run -e esp32_mirror -t upload --upload-port COM18
 py -3.12 -m platformio device monitor -p COM18 -b 115200   # ログ確認 (Ctrl+C で終了)
 ```
 
 | `-e` | 基板 |
 |---|---|
-| `esp32` (既定) | 無印 ESP32 / Flash 16MB (LilyGO T-Display 16MB など) |
+| `esp32_mirror` (既定。`esp32` も同じ) | 無印 ESP32 / Flash 16MB (LilyGO T-Display 16MB など) |
 | `esp32_4mb` | 無印 ESP32 / Flash 4MB |
 | `esp32s3` | ESP32-S3 / Flash 16MB |
 
-* 初回は ESP32 用のツールチェーンを自動ダウンロードするので数分かかる
+* どのビルドも BLE (キーボード・マウス) は入れない (Wi-Fi に全振りの液晶ミラー専用。BLE のコードは残してあり、
+  戻し方は firmware/platformio.ini の先頭に書いてある)
+* 初回は ESP32 用のツールチェーンを自動ダウンロードし、ESP-IDF の設定も作り直すので 10〜20 分かかる
 * USB-C が 2 つある基板は **COM** 側を使う
 * 書き込み中はシリアルモニタを閉じておく (COM ポートを奪い合って失敗する)
 * 書き込みに失敗する場合は BOOT ボタンを押したまま RST を押してから再実行
@@ -75,8 +77,8 @@ py -3.12 -m platformio device monitor -p COM18 -b 115200   # ログ確認 (Ctrl+
 ```powershell
 py -3.12 -m pip install -U esptool
 cd D:\hobby\AutoKeyMouseAI\firmware
-py -3.12 -m platformio run -e esp32
-$b = ".pio\build\esp32"
+py -3.12 -m platformio run -e esp32_mirror
+$b = ".pio\build\esp32_mirror"
 $app0 = (Get-ChildItem "$env:USERPROFILE\.platformio\packages" -Recurse -Filter boot_app0.bin | Select-Object -First 1).FullName
 py -3.12 -m esptool --chip esp32 --port COM18 --baud 115200 --no-stub erase-flash
 py -3.12 -m esptool --chip esp32 --port COM18 --baud 115200 --no-stub write-flash 0x1000 $b\bootloader.bin 0x8000 $b\partitions.bin 0xe000 $app0 0x10000 $b\firmware.bin
