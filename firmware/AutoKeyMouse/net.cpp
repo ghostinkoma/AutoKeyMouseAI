@@ -74,6 +74,10 @@ void connectSta() {
   if (WiFi.getMode() == WIFI_OFF) WiFi.mode(WIFI_STA);
   // 幅: 40MHz は電波が強く空いていれば速いが、弱い・混んでいると遅い段に落ちやすい (20MHz の方が安定することがある)
   esp_wifi_set_bandwidth(WIFI_IF_STA, gBwMhz == 20 ? WIFI_BW_HT20 : WIFI_BW_HT40);
+#if defined(AKM_NO_11B) && AKM_NO_11B
+  // 11b の遅い速度段 (1〜11Mbps) を使わない。電波が揺れたときに遅い段へ落ちて戻りにくいのを避ける (試験用 -fast)
+  esp_wifi_config_11b_rate(WIFI_IF_STA, true);
+#endif
   WiFi.begin(gSsid.c_str(), gPass.c_str());
   WiFi.setTxPower(WIFI_TX_POWER);
 }
