@@ -1,118 +1,92 @@
 #include "frame_stream.h"
 
 #include <WiFi.h>
+#include <freertos/queue.h>
+#include <freertos/stream_buffer.h>
 #include <lwip/sockets.h>
 
 #include "config.h"
 #include "display.h"
 #include "entropy.h"
 
+// 受け取りと展開を別々のタスクで (frame-stream-45):
+//   受け取り (rxTask, コア 0): Wi-Fi から届いた分をすぐソケットから受け取り (待ち受け)、流れの溜め (StreamBuffer) に
+//     入れる。返事 (K / R / E ...) もここで送る (1 つのソケットを 1 つのタスクだけが触る)。Wi-Fi の処理もコア 0
+//   展開 (task, コア 1): 溜めから読んで展開・描画する
+// 前は 1 つのタスクが「少し受け取る → 展開する」を交互にしていたので、展開している間は受け取りが止まり、
+// Wi-Fi の本当の速さ (約 900KB/s) の 4〜7 割しか使えなかった。溜めが空になれば展開側が待ち、溜めがいっぱいなら
+// 受け取りを止める (TCP の窓で PC も止まる)
+
 namespace frame_stream {
 namespace {
 
 constexpr size_t kMax = display::FRAME_BUF_SIZE;  // JPEG 240x135 は 5〜10KB (液晶モジュールの共用バッファ)
+#if AKM_MIRROR_ONLY
+constexpr size_t kRing = 24 * 1024;  // 溜め (ミラー専用はメモリに余裕がある)
+#else
+constexpr size_t kRing = 8 * 1024;   // BLE 入りはメモリが少ない
+#endif
 volatile bool gClient = false;
+// 溜めから読む関数を IRAM に置くか (ミラー専用だけ。BLE 入りは IRAM に空きが無い)
+#if AKM_MIRROR_ONLY
+#define FS_IRAM IRAM_ATTR
+#else
+#define FS_IRAM
+#endif
 
-bool readAll(WiFiClient& c, uint8_t* dst, size_t n, uint32_t timeoutMs) {
-  size_t got = 0;
+StreamBufferHandle_t gRing = nullptr;  // 受け取った TCP のバイト列 (受け取り → 展開)
+QueueHandle_t gAcks = nullptr;         // 展開 → 受け取り: 送る返事
+struct Ack {
+  uint8_t n;
+  uint8_t b[7];
+};
+volatile uint32_t gSession = 0;   // 接続の番号 (受け取り側がつないだら増やす)
+volatile bool gEof = true;        // 今の接続は切れた (溜めに残っている分は読める)
+volatile bool gKill = false;      // 展開側が「この接続を切って」と言った
+volatile bool gIdle = true;       // 展開側が今の接続を読み終えた (次の接続を受け付けてよい)
+
+void ack(const uint8_t* b, uint8_t n) {
+  Ack a{n, {}};
+  memcpy(a.b, b, n);
+  xQueueSend(gAcks, &a, pdMS_TO_TICKS(100));
+}
+void ack(uint8_t c) { ack(&c, 1); }
+
+// 溜めから n バイト読む。届くまで待つ (timeoutMs = 0: 接続している限り待つ)。切れて残りも無ければ false。
+// 待った時間を waitUs に足す
+FS_IRAM bool ringRead(uint8_t* dst, size_t n, uint32_t timeoutMs, uint32_t* waitUs) {
   uint32_t t0 = millis();
-  while (got < n) {
-    if (!c.connected() && !c.available()) return false;
-    int a = c.available();
-    if (a <= 0) {
-      if (timeoutMs && millis() - t0 > timeoutMs) return false;  // 0 = 接続している限り待つ
-      vTaskDelay(1);
+  while (n) {
+    size_t got = xStreamBufferReceive(gRing, dst, n, 0);
+    if (got) {
+      dst += got;
+      n -= got;
+      t0 = millis();
       continue;
     }
-    int r = c.read(dst + got, min((size_t)a, n - got));
-    if (r > 0) {
-      got += r;
-      t0 = millis();
-    }
+    if (gEof && xStreamBufferIsEmpty(gRing)) return false;
+    if (timeoutMs && millis() - t0 > timeoutMs) return false;
+    uint32_t w0 = micros();
+    got = xStreamBufferReceive(gRing, dst, n, pdMS_TO_TICKS(20));  // 届いたらすぐ起きる
+    if (waitUs) *waitUs += micros() - w0;
+    dst += got;
+    n -= got;
+    if (got) t0 = millis();
   }
   return true;
 }
 
-// Wi-Fi の速さの試験 (tools/wifi_speed.py): len バイトを受け取って捨てるだけ。返事は 'T' + 受け取りにかかった時間 (us)
-//   'AKMT': 今のミラーと同じ受け取り方 (届いていなければ 1ms 寝て見直す)
-//   'AKMU': 待ち受け (ソケットの recv で、届いたらすぐ起きる)
-bool speedTest(WiFiClient& c, uint32_t len, bool blocking) {
-  static uint8_t buf[4096];
-  uint32_t t0 = micros(), left = len;
-  if (blocking) {
-    // Arduino の受信の溜め (_rxBuffer) に入っている分を先に読む。その後はソケットから直接
-    while (left && c.available() > 0) {
-      int r = c.read(buf, min((uint32_t)sizeof(buf), min(left, (uint32_t)c.available())));
-      if (r <= 0) break;
-      left -= r;
-    }
-    int fd = c.fd();
-    struct timeval tv = {3, 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    while (left) {
-      int r = recv(fd, buf, min((uint32_t)sizeof(buf), left), 0);
-      if (r <= 0) return false;
-      left -= r;
-    }
-  } else {
-    uint32_t tw = millis();
-    while (left) {
-      int a = c.available();
-      if (a <= 0) {
-        if (!c.connected() || millis() - tw > 3000) return false;
-        vTaskDelay(1);
-        continue;
-      }
-      int r = c.read(buf, min((uint32_t)sizeof(buf), min(left, (uint32_t)a)));
-      if (r > 0) {
-        left -= r;
-        tw = millis();
-      }
-    }
-  }
-  uint32_t us = micros() - t0;
-  uint8_t ack[5] = {'T', (uint8_t)us, (uint8_t)(us >> 8), (uint8_t)(us >> 16), (uint8_t)(us >> 24)};
-  c.write(ack, 5);
-  Serial.printf("[STREAM] speed test %s: %lu bytes in %lu us = %lu KB/s\n", blocking ? "recv" : "poll",
-                (unsigned long)len, (unsigned long)us, (unsigned long)((uint64_t)len * 1000000 / 1024 / (us ? us : 1)));
-  return true;
-}
-
-// 受信しながら読む (ブロック形式用)。1 フレーム分 (len) を超えては読まない
+// 1 フレーム分 (left) を超えては読まない
 struct Reader {
-  WiFiClient* c;
-  uint32_t left;      // このフレームの残りバイト
-  uint32_t waitUs;    // データ待ちに使った時間
-  uint8_t buf[512];
-  size_t pos = 0, n = 0;
+  uint32_t left;    // このフレームの残りバイト
+  uint32_t waitUs;  // データ待ちに使った時間
 };
 
-// 展開が 1 ブロックに 20 回ほど呼ぶので IRAM に置く (受信バッファが空のときだけフラッシュの受信処理へ)
 IRAM_ATTR bool readFn(void* ctx, uint8_t* dst, size_t want) {
   Reader* r = (Reader*)ctx;
-  while (want) {
-    if (r->pos == r->n) {
-      if (!r->left) return false;
-      uint32_t w0 = micros(), t0 = millis();
-      int a;
-      while ((a = r->c->available()) <= 0) {
-        if (!r->c->connected() || millis() - t0 > 3000) return false;
-        vTaskDelay(1);
-      }
-      size_t get = min((size_t)a, min(sizeof(r->buf), (size_t)r->left));
-      int got = r->c->read(r->buf, get);
-      r->waitUs += micros() - w0;
-      if (got <= 0) return false;
-      r->pos = 0;
-      r->n = got;
-      r->left -= got;
-    }
-    size_t k = min(want, r->n - r->pos);
-    memcpy(dst, r->buf + r->pos, k);
-    r->pos += k;
-    dst += k;
-    want -= k;
-  }
+  if (want > r->left) return false;
+  if (!ringRead(dst, want, 3000, &r->waitUs)) return false;
+  r->left -= want;
   return true;
 }
 
@@ -132,13 +106,47 @@ IRAM_ATTR bool readPre(void* ctx, uint8_t* dst, size_t n) {
   return n == 0 || readFn(p->r, dst, n);
 }
 
-void task(void*) {
+void discard(Reader& rd) {
+  uint8_t junk[64];
+  while (rd.left) {
+    size_t k = min((size_t)sizeof(junk), (size_t)rd.left);
+    if (!readFn(&rd, junk, k)) break;
+  }
+}
+
+// Wi-Fi の速さの試験 (tools/wifi_speed.py): len バイトを受け取って捨てるだけ。返事は 'T' + 受け取りにかかった時間 (us)
+// ('AKMT' / 'AKMU' のどちらも、受け取りタスク → 溜め の今の流れで測る)
+bool speedTest(uint32_t len) {
+  static uint8_t buf[2048];
+  uint32_t t0 = micros(), left = len;
+  while (left) {
+    size_t k = min((uint32_t)sizeof(buf), left);
+    if (!ringRead(buf, k, 3000, nullptr)) return false;
+    left -= k;
+  }
+  uint32_t us = micros() - t0;
+  uint8_t a[5] = {'T', (uint8_t)us, (uint8_t)(us >> 8), (uint8_t)(us >> 16), (uint8_t)(us >> 24)};
+  ack(a, 5);
+  Serial.printf("[STREAM] speed test: %lu bytes in %lu us = %lu KB/s\n", (unsigned long)len, (unsigned long)us,
+                (unsigned long)((uint64_t)len * 1000000 / 1024 / (us ? us : 1)));
+  return true;
+}
+
+// ---- 受け取り (コア 0) ----------------------------------------------------------------
+void sendAcks(int fd) {
+  Ack a;
+  while (xQueueReceive(gAcks, &a, 0) == pdTRUE) send(fd, a.b, a.n, 0);
+}
+
+void rxTask(void*) {
   WiFiServer server(FRAME_STREAM_PORT);
   bool started = false;
   WiFiClient client;
+  static uint8_t buf[2920];  // TCP の 2 つ分
   for (;;) {
     if (!WiFi.isConnected()) {
-      gClient = false;
+      if (client) client.stop();
+      gEof = true;
       vTaskDelay(pdMS_TO_TICKS(500));
       continue;
     }
@@ -146,102 +154,144 @@ void task(void*) {
       server.begin();
       server.setNoDelay(true);
       started = true;
-      Serial.printf("[STREAM] mirror stream on tcp port %d\n", FRAME_STREAM_PORT);
+      Serial.printf("[STREAM] mirror stream on tcp port %d (rx core 0, ring %u bytes)\n", FRAME_STREAM_PORT,
+                    (unsigned)kRing);
     }
     if (!client || !client.connected()) {
-      if (gClient) display::releaseBad16();  // 切れたら面のメモリと共用バッファを返す
-      gClient = false;
+      if (client) client.stop();
+      gEof = true;
+      if (!gIdle) {  // 展開側が前の接続を読み終えるまで待つ (溜めを空にしてから次へ)
+        vTaskDelay(pdMS_TO_TICKS(5));
+        continue;
+      }
       client = server.available();
       if (!client) {
         vTaskDelay(pdMS_TO_TICKS(50));
         continue;
       }
       client.setNoDelay(true);
-      gClient = true;
-      display::requestKeyframe();  // つなぎ直したら全体から
+      xStreamBufferReset(gRing);
+      xQueueReset(gAcks);
+      gKill = false;
+      gEof = false;
+      gIdle = false;
+      gSession = gSession + 1;
       Serial.printf("[STREAM] client %s connected\n", client.remoteIP().toString().c_str());
     }
-    uint8_t hdr[8];
-    if (!readAll(client, hdr, 8, 0)) {  // 次のフレームが来るまで待つ (切断されたら false)
+    int fd = client.fd();
+    sendAcks(fd);
+    if (gKill) {
       client.stop();
       continue;
     }
-    if (memcmp(hdr, "AKMT", 4) == 0 || memcmp(hdr, "AKMU", 4) == 0) {  // Wi-Fi の速さの試験
-      uint32_t n = hdr[4] | hdr[5] << 8 | hdr[6] << 16 | (uint32_t)hdr[7] << 24;
-      if (!speedTest(client, n, hdr[3] == 'U')) client.stop();
-      continue;
-    }
-    if (memcmp(hdr, "AKMF", 4) != 0) {
-      Serial.println("[STREAM] bad header, closing");
+    fd_set rf;
+    FD_ZERO(&rf);
+    FD_SET(fd, &rf);
+    timeval tv = {0, 2000};  // 2ms ごとに返事を送りに戻る
+    int s = select(fd + 1, &rf, nullptr, nullptr, &tv);
+    if (s < 0) {
       client.stop();
       continue;
     }
-    uint32_t len = hdr[4] | hdr[5] << 8 | hdr[6] << 16 | (uint32_t)hdr[7] << 24;
-    // 先頭 2 バイトで形式を見分ける: FF D8 = JPEG / 'B' 'C' = ブロック差分 / 'B' '6' = BadCodec 16bit
-    Reader rd;
-    rd.c = &client;
-    rd.left = len;
-    rd.waitUs = 0;
-    uint8_t head[2];
-    if (len < 2 || !readFn(&rd, head, 2)) {
+    if (s == 0) continue;
+    int r = recv(fd, buf, sizeof(buf), 0);
+    if (r <= 0) {
       client.stop();
       continue;
     }
-    if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6' || head[1] == 'A')) {
-      // 受信しながら描く (フレームバッファ不要)。描き終わったら返事:
-      //   'K' = OK / 'R' = 次はキーフレームが欲しい / 'E' = この形式は使えない (メモリ不足。PC は JPEG に戻す)
-      Pre pre{&rd, {head[0], head[1]}, 0};
-      int res;
-      if (head[1] == 'A') {
-        // tANS で包んだ BadCodec: 受け取りながら戻して、そのまま BadCodec の展開に渡す
-        ent::Dec& d = ent::dec();
-        res = ent::begin(d, head[1], readFn, &rd, len) ? display::drawBad16(ent::read, &d, d.outLeft, &rd.waitUs) : 0;
-      } else {
-        res = head[1] == '6' ? display::drawBad16(readPre, &pre, len, &rd.waitUs)
-                             : display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
+    size_t off = 0;
+    while (off < (size_t)r) {  // 溜めがいっぱいなら空くまで待つ (その間も返事は送る)
+      off += xStreamBufferSend(gRing, buf + off, r - off, pdMS_TO_TICKS(2));
+      if (off < (size_t)r) {
+        sendAcks(fd);
+        if (gKill || !client.connected()) break;
       }
-      if (res == 0) {
-        Serial.println("[STREAM] block frame failed");
-        client.stop();
+    }
+  }
+}
+
+// ---- 展開 (コア 1) ------------------------------------------------------------------
+void task(void*) {
+  uint32_t mine = 0;
+  for (;;) {
+    if (gSession == mine) {  // 次の接続を待つ
+      gClient = false;
+      vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
+    mine = gSession;
+    gClient = true;
+    display::requestKeyframe();  // つなぎ直したら全体から
+    for (;;) {  // この接続のフレームを順に
+      uint8_t hdr[8];
+      if (!ringRead(hdr, 8, 0, nullptr)) break;  // 次のフレームが来るまで待つ (切断されたら false)
+      uint32_t len = hdr[4] | hdr[5] << 8 | hdr[6] << 16 | (uint32_t)hdr[7] << 24;
+      if (memcmp(hdr, "AKMT", 4) == 0 || memcmp(hdr, "AKMU", 4) == 0) {  // Wi-Fi の速さの試験
+        if (!speedTest(len)) break;
         continue;
       }
-      // このフレームの残りを捨てる (メモリ不足で展開しなかったときは全部)
-      uint8_t junk[64];
-      while (rd.pos < rd.n || rd.left) {
-        size_t k = min((size_t)sizeof(junk), (size_t)(rd.n - rd.pos + rd.left));
-        if (!readFn(&rd, junk, k)) break;
+      if (memcmp(hdr, "AKMF", 4) != 0) {
+        Serial.println("[STREAM] bad header, closing");
+        break;
       }
-      if (res < 0) {
-        display::releaseBad16();
-        client.write((uint8_t)'E');  // 入らない: PC は面を減らして (最後は JPEG で) 送り直す
-      } else {
-        client.write((uint8_t)(display::needKeyframe() || res == 4 ? 'R' : 'K'));
+      // 先頭 2 バイトで形式を見分ける: FF D8 = JPEG / 'B' 'C' = ブロック差分 / 'B' '6' = BadCodec 16bit
+      Reader rd{len, 0};
+      uint8_t head[2];
+      if (len < 2 || !readFn(&rd, head, 2)) break;
+      if (head[0] == 'B' && (head[1] == 'C' || head[1] == '6' || head[1] == 'A')) {
+        // 受信しながら描く (フレームバッファ不要)。描き終わったら返事:
+        //   'K' = OK / 'R' = 次はキーフレームが欲しい / 'E' = この形式は使えない (メモリ不足。PC は JPEG に戻す)
+        Pre pre{&rd, {head[0], head[1]}, 0};
+        int res;
+        if (head[1] == 'A') {
+          // tANS で包んだ BadCodec: 受け取りながら戻して、そのまま BadCodec の展開に渡す
+          ent::Dec& d = ent::dec();
+          res = ent::begin(d, head[1], readFn, &rd, len) ? display::drawBad16(ent::read, &d, d.outLeft, &rd.waitUs) : 0;
+        } else {
+          res = head[1] == '6' ? display::drawBad16(readPre, &pre, len, &rd.waitUs)
+                               : display::drawBadCodec(readPre, &pre, len, &rd.waitUs);
+        }
+        if (res == 0) {
+          Serial.println("[STREAM] block frame failed");
+          break;
+        }
+        discard(rd);  // このフレームの残りを捨てる (メモリ不足で展開しなかったときは全部)
+        if (res < 0) {
+          display::releaseBad16();
+          ack('E');  // 入らない: PC は面を減らして (最後は JPEG で) 送り直す
+        } else {
+          ack(display::needKeyframe() || res == 4 ? 'R' : 'K');
+        }
+        continue;
       }
-      continue;
-    }
-    if (len > kMax) {
-      Serial.printf("[STREAM] jpeg too large: %lu\n", (unsigned long)len);
-      client.stop();
-      continue;
-    }
-    display::releaseBad16();  // JPEG に戻った: 共用バッファを返してもらう
-    uint8_t* buf = display::acquireFrameBuffer(1000);
-    if (!buf) {
-      client.stop();
-      continue;
-    }
-    uint32_t t0 = micros();
-    buf[0] = head[0];
-    buf[1] = head[1];
-    if (!readFn(&rd, buf + 2, len - 2)) {
+      if (len > kMax) {
+        Serial.printf("[STREAM] jpeg too large: %lu\n", (unsigned long)len);
+        break;
+      }
+      display::releaseBad16();  // JPEG に戻った: 共用バッファを返してもらう
+      uint8_t* buf = display::acquireFrameBuffer(1000);
+      if (!buf) break;
+      uint32_t t0 = micros();
+      buf[0] = head[0];
+      buf[1] = head[1];
+      if (!readFn(&rd, buf + 2, len - 2)) {
+        display::releaseFrameBuffer();
+        break;
+      }
+      display::noteReceive(micros() - t0, len);
+      ack('K');  // 受信完了。PC はすぐ次を送ってよい (展開と次の受信が重なる)
+      if (!display::showFrame(buf, len)) Serial.println("[STREAM] frame decode failed");
       display::releaseFrameBuffer();
-      client.stop();
-      continue;
     }
-    display::noteReceive(micros() - t0, len);
-    client.write((uint8_t)'K');  // 受信完了。PC はすぐ次を送ってよい (展開と次の受信が重なる)
-    if (!display::showFrame(buf, len)) Serial.println("[STREAM] frame decode failed");
-    display::releaseFrameBuffer();
+    // 接続を終える: 受け取り側に切ってもらい、溜めの残りを捨てる
+    gKill = true;
+    uint8_t junk[256];
+    while (ringRead(junk, 1, 200, nullptr)) {
+      xStreamBufferReceive(gRing, junk, sizeof(junk), 0);
+    }
+    display::releaseBad16();  // 面のメモリと共用バッファを返す
+    gClient = false;
+    gIdle = true;
   }
 }
 
@@ -249,7 +299,15 @@ void task(void*) {
 
 void begin() {
 #if HAS_TFT
-  // Arduino の loop() と同じコア 1・同じ優先度。Wi-Fi / BLE の処理 (コア 0) は邪魔しない
+  gRing = xStreamBufferCreate(kRing, 1);
+  gAcks = xQueueCreate(16, sizeof(Ack));
+  if (!gRing || !gAcks) {
+    Serial.println("[STREAM] no memory for the receive ring");
+    return;
+  }
+  // 受け取り: コア 0 (Wi-Fi の処理と同じ側)。展開より少し高い優先度で、届いたらすぐ溜めに入れる
+  xTaskCreatePinnedToCore(rxTask, "frame_rx", 4096, nullptr, 3, nullptr, 0);
+  // 展開: Arduino の loop() と同じコア 1・同じ優先度
   xTaskCreatePinnedToCore(task, "frame_stream", 4096, nullptr, 1, nullptr, 1);
 #endif
 }
