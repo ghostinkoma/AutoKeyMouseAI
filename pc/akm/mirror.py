@@ -53,6 +53,10 @@ def encode_jpeg_split(bgr: np.ndarray, quality: int = 70, split: int = JPEG_SPLI
     return head + b"".join(jpgs)
 
 
+SAME_DIFF = 6        # 前に送った絵との差 (各画素・各色の最大) がこれ以下なら同じ絵とみなして送らない
+KEEPALIVE_S = 2.0    # 同じ絵でも、この秒数に 1 回は送る (ESP32 は 5 秒来ないと状態画面に戻る)
+
+
 def compose(img: np.ndarray, lines: list[tuple[str, tuple[int, int, int]]]) -> np.ndarray:
     """ゲーム画面を 240x135 に収め (縦横比を保って余白は黒)、上に文字を重ねる。"""
     h, w = img.shape[:2]
@@ -139,6 +143,9 @@ class Mirror:
         self.sent = 0
         self.errors = 0
         self.jpeg_errors = 0
+        self._last_frame = None    # 前に送った絵 (同じ絵を送らないため)
+        self._last_sent_t = 0.0
+        self.skipped_same = 0      # 同じ絵なので送らなかった回数
         self.jpeg_split = False  # JPEG を上下 2 つに分けて送る (ESP32 が frame-stream-39 以降なら True にする)
         self.bytes_sent = 0   # 送れたバイト数の合計 (平均の計算用)
         self.fails = 0        # 送れなかった回数の合計
@@ -292,6 +299,16 @@ class Mirror:
                 lines = lines + [(label, (0, 0, 255)), (str(e)[:38].encode("ascii", "replace").decode(), (200, 200, 200))]
         t1 = time.perf_counter()
         frame = compose(img, lines)
+        # 前に送った絵とほぼ同じなら送らない (ESP32 の CPU と Wi-Fi を休ませ、熱を抑える。JPEG は毎回まるごと
+        # 展開するので特に効く)。ESP32 は 5 秒ミラーが来ないと状態画面に戻るので、KEEPALIVE_S 秒に 1 回は送る
+        now = time.monotonic()
+        last = self._last_frame
+        if (last is not None and last.shape == frame.shape and now - self._last_sent_t < KEEPALIVE_S
+                and int(cv2.absdiff(frame, last).max()) <= SAME_DIFF):
+            self.skipped_same += 1
+            return None
+        self._last_frame = frame
+        self._last_sent_t = now
         if self.fmt == "bc" and self.transport in ("tcp", "auto"):
             data = self._encode_bc(frame)
         elif self.fmt == "bad16" and self.transport in ("tcp", "auto"):
@@ -447,6 +464,9 @@ class Mirror:
                     except Exception as e:
                         self._warn(f"画面の取得: {e}")
                         time.sleep(self.interval)
+                        continue
+                    if data is None:  # 前と同じ絵: 送らずに次の画面を待つ
+                        time.sleep(max(0.0, self._interval() - (time.monotonic() - t0)))
                         continue
                 else:
                     with self._lock:

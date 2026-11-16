@@ -11,6 +11,12 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from akm.device import ABS_MAX, AbsMap, Device, Transport  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _mirror_sends_every_frame(monkeypatch):
+    """このファイルのミラーの試験は、同じ絵でも毎回送る前提 (同じ絵を送らない動きは test_mirror_skips_same_frame)"""
+    monkeypatch.setattr("akm.mirror.SAME_DIFF", -1)
 from akm.elf_bot import ElfBot, choose_pickup  # noqa: E402
 from akm.screen import Rect  # noqa: E402
 from akm.vision import Detection, TemplateDetector, bar_level  # noqa: E402
@@ -2976,3 +2982,20 @@ def test_badcodec_fast_rle_matches_reference():
         assert out.returncode == 0 and out.stdout.strip() == "ok", out.stdout
     finally:
         exe.unlink(missing_ok=True)
+
+
+def test_mirror_skips_same_frame(monkeypatch):
+    """前に送った絵とほぼ同じなら送らない (ESP32 を休ませる)。KEEPALIVE_S 秒たったら同じでも送る"""
+    import akm.mirror as mirror
+
+    monkeypatch.setattr(mirror, "SAME_DIFF", 6)
+    img = {"v": np.full((270, 480, 3), 80, np.uint8)}
+    m = mirror.Mirror("127.0.0.1", 0.02, fmt="jpeg", grab=lambda: img["v"], enabled=False)  # 送信スレッドは動かさない
+    assert m._capture() is not None          # 1 枚目は送る
+    assert m._capture() is None and m.skipped_same == 1  # 同じ絵: 送らない
+    img["v"] = img["v"] + np.uint8(3)        # ほんの少しだけ違う (圧縮のゆらぎ程度): 送らない
+    assert m._capture() is None
+    img["v"] = np.full((270, 480, 3), 200, np.uint8)  # 変わった: 送る
+    assert m._capture() is not None
+    m._last_sent_t -= mirror.KEEPALIVE_S + 0.1  # 前に送ってから 2 秒たった: 変わらなくても送る
+    assert m._capture() is not None
