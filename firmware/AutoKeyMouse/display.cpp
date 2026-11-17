@@ -348,6 +348,7 @@ uint32_t spiHz() { return gSpiHz; }
 
 namespace {
 void startJpegWorker();  // 下で定義
+void jpegRelease();
 }  // namespace
 
 void begin() {
@@ -517,7 +518,13 @@ bool decodeJpegPart(const uint8_t* data, size_t len, int y0, uint32_t* work, siz
   return rc == JDR_OK;
 }
 
-uint32_t gJpegWork[TJPGD_WORKSPACE_SIZE / 4 + 1];  // このタスク (コア 1) 用
+// JPEG の展開に使うメモリ (作業領域 2 つ・帯 2 本・作業タスク) は、JPEG が来たときだけ取り、BadCodec に
+// 切り替わったら返す (frame-stream-52)。前は起動時から持ちっぱなしで、BadCodec で映している間も約 38KB が眠り、
+// その分 Wi-Fi の受信 (TCP の窓・受信用の置き場。その都度ヒープから取る) が足りなくなっていた
+constexpr size_t kJpegWorkBytes = (TJPGD_WORKSPACE_SIZE / 4 + 1) * 4;
+uint32_t* gJpegWork = nullptr;  // このタスク (コア 1) 用
+uint32_t* gJobWork = nullptr;   // 作業タスク (コア 0) 用
+bool gJpegReady = false;        // 上のメモリと作業タスクを持っている
 JpegOut gJpegOut;
 
 // 作業タスク (コア 0): 下半分の JPEG を展開する
@@ -533,31 +540,68 @@ SemaphoreHandle_t gJobGo = nullptr, gJobDone = nullptr;
 TaskHandle_t gJobTask = nullptr;
 
 void jpegWorker(void*) {
-  static uint32_t work[TJPGD_WORKSPACE_SIZE / 4 + 1];
   for (;;) {
     xSemaphoreTake(gJobGo, portMAX_DELAY);
     gJobOut.drawUs = 0;
-    gJob.ok = decodeJpegPart(gJob.data, gJob.len, gJob.y0, work, sizeof(work), &gJobOut);
+    gJob.ok = decodeJpegPart(gJob.data, gJob.len, gJob.y0, gJobWork, kJpegWorkBytes, &gJobOut);
     xSemaphoreGive(gJobDone);
   }
 }
 
+// 起動時: 小さな同期の道具だけ作る (メモリを食うものは JPEG が来たとき jpegAcquire で)
 void startJpegWorker() {
-  if (gJobTask) return;
+  if (gSpiMx) return;
   gSpiMx = xSemaphoreCreateMutex();
   gJobGo = xSemaphoreCreateBinary();
   gJobDone = xSemaphoreCreateBinary();
+}
+
+// JPEG を描く前: 作業領域・帯・作業タスクを用意する (持っていれば何もしない)。作業領域が取れなければ false
+bool jpegAcquire() {
+  if (gJpegReady) return true;
+  gJpegWork = (uint32_t*)heap_caps_malloc(kJpegWorkBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!gJpegWork) {
+    Serial.println("[TFT] JPEG: no memory for the work area");
+    return false;
+  }
   for (JpegOut* o : {&gJpegOut, &gJobOut}) {  // 帯 (MCU 1 列) を 2 本。取れなければ MCU ごとに送る
     o->strip = (uint16_t*)heap_caps_malloc(kJpegRow * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     o->rowW = 0;
+    o->seq = 0;
+    o->mseq[0] = o->mseq[1] = 0;
   }
-  Serial.printf("[TFT] JPEG strips %s (free heap %u)\n", gJpegOut.strip && gJobOut.strip ? "ok" : "missing",
-                (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
-  if (!gSpiMx || !gJobGo || !gJobDone ||
-      xTaskCreatePinnedToCore(jpegWorker, "jpeg1", 4096, nullptr, 2, &gJobTask, 0) != pdPASS) {
+  gJobWork = (uint32_t*)heap_caps_malloc(kJpegWorkBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (gJobWork && gSpiMx && gJobGo && gJobDone &&
+      xTaskCreatePinnedToCore(jpegWorker, "jpeg1", 4096, nullptr, 2, &gJobTask, 0) != pdPASS)
     gJobTask = nullptr;
-    Serial.println("[TFT] JPEG worker (core 0) could not start: one core only");
+  gJpegReady = true;
+  Serial.printf("[TFT] JPEG memory on: strips %s, 2 cores %s (free heap %u)\n",
+                gJpegOut.strip && gJobOut.strip ? "ok" : "missing", gJobTask ? "on" : "off",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
+  return true;
+}
+
+// BadCodec などに切り替わった: JPEG 用のメモリを返して Wi-Fi の受信に回す
+void jpegRelease() {
+  if (!gJpegReady) return;
+  if (gSpiMx) {
+    xSemaphoreTake(gSpiMx, portMAX_DELAY);
+    dmaWait();  // 帯を送り終えてから返す
+    xSemaphoreGive(gSpiMx);
   }
+  if (gJobTask) {  // 作業タスクは仕事を待っているところ (JPEG の描画は終わっている)
+    vTaskDelete(gJobTask);
+    gJobTask = nullptr;
+  }
+  for (JpegOut* o : {&gJpegOut, &gJobOut}) {
+    heap_caps_free(o->strip);
+    o->strip = nullptr;
+  }
+  heap_caps_free(gJobWork);
+  heap_caps_free(gJpegWork);
+  gJobWork = gJpegWork = nullptr;
+  gJpegReady = false;
+  Serial.printf("[TFT] JPEG memory off (free heap %u)\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
 }
 
 // 'B' 'J' n (y0 u16, 長さ u32) x n + JPEG x n。n = 1 か 2
@@ -596,12 +640,13 @@ bool drawJpegAny(const uint8_t* data, size_t len) {
       return false;
     }
   }
+  if (!jpegAcquire()) return false;
   bool dma = gDmaOn && gSpiMx && dmaBegin();
   if (!dma) {  // DMA なし: 1 つのコアで順に (Adafruit は 2 つのコアから同時に使えない)
     dmaEnd();
     bool ok = true;
     for (int i = 0; i < n; i++)
-      ok = decodeJpegPart(parts[i].data, parts[i].len, parts[i].y0, gJpegWork, sizeof(gJpegWork), nullptr) && ok;
+      ok = decodeJpegPart(parts[i].data, parts[i].len, parts[i].y0, gJpegWork, kJpegWorkBytes, nullptr) && ok;
     return ok;
   }
   gRunX = -1;  // BadCodec の帯 (共用バッファ) は使わない
@@ -612,7 +657,7 @@ bool drawJpegAny(const uint8_t* data, size_t len) {
     gJob = {parts[1].data, parts[1].len, parts[1].y0, false};
     xSemaphoreGive(gJobGo);  // 下半分はコア 0 で
   }
-  bool ok = decodeJpegPart(parts[0].data, parts[0].len, parts[0].y0, gJpegWork, sizeof(gJpegWork), &gJpegOut);
+  bool ok = decodeJpegPart(parts[0].data, parts[0].len, parts[0].y0, gJpegWork, kJpegWorkBytes, &gJpegOut);
   uint32_t draw = gJpegOut.drawUs;
   if (two) {
     xSemaphoreTake(gJobDone, portMAX_DELAY);
@@ -620,7 +665,7 @@ bool drawJpegAny(const uint8_t* data, size_t len) {
     if (gJobOut.drawUs > draw) draw = gJobOut.drawUs;
   } else if (n == 2) {  // 作業タスクが無い: このコアで続けて
     gJpegOut.drawUs = 0;
-    ok = decodeJpegPart(parts[1].data, parts[1].len, parts[1].y0, gJpegWork, sizeof(gJpegWork), &gJpegOut) && ok;
+    ok = decodeJpegPart(parts[1].data, parts[1].len, parts[1].y0, gJpegWork, kJpegWorkBytes, &gJpegOut) && ok;
     draw += gJpegOut.drawUs;
   }
   xSemaphoreTake(gSpiMx, portMAX_DELAY);
@@ -787,6 +832,7 @@ void releaseBad16() {
 
 int drawBad16(ReadFn read, void* ctx, uint32_t len, const uint32_t* recvUs) {
   TftLock lock(true);  // ver 3 は DMA で描く。それ以外は下で dmaEnd()
+  jpegRelease();  // JPEG から切り替わった: JPEG 用のメモリを返す
   uint32_t t0 = micros();
   uint32_t recv0 = recvUs ? *recvUs : 0;
   bad16::Header h;
