@@ -138,7 +138,7 @@ inline const uint64_t* spread() {
 //   ver 2: 'B' '6' 2 flags mask(u16 LE)   … mask の面だけ、面ごとの BadCodec フレーム (前フレームが要る)
 //   ver 3: 'B' '6' 3 flags mask(u16 LE)   … 前フレーム不要のブロックストリーム (decodeAbs)
 //          mask = 0x8000 + flags bit2 (rep) は白黒 1 面: その 1 面の 0 / 1 を黒 / 白で描く
-//   ver 7: 'B' '6' 7 flags mask(=0x00FF) 印 32B 色 … インデックスカラー。本体は ver 3 と同じ (decodeAbs)
+//   ver 7: 'B' '6' 7 flags mask(0x00FF / 0x000F) 印 32B 色 … インデックスカラー (256 / 16 色)。本体は ver 3 と同じ (decodeAbs)
 //          8 面 = パレットの番号 (Gray 符号のことがある)。印の番号の色 (RGB565 u16 LE) でパレットを書き換える
 //   (ver 4・5 は YCoCg 版の試作。描画が重いので外した。今は受け付けない)
 struct Header {
@@ -185,7 +185,8 @@ inline bool readHeader(ReadFn read, void* ctx, Header& h) {
       if (!read(ctx, c, 2)) return false;
       pal[i] = (uint16_t)(c[0] | c[1] << 8);
     }
-    return h.mask == 0x00FF;
+    // 番号のビット数: 0x00FF = 256 色 / 0x000F = 16 色 (frame-stream-53 以降)。下から続く面だけ
+    return h.mask && h.mask <= 0x00FF && (h.mask & (h.mask + 1)) == 0;
   }
   if (b[2] != 2 && b[2] != 3) return false;
   h.abs = b[2] == 3;

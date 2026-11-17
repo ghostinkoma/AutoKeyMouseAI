@@ -280,8 +280,25 @@ IDX_SWAP = (24, 64)  # 部分更新で入れ替える番号の数 (少ない方�
 IDX_DRIFT = 2.5  # 部分更新を重ねて、基準が作り直したときの誤差のこの倍を超えたら作り直す (画質を戻す)
 
 
+def _bayer8_unit() -> np.ndarray:
+    """8x8 の Bayer 閾値 (0〜1。gate_live の白黒ディザと同じ並び)"""
+    m = np.zeros((1, 1), np.int32)
+    while m.shape[0] < BLOCK:
+        m = np.block([[4 * m, 4 * m + 2], [4 * m + 3, 4 * m + 1]])
+    return (m.astype(np.float32) + 0.5) / (BLOCK * BLOCK)
+
+
 class IndexEncoder:
-    def __init__(self, gray: bool = True, rebuild: float = IDX_REBUILD, partial: bool = True):
+    def __init__(self, gray: bool = True, rebuild: float = IDX_REBUILD, partial: bool = True,
+                 colors: int = 256, mono: bool = False, dither: bool = False):
+        # colors 16: 番号 4 ビット = 4 面 (mask 0x000F。256 色の半分の大きさと展開。frame-stream-53 以降)
+        # mono: 16 段の灰色 (パレットは固定) / dither: 8x8 の組織的ディザ (BadCodec のブロックにそろえる)
+        self.colors = 16 if mono else int(colors)
+        assert self.colors in (16, 256), colors
+        self.mono = bool(mono)
+        self.dither = bool(dither)
+        self.mask = 0x00FF if self.colors == 256 else 0x000F
+        self.swap_sizes = IDX_SWAP if self.colors == 256 else (2, 4)
         self.gray = gray
         self.rebuild = float(rebuild)
         self.partial = bool(partial)  # False: 前と同じ (毎回作り直す)
@@ -303,7 +320,27 @@ class IndexEncoder:
         self.force_key = True
 
     def label(self) -> str:
-        return "インデックス 256 色"
+        if self.mono:
+            return "灰色 16 段" + (" + ディザ" if self.dither else "")
+        return f"インデックス {self.colors} 色" + (" + ディザ" if self.dither else "")
+
+    def _prep(self, rgb: np.ndarray) -> np.ndarray:
+        """ディザ: 8x8 の閾値 (BadCodec のブロックにそろえる) を色の段の間隔ぶん散らして足す"""
+        if not self.dither or self.mono:
+            return rgb
+        h, w = rgb.shape[:2]
+        t = np.tile(_bayer8_unit(), (-(-h // BLOCK), -(-w // BLOCK)))[:h, :w]
+        spread = 255.0 / 4  # 16 色: 1 色あたり 4 段ほどの間隔
+        return np.clip(rgb.astype(np.float32) + (t[..., None] - 0.5) * spread, 0, 255).astype(np.uint8)
+
+    def _mono_idx(self, rgb: np.ndarray) -> np.ndarray:
+        s16 = rgb.astype(np.float32)
+        y = (s16[..., 0] * 77 + s16[..., 1] * 150 + s16[..., 2] * 29) / 256.0 * 15.0 / 255.0
+        if self.dither:
+            h, w = y.shape
+            t = np.tile(_bayer8_unit(), (-(-h // BLOCK), -(-w // BLOCK)))[:h, :w]
+            return np.clip(np.floor(y + t), 0, 15).astype(np.uint8)
+        return np.clip(np.rint(y), 0, 15).astype(np.uint8)
 
     def _set_palette(self, pal: np.ndarray) -> None:
         from PIL import Image
@@ -317,12 +354,13 @@ class IndexEncoder:
     def _build(self, rgb: np.ndarray) -> None:
         from PIL import Image
 
-        q = Image.fromarray(rgb).quantize(colors=255, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
-        pal = np.array(q.getpalette()[:255 * 3], np.int32).reshape(-1, 3)
+        n = self.colors - 1
+        q = Image.fromarray(rgb).quantize(colors=n, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+        pal = np.array(q.getpalette()[:n * 3], np.int32).reshape(-1, 3)
         pal = np.vstack([np.zeros((1, 3), np.int32), pal, np.zeros((max(0, 255 - len(pal)), 3), np.int32)])[:256]
         # 明るさの順に並べる (番号の上位ビットが明るさに近くなり、面が少し縮む)。0 = 黒はそのまま
-        y = pal[1:] @ np.array([299, 587, 114])
-        pal = np.vstack([pal[:1], pal[1:][np.argsort(y, kind="stable")]])
+        y = pal[1:self.colors] @ np.array([299, 587, 114])
+        pal = np.vstack([pal[:1], pal[1:self.colors][np.argsort(y, kind="stable")], pal[self.colors:]])
         self._set_palette(pal)
         self.rebuilds += 1
 
@@ -330,6 +368,8 @@ class IndexEncoder:
         from PIL import Image
 
         idx = np.asarray(Image.fromarray(rgb).quantize(palette=self._pim, dither=Image.Dither.NONE), np.uint8)
+        if self.colors < 256:
+            idx = np.where(idx >= self.colors, 0, idx).astype(np.uint8)  # 使わない番号 (黒の埋め草) → 0 = 黒
         err = self.pal[idx] - rgb.astype(np.int32)
         return idx, float((err * err).mean()), err
 
@@ -351,6 +391,7 @@ class IndexEncoder:
             return None
         count = np.bincount(idx.reshape(-1), minlength=256)
         count[0] = 1 << 30  # 黒は残す
+        count[self.colors:] = 1 << 30  # 番号の範囲外は使わない
         slots = np.argsort(count, kind="stable")[:len(cols)]  # 使われていない順
         pal = self.pal.copy()
         pal[slots] = cols
@@ -358,6 +399,13 @@ class IndexEncoder:
 
     def _update(self, rgb: np.ndarray, key: bool):
         """パレットを決めて番号を付ける → (番号, キーフレームか, 入れ替えた番号 (部分更新のとき))"""
+        if self.mono:  # 灰色 16 段: パレットは固定 (最初とキーフレームで送るだけ)
+            if self.pal is None:
+                g = np.arange(16, dtype=np.int32) * 17
+                self._set_palette(np.vstack([np.stack([g, g, g], 1), np.zeros((240, 3), np.int32)]))
+                key = True
+            return self._mono_idx(rgb), key, None
+        rgb = self._prep(rgb)
         if self.pal is None:
             self._build(rgb)
             idx, mse, _err = self._map(rgb)
@@ -369,7 +417,7 @@ class IndexEncoder:
             return idx, key, None
         if self.partial and not key and self.ref_mse <= self.full_mse * IDX_DRIFT + 4.0:
             old = (self.pal, self.pal565, self._pim)
-            for k in IDX_SWAP:  # 少ない入れ替えで足りれば、送り直すブロックも少ない
+            for k in self.swap_sizes:  # 少ない入れ替えで足りれば、送り直すブロックも少ない
                 got = self._swap(rgb, idx, err, k)
                 if got is None:
                     break
@@ -411,7 +459,7 @@ class IndexEncoder:
             prev[hit] = cur[hit] ^ 1
         out = np.empty(ABS_CAP, np.uint8)
         ch = ctypes.c_int()
-        n = _lib().bad16_encode_abs(cur.ctypes.data, None if prev is None else prev.ctypes.data, W, H, 0x00FF,
+        n = _lib().bad16_encode_abs(cur.ctypes.data, None if prev is None else prev.ctypes.data, W, H, self.mask,
                                     out.ctypes.data, out.size, ctypes.byref(ch))
         if n < 0:
             raise RuntimeError("bad16_encode_abs failed")
@@ -420,7 +468,10 @@ class IndexEncoder:
         self.prev_idx = idx
         # パレット: キーフレームは全部、部分更新は入れ替えた番号だけ、それ以外は送らない (使い回し)
         if key:
-            bitmap, colors = b"\xff" * 32, self.pal565.astype("<u2").tobytes()
+            bits = np.zeros(256, np.uint8)
+            bits[:self.colors] = 1
+            bitmap = np.packbits(bits, bitorder="little").tobytes()
+            colors = self.pal565[:self.colors].astype("<u2").tobytes()
         elif slots is not None:
             bits = np.zeros(256, np.uint8)
             bits[slots] = 1
@@ -429,7 +480,7 @@ class IndexEncoder:
         else:
             bitmap, colors = bytes(32), b""
         flags = (1 if key else 0) | (2 if self.gray else 0)
-        return b"B6\x07" + bytes([flags]) + struct.pack("<H", 0x00FF) + bitmap + colors + out[:n].tobytes()
+        return b"B6\x07" + bytes([flags]) + struct.pack("<H", self.mask) + bitmap + colors + out[:n].tobytes()
 
 
 # ------------------------------------------------------- 1 フレームまるごとのエントロピー符号 --

@@ -46,7 +46,7 @@ class Snapshot:
 
 
 # 送る形式 (仲介アプリのミラーのタブ)。BadCodec のカラーは R G B のビット数 (565 = RGB565 そのまま・可逆)
-FORMATS = ("Index 256", "BadCodec 565", "JPEG", "BadCodec 1bit")
+FORMATS = ("Index 256", "Index 16", "Gray 16", "BadCodec 565", "JPEG", "BadCodec 1bit")
 # 白黒 1 ビットのディザ。BadCodec の仕様 (8x8 のブロック) に合わせ、8x8 の組織的ディザ (Bayer) を
 # ブロックの区切りにそろえて敷く: 同じ明るさの 8x8 は必ず同じ模様 (= 0〜64 個が白の 65 段階) になり、
 # 模様は場所で決まるので動かない所は前のフレームと同じ (変わったブロックだけ送る差分が効く)。
@@ -106,18 +106,32 @@ def from565(img565: np.ndarray) -> np.ndarray:
     return out
 
 
+INDEX_FORMATS = ("Index 256", "Index 16", "Gray 16")
+
+
+def index_kw(fmt: str, dither: str = "なし") -> dict:
+    """インデックスの形式 → IndexEncoder の指定。16 色 / 灰色 16 段は 4 面 (frame-stream-53 以降)、ディザも使える"""
+    if fmt == "Index 16":
+        return {"colors": 16, "dither": dither == "8x8"}
+    if fmt == "Gray 16":
+        return {"mono": True, "dither": dither == "8x8"}
+    return {}
+
+
 def to_send_format(small: np.ndarray, fmt: str, threshold: int, dither: str = "なし") -> tuple[np.ndarray, int]:
     """送る形式に合わせた見た目 (ESP32 の液晶に出るのと同じ色) と、おおよその 1 枚の大きさ (バイト。差分で縮む前)。"""
     if fmt.startswith("BadCodec 1bit"):
         bw = to_mono(small, threshold, dither)
         return cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR), SEND_W * SEND_H // 8
-    if fmt == "Index 256":  # インデックスカラー: パレットの色 (使い回し・作り直しも送るときと同じ)
+    if fmt in INDEX_FORMATS:  # インデックスカラー: パレットの色 (使い回し・作り直しも送るときと同じ)
         from .bad16 import IndexEncoder
 
-        enc = _PREVIEW.get("index")
+        kw = index_kw(fmt, dither)
+        key = ("index", fmt, dither)
+        enc = _PREVIEW.get(key)
         if enc is None:
-            enc = _PREVIEW["index"] = IndexEncoder()
-        return from565(enc.display(small)), SEND_W * SEND_H
+            enc = _PREVIEW[key] = IndexEncoder(**kw)
+        return from565(enc.display(small)), SEND_W * SEND_H * (8 if fmt == "Index 256" else 4) // 8
     bits = color_bits(fmt)
     if bits is not None:
         from .bad16 import replicate565, to565

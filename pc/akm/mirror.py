@@ -86,7 +86,7 @@ class Mirror:
     def __init__(self, host: str | None, interval_s: float = 1.0, enabled: bool = True,
                  fmt: str = "jpeg", quality: int = 70, grab=None, transport: str = "auto", port: int = 5005,
                  pipeline: int = 2, b16_prev_free: bool = True, b16_bits: tuple[int, int, int] = (5, 6, 5),
-                 entropy: str | None = None, palette: bool = False,
+                 entropy: str | None = None, palette: bool = False, index_kw: dict | None = None,
                  b16_gray: bool = False, link_factory=None):
         self.enabled = enabled and bool(host)
         self.url = None
@@ -125,6 +125,8 @@ class Mirror:
         self.entropy = entropy or None
         # インデックスカラー (256 色のパレットの番号 8 面。frame-stream-36 以降)
         self.palette = bool(palette)
+        # IndexEncoder への追加の指定: {'colors': 16} / {'mono': True} と {'dither': True} (frame-stream-53 以降)
+        self.index_kw = dict(index_kw or {})
         # BadCodec (インデックス / 16bit): 8x8 ブロックの色の差がすべてこの値以下なら送らない (0 = 可逆)。送信中でも変えてよい
         self.skip_diff = 0
         self._hold = None
@@ -282,6 +284,13 @@ class Mirror:
             self._ok_once = True
             print(f"[mirror] 液晶への表示に成功 ({self.fmt}, {n} バイト)")
 
+    def _b16_label(self) -> str:
+        if not self.palette:
+            return "bad16"
+        from .bad16 import IndexEncoder
+
+        return IndexEncoder(**self.index_kw).label()
+
     def _capture(self) -> bytes:
         with self._lock:
             lines = list(self._lines)
@@ -318,7 +327,7 @@ class Mirror:
             if self._b16 is None:
                 from .bad16 import Encoder, IndexEncoder
 
-                self._b16 = (IndexEncoder() if self.palette else
+                self._b16 = (IndexEncoder(**self.index_kw) if self.palette else
                              Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free, gray=self.b16_gray))
             if self.skip_diff > 0 and not (tuple(self.b16_bits) == (1, 1, 1) and not self.palette):
                 from .bad16 import BlockHold
@@ -452,6 +461,8 @@ class Mirror:
                     need = max(need, 35)  # tANS で包んだフレーム
                 if self.palette:
                     need = max(need, 36)  # インデックスカラー
+                    if self.index_kw.get("colors", 256) != 256 or self.index_kw.get("mono"):
+                        need = max(need, 53)  # 16 色 / 灰色 16 段 (4 面)
                 if tuple(self.b16_bits) == (1, 1, 1) and self.b16_prev_free and not self.palette:
                     need = max(need, 37)  # 白黒 1 面
                 if self.fmt == "bad16" and (not m or int(m.group(1)) < need):

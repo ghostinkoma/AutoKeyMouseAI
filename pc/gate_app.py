@@ -48,12 +48,16 @@ TITLE_RE = re.compile(
 try:
     import cv2
 
-    from akm.gate_live import DITHERS, FORMATS, LiveFeed, MapSource, color_bits
+    from akm.gate_live import DITHERS, FORMATS, INDEX_FORMATS, LiveFeed, MapSource, color_bits, index_kw
     LIVE_ERROR = ""
 except Exception as _e:  # noqa: BLE001
     cv2 = LiveFeed = MapSource = None
     LIVE_ERROR = f"{type(_e).__name__}: {_e}"
-    FORMATS = ("Index 256", "BadCodec 565", "JPEG", "BadCodec 1bit")
+    FORMATS = ("Index 256", "Index 16", "Gray 16", "BadCodec 565", "JPEG", "BadCodec 1bit")
+    INDEX_FORMATS = ("Index 256", "Index 16", "Gray 16")
+
+    def index_kw(fmt, dither="なし"):
+        return {}
     DITHERS = ("なし", "8x8")
 
     def color_bits(fmt):
@@ -532,7 +536,8 @@ class GateApp:
                             command=lambda t=text: self.log("INFO", f"撮影方式: {t}")).grid(row=i, column=0, sticky="w")
         g = rb.group(t, "形式")
         # BadCodec のカラーは R G B のビット数。565 = RGB565 そのまま (可逆・一番きれい・1 枚が一番大きい)
-        labels = {"Index 256": "インデックス 8 ビット (256 色)", "BadCodec 565": "BadCodec 16 ビット (可逆)",
+        labels = {"Index 256": "インデックス 8 ビット (256 色)", "Index 16": "インデックス 4 ビット (16 色)",
+                  "Gray 16": "灰色 4 ビット (16 段)", "BadCodec 565": "BadCodec 16 ビット (可逆)",
                   "JPEG": "JPEG", "BadCodec 1bit": "白黒 1 ビット"}
         names = [labels.get(f, f) for f in FORMATS]
         by_label = dict(zip(names, FORMATS))
@@ -811,7 +816,7 @@ class GateApp:
         fmt = self.mirror_fmt.get()
         # BadCodec: 選んだ色のビット数で送る (1bit は送信画面と同じ白黒の絵を各色 1 ビット = 3 面で)
         bits = color_bits(fmt)
-        if fmt == "Index 256":  # インデックスカラー (frame-stream-36 以降)
+        if fmt in INDEX_FORMATS:  # インデックスカラー (frame-stream-36 以降。16 色 / 灰色 16 段は 53 以降)
             kind, bits = "bad16", (5, 6, 5)
         else:
             kind, bits = ("jpeg", (3, 4, 3)) if bits is None else ("bad16", bits)
@@ -833,7 +838,7 @@ class GateApp:
                              transport="tcp",
                              port=int(mcfg.get("port", 5005)), b16_bits=bits,
                              entropy=ENTROPY_MODES.get(self._ent_effective()) if kind == "bad16" else None,
-                             palette=fmt == "Index 256",
+                             palette=fmt in INDEX_FORMATS, index_kw=index_kw(fmt, self.dither.get()),
                              # 有線は 1 枚ずつ返事を待つ (ESP32 の受信バッファ 8KB を溢れさせない)
                              pipeline=1 if wired else 2, link_factory=link,
                              b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))
@@ -847,7 +852,7 @@ class GateApp:
         if host:
             self._start_esp_poll(host)  # 有線のときも、内訳は Wi-Fi の /status から読む
         self.log("INFO", f"ESP32 ({where}) への送信を始めました: {fmt} → " +
-                 ("インデックス 256 色" if fmt == "Index 256" else f"{kind} {''.join(map(str, bits))}"))
+                 (self.sender._b16_label() if fmt in INDEX_FORMATS else f"{kind} {''.join(map(str, bits))}"))
 
     def _route_changed(self):
         self.log("INFO", f"送信経路: {'有線 (' + self.com.get() + ')' if self.route.get() == 'serial' else 'Wi-Fi'}")
@@ -1179,7 +1184,8 @@ class GateApp:
         mono = f == "BadCodec 1bit"
         for w in self._mono_widgets:
             w.state(["!disabled"] if mono else ["disabled"])
-        self._dither_box.configure(state="readonly" if mono else "disabled")
+        self._dither_box.configure(state="readonly" if mono or f in ("Index 16", "Gray 16") else "disabled")
+        self._mono_widgets[3].state(["!disabled"] if mono or f in ("Index 16", "Gray 16") else ["disabled"])
         self._mono_cap.configure(text="白黒のときだけ使います (fw37〜)" if not mono else "8x8 = BadCodec のブロックにそろえたディザ")
         self._mono_cap.state(["!disabled"] if mono else ["disabled"])
 

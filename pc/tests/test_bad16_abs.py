@@ -262,3 +262,23 @@ def test_block_hold_skips_small_changes_and_keeps_lossless_at_zero():
     e = h.apply(d)
     assert np.array_equal(e[:64], d[:64])  # a から 10 = しきい値 8 を超えた
     assert np.array_equal(e[64:72, 80:88], c[64:72, 80:88])  # c から 5 = まだ前のまま
+
+
+@pytest.mark.parametrize("kw", [dict(colors=16), dict(colors=16, dither=True), dict(mono=True), dict(mono=True, dither=True)])
+def test_index16_matches_esp32_decoder(decoder, kw):
+    """16 色 / 灰色 16 段 (4 面, mask 0x000F)。ESP32 の展開と同じ絵になり、256 色より小さい"""
+    from akm.bad16 import IndexEncoder
+
+    enc = IndexEncoder(**kw)
+    big = IndexEncoder()
+    datas, expect, n16, n256 = [], [], 0, 0
+    for f in frames_of():
+        d = enc.encode(f)
+        assert struct.unpack_from("<H", d, 4)[0] == 0x000F
+        datas.append(d)
+        expect.append(enc.last_display.copy())
+        n16 += len(d)
+        n256 += len(big.encode(f))
+    for got, want in zip(run_decoder(decoder, datas), expect):
+        assert np.array_equal(got, want)
+    assert n16 < n256
