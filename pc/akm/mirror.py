@@ -125,6 +125,9 @@ class Mirror:
         self.entropy = entropy or None
         # インデックスカラー (256 色のパレットの番号 8 面。frame-stream-36 以降)
         self.palette = bool(palette)
+        # BadCodec (インデックス / 16bit): 8x8 ブロックの色の差がすべてこの値以下なら送らない (0 = 可逆)。送信中でも変えてよい
+        self.skip_diff = 0
+        self._hold = None
         self._key_sent = False  # 包んだフレームがキーフレームか (包むと先頭の flags が見えないので覚えておく)
         # True: 前フレーム不要版 (ver 3)。ESP32 は変わったブロックを直接液晶へ描くのでメモリ不足にならない。
         # False: 面ごとのフレーム (ver 2)。少し小さいが ESP32 に (面の数 + 1) x 4KB 要る
@@ -317,6 +320,15 @@ class Mirror:
 
                 self._b16 = (IndexEncoder() if self.palette else
                              Encoder(bits=self.b16_bits, prev_free=self.b16_prev_free, gray=self.b16_gray))
+            if self.skip_diff > 0 and not (tuple(self.b16_bits) == (1, 1, 1) and not self.palette):
+                from .bad16 import BlockHold
+
+                if self._hold is None:
+                    self._hold = BlockHold()
+                self._hold.threshold = int(self.skip_diff)
+                frame = self._hold.apply(frame)
+            elif self._hold is not None:
+                self._hold.reset()
             data = self._b16.encode(frame)
             if self.entropy and data[:2] == b"B6":
                 from .bad16 import entropy_wrap

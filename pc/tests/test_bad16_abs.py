@@ -228,3 +228,37 @@ def test_index_partial_palette_update(decoder):
     for f in frames:
         old.encode(f)
     assert old.rebuilds > 1
+
+
+def test_block_hold_skips_small_changes_and_keeps_lossless_at_zero():
+    import numpy as np
+
+    from akm.bad16 import BlockHold, IndexEncoder
+
+    rng = np.random.default_rng(1)
+    a = rng.integers(0, 256, (135, 240, 3), np.uint8)
+    b = a.copy()
+    b[:8, :8] = np.clip(a[:8, :8].astype(int) + 3, 0, 255)  # 小さな変化
+    b[64:72, 80:88] = 255 - a[64:72, 80:88]                 # 大きな変化
+    h0 = BlockHold(0)
+    h0.apply(a)
+    assert np.array_equal(h0.apply(b), b)  # 0 = 可逆
+    h = BlockHold(8)
+    h.apply(a)
+    out = h.apply(b)
+    assert np.array_equal(out[:8, :8], a[:8, :8])            # 前のまま
+    assert np.array_equal(out[64:72, 80:88], b[64:72, 80:88])  # 送る
+    assert h.held_blocks == 17 * 30 - 1
+    # 前のままにしたブロックは BadCodec でも「変わっていない」= 送られない
+    enc = IndexEncoder()
+    enc.encode(a)
+    enc.encode(a)
+    enc.encode(out)
+    assert enc.changed_blocks <= 2
+    # ゆっくりした変化は積もってしきい値を超えたら送られる
+    c = np.clip(a.astype(int) + 5, 0, 255).astype(np.uint8)
+    h.apply(c)
+    d = np.clip(a.astype(int) + 10, 0, 255).astype(np.uint8)
+    e = h.apply(d)
+    assert np.array_equal(e[:64], d[:64])  # a から 10 = しきい値 8 を超えた
+    assert np.array_equal(e[64:72, 80:88], c[64:72, 80:88])  # c から 5 = まだ前のまま

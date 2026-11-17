@@ -360,6 +360,8 @@ class GateApp:
         self.auto_refresh = tk.BooleanVar(value=True)
         self.show_other = tk.BooleanVar(value=False)  # 送信先の一覧に MURex 以外のウィンドウも出す
         self.mirror_fmt = tk.StringVar(value="Index 256")  # 既定はインデックス 256 色。config の mirror.color で変わり、選んだものは覚えておく
+        # BadCodec (インデックス / 16bit): 8x8 ブロックの色の差がすべてこの値以下なら送らない (0 = 可逆)
+        self.skip_diff = tk.IntVar(value=0)
         self.mirror_ent = tk.StringVar(value="なし")  # BadCodec のフレームをさらに包む: なし / tANS
         self.threshold = tk.IntVar(value=100)
         self.dither = tk.StringVar(value="8x8")  # 白黒 1 ビットのディザ (BadCodec の 8x8 にそろえた組織的ディザ)
@@ -550,6 +552,15 @@ class GateApp:
         self._ent_box.grid(row=1, column=0, sticky="w", pady=(2, 0))
         self._ent_cap = ttk.Label(g, text="", style="Caption.TLabel")
         self._ent_cap.grid(row=2, column=0, sticky="w")
+        sf = ttk.Frame(g)
+        sf.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        self._skip_lbl = ttk.Label(sf, text="小さな変化を送らない")
+        self._skip_lbl.pack(side=tk.LEFT)
+        self._skip_box = ttk.Spinbox(sf, from_=0, to=64, increment=2, textvariable=self.skip_diff, width=4)
+        self._skip_box.pack(side=tk.LEFT, padx=(4, 0))
+        self._skip_cap = ttk.Label(g, text="", style="Caption.TLabel")
+        self._skip_cap.grid(row=4, column=0, sticky="w")
+        self.skip_diff.trace_add("write", lambda *_: self._skip_changed())
         g = rb.group(t, "白黒 1 ビット")
         self._mono_widgets = [ttk.Label(g, text="しきい値"),
                               ttk.Scale(g, from_=0, to=255, variable=self.threshold, length=140),
@@ -827,6 +838,7 @@ class GateApp:
                              pipeline=1 if wired else 2, link_factory=link,
                              b16_prev_free=not mcfg.get("with_prev", False), b16_gray=bool(mcfg.get("gray", False)))
         self.sender.set_lines([])  # 液晶にはゲームの画面だけを出す
+        self.sender.skip_diff = self._skip_diff_value()
         ent = self._ent_effective() if kind == "bad16" else "なし"
         self.sender_fmt = fmt
         self.sender_ent = self._ent_effective()
@@ -904,6 +916,8 @@ class GateApp:
         if m is not None and label == "":  # PC 側の 1 枚あたり: 撮影 / エンコード / 送信と返事待ち
             line += (f" 撮影{getattr(m, 't_capture', 0):.0f} エンコ{getattr(m, 't_encode', 0):.0f} "
                      f"送信{getattr(m, 't_post', 0):.0f}ms")
+            if getattr(m, "skip_diff", 0):
+                line += f" 差{m.skip_diff}以下は送らない"
         if esp:
             line += (f" | ESP {esp['fps']:.1f}fps 受信待ち{esp['recv_ms']:.0f} 展開{esp['decode_ms']:.0f} "
                      f"描画{esp['draw_ms']:.0f}ms CPU{esp['cpu_pct']:.0f}%"
@@ -1158,6 +1172,10 @@ class GateApp:
         self._ent_cap.configure(text={"JPEG": "JPEG は圧縮済みなので使いません",
                                       "BadCodec 1bit": "白黒は小さいので使いません"}.get(f, "BadCodec の 1 枚を包む (fw35〜)"))
         self._ent_cap.state(["!disabled"] if ent_ok else ["disabled"])
+        skip_ok = f not in ("JPEG", "BadCodec 1bit")
+        for w in (self._skip_lbl, self._skip_box, self._skip_cap):
+            w.state(["!disabled"] if skip_ok else ["disabled"])
+        self._skip_changed()
         mono = f == "BadCodec 1bit"
         for w in self._mono_widgets:
             w.state(["!disabled"] if mono else ["disabled"])
@@ -1165,9 +1183,25 @@ class GateApp:
         self._mono_cap.configure(text="白黒のときだけ使います (fw37〜)" if not mono else "8x8 = BadCodec のブロックにそろえたディザ")
         self._mono_cap.state(["!disabled"] if mono else ["disabled"])
 
+    def _skip_diff_value(self) -> int:
+        try:
+            return max(0, min(255, int(self.skip_diff.get())))
+        except (tk.TclError, ValueError):
+            return 0
+
+    def _skip_changed(self):
+        """小さな変化を送らないしきい値: 説明を書き換え、送信中ならすぐ反映"""
+        v = self._skip_diff_value()
+        if hasattr(self, "_skip_cap"):
+            self._skip_cap.configure(text="0 = 可逆 (全部送る)" if v == 0 else
+                                     f"8x8 の色の差が {v} 以下なら前のまま (非可逆)")
+        m = getattr(self, "sender", None)
+        if m is not None:
+            m.skip_diff = v
+
     # ---- 試験の設定を覚えておく (models/gate_ui.json。起動し直しても残す) -----------------------
     def _ui_vars(self) -> dict:
-        return {"arm_runs": self.arm_runs, "mirror_fmt": self.mirror_fmt, "mirror_ent": self.mirror_ent,
+        return {"arm_runs": self.arm_runs, "mirror_fmt": self.mirror_fmt, "mirror_ent": self.mirror_ent, "skip_diff": self.skip_diff,
                 "threshold": self.threshold, "dither": self.dither, "show_other": self.show_other, "fps": self.fps, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
                 "shuttle_wait": self.shuttle_wait, "shuttle_axis": self.shuttle_axis, "mouse_mode": self.mouse_mode,
                 "explore_radius": self.explore_radius, "explore_step": self.explore_step,

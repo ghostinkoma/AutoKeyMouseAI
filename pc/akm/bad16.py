@@ -20,9 +20,11 @@ import struct
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 W, H = 240, 136  # 135 行 + 1 (8 の倍数)
+BLOCK = 8  # BadCodec のブロック
 # 前フレーム不要版 (ver 3 / 7) の本体の最大: 8x8 が 510 個 x 16 面 x 9 バイト (MASTER_BLOCK) ≒ 73KB。
 # RGB565 そのもの (64.8KB) より大きくなることがある (細かい模様が画面全体で変わったとき)
 ABS_CAP = (W // 8) * (H // 8) * 16 * 9 + 4096
@@ -227,6 +229,40 @@ class Encoder:
         self.prev565 = img
         flags = (1 if key else 0) | (2 if self.gray else 0) | (4 if self.smooth or self.mono else 0)
         return b"B6\x03" + bytes([flags]) + struct.pack("<H", mask) + out[:n].tobytes()
+
+
+# ------------------------------------------------------------ 小さな変化を送らない (非可逆) --
+class BlockHold:
+    """8x8 ブロックごとに、液晶に出ている絵 (最後に送った絵) と比べて、どの画素も色の差が threshold 以下なら
+    そのブロックは前の絵のまま (= 変わっていない扱いになり、BadCodec は送らない)。threshold 0 = 可逆 (何もしない)。
+    比べる相手は「前のフレーム」ではなく「液晶に出ている絵」なので、ゆっくりした変化も積もってしきい値を
+    超えた所で送られる (ずれが残り続けない)。"""
+
+    def __init__(self, threshold: int = 0):
+        self.threshold = int(threshold)
+        self.shown: np.ndarray | None = None
+        self.held_blocks = 0  # 直近のフレームで前のままにしたブロックの数
+
+    def reset(self) -> None:
+        self.shown = None
+
+    def apply(self, bgr: np.ndarray) -> np.ndarray:
+        self.held_blocks = 0
+        if self.threshold <= 0 or self.shown is None or self.shown.shape != bgr.shape:
+            self.shown = bgr.copy()
+            return bgr
+        h, w = bgr.shape[:2]
+        hb, wb = -(-h // BLOCK), w // BLOCK
+        pad = hb * BLOCK - h
+        cur = np.concatenate([bgr, np.repeat(bgr[-1:], pad, 0)], 0) if pad else bgr
+        old = np.concatenate([self.shown, np.repeat(self.shown[-1:], pad, 0)], 0) if pad else self.shown
+        d = cv2.absdiff(cur, old).reshape(hb, BLOCK, wb, BLOCK, -1).max(axis=(1, 3, 4))
+        hold = d <= self.threshold
+        self.held_blocks = int(hold.sum())
+        m = np.repeat(np.repeat(hold, BLOCK, 0), BLOCK, 1)[:h, :w]
+        out = np.where(m[..., None], self.shown, bgr)
+        self.shown = out
+        return out
 
 
 # ------------------------------------------------------------- インデックスカラー (ver 7) --
