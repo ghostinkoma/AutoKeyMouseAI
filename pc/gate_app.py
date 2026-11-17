@@ -900,6 +900,10 @@ class GateApp:
         kb = nbytes / sent / 1024 if sent else 0.0
         line = (f"{label}{fmt.replace(' ', '')} {dt:.0f}s PC {fps:.1f}fps {kb:.1f}KB/枚 "
                 f"{nbytes / dt / 1024 if dt > 0 else 0:.0f}KB/s 失敗{fails}")
+        m = getattr(self, "sender", None)
+        if m is not None and label == "":  # PC 側の 1 枚あたり: 撮影 / エンコード / 送信と返事待ち
+            line += (f" 撮影{getattr(m, 't_capture', 0):.0f} エンコ{getattr(m, 't_encode', 0):.0f} "
+                     f"送信{getattr(m, 't_post', 0):.0f}ms")
         if esp:
             line += (f" | ESP {esp['fps']:.1f}fps 受信待ち{esp['recv_ms']:.0f} 展開{esp['decode_ms']:.0f} "
                      f"描画{esp['draw_ms']:.0f}ms CPU{esp['cpu_pct']:.0f}%"
