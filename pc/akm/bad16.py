@@ -297,6 +297,10 @@ class IndexEncoder:
         assert self.colors in (16, 256), colors
         self.mono = bool(mono)
         self.dither = bool(dither)
+        # ディザの強さ (1.0 = 標準)。16 色: 散らす幅 = パレットの隣り合う色の間隔 (中央値) x 強さ。
+        # 灰色 16 段: 1 段 (17) x 強さ。0 = ディザなしと同じ。送信中に変えてよい
+        self.dither_strength = 1.0
+        self._spread = 255.0 / 4  # パレットができるまでの仮の幅
         self.mask = 0x00FF if self.colors == 256 else 0x000F
         self.swap_sizes = IDX_SWAP if self.colors == 256 else (2, 4)
         self.gray = gray
@@ -330,7 +334,9 @@ class IndexEncoder:
             return rgb
         h, w = rgb.shape[:2]
         t = np.tile(_bayer8_unit(), (-(-h // BLOCK), -(-w // BLOCK)))[:h, :w]
-        spread = 255.0 / 4  # 16 色: 1 色あたり 4 段ほどの間隔
+        spread = self._spread * self.dither_strength
+        if spread <= 0:
+            return rgb
         return np.clip(rgb.astype(np.float32) + (t[..., None] - 0.5) * spread, 0, 255).astype(np.uint8)
 
     def _mono_idx(self, rgb: np.ndarray) -> np.ndarray:
@@ -339,14 +345,23 @@ class IndexEncoder:
         if self.dither:
             h, w = y.shape
             t = np.tile(_bayer8_unit(), (-(-h // BLOCK), -(-w // BLOCK)))[:h, :w]
-            return np.clip(np.floor(y + t), 0, 15).astype(np.uint8)
-        return np.clip(np.rint(y), 0, 15).astype(np.uint8)
+            return np.clip(np.floor(y + (t - 0.5) * self.dither_strength + 0.5), 0, 15).astype(np.uint8)
+        return np.clip(np.floor(y + 0.5), 0, 15).astype(np.uint8)
 
     def _set_palette(self, pal: np.ndarray) -> None:
         from PIL import Image
 
         self.pal = pal
         self.pal565 = ((pal[:, 0] >> 3) << 11 | (pal[:, 1] >> 2) << 5 | (pal[:, 2] >> 3)).astype(np.uint16)
+        if self.colors < 256 and not self.mono:
+            # 隣り合う色の間隔: 各色から一番近い別の色までの距離の中央値 (ディザで散らす幅の基準)
+            c = pal[:self.colors].astype(np.float32)
+            d = np.sqrt(((c[:, None] - c[None]) ** 2).sum(-1))
+            d[d == 0] = np.inf
+            nn = d.min(axis=1)
+            nn = nn[np.isfinite(nn)]
+            if len(nn):
+                self._spread = float(np.clip(np.median(nn), 8.0, 128.0))
         pim = Image.new("P", (1, 1))
         pim.putpalette(pal.astype(np.uint8).reshape(-1).tolist())
         self._pim = pim

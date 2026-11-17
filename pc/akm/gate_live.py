@@ -118,7 +118,8 @@ def index_kw(fmt: str, dither: str = "なし") -> dict:
     return {}
 
 
-def to_send_format(small: np.ndarray, fmt: str, threshold: int, dither: str = "なし") -> tuple[np.ndarray, int]:
+def to_send_format(small: np.ndarray, fmt: str, threshold: int, dither: str = "なし",
+                   strength: float = 1.0) -> tuple[np.ndarray, int]:
     """送る形式に合わせた見た目 (ESP32 の液晶に出るのと同じ色) と、おおよその 1 枚の大きさ (バイト。差分で縮む前)。"""
     if fmt.startswith("BadCodec 1bit"):
         bw = to_mono(small, threshold, dither)
@@ -131,6 +132,7 @@ def to_send_format(small: np.ndarray, fmt: str, threshold: int, dither: str = "�
         enc = _PREVIEW.get(key)
         if enc is None:
             enc = _PREVIEW[key] = IndexEncoder(**kw)
+        enc.dither_strength = strength
         return from565(enc.display(small)), SEND_W * SEND_H * (8 if fmt == "Index 256" else 4) // 8
     bits = color_bits(fmt)
     if bits is not None:
@@ -159,6 +161,7 @@ class LiveFeed:
         self.fmt = "BadCodec 1bit"
         self.threshold = 60
         self.dither = "なし"  # 白黒のディザ (DITHERS)
+        self.dither_strength = 1.0  # 16 色 / 灰色 16 段のディザの強さ
         self.fps_target = 15.0
         self.mode = "obs"          # "obs" / "window"
         self.hwnd = 0
@@ -270,7 +273,8 @@ class LiveFeed:
                     wgc_seen = wgc.frames
                 t1 = time.monotonic()
                 small = compose(img, [])
-                snap.preview, _ = to_send_format(small, self.fmt, self.threshold, self.dither)
+                snap.preview, _ = to_send_format(small, self.fmt, self.threshold, self.dither,
+                                                 getattr(self, "dither_strength", 1.0))
                 t2 = time.monotonic()
                 snap.size = self._full_size if self.mode == "obs" and self._full_size[0] else (img.shape[1], img.shape[0])
                 snap.timing = {"grab": (t1 - t0) * 1000, "make": (t2 - t1) * 1000}

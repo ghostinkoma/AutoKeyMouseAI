@@ -368,6 +368,7 @@ class GateApp:
         self.skip_diff = tk.IntVar(value=0)
         self.mirror_ent = tk.StringVar(value="なし")  # BadCodec のフレームをさらに包む: なし / tANS
         self.threshold = tk.IntVar(value=100)
+        self.dither_pct = tk.IntVar(value=100)  # 16 色 / 灰色 16 段のディザの強さ (%。100 = 標準)
         self.dither = tk.StringVar(value="8x8")  # 白黒 1 ビットのディザ (BadCodec の 8x8 にそろえた組織的ディザ)
         self.fps = tk.IntVar(value=15)
         self.com = tk.StringVar(value="COM18")
@@ -579,6 +580,10 @@ class GateApp:
         self._mono_widgets[-1].pack(side=tk.LEFT)
         self._dither_box = ttk.Combobox(df, textvariable=self.dither, values=list(DITHERS), width=6, state="readonly")
         self._dither_box.pack(side=tk.LEFT)
+        self._dpct_lbl = ttk.Label(df, text=" 強さ%")
+        self._dpct_lbl.pack(side=tk.LEFT)
+        self._dpct_box = ttk.Spinbox(df, from_=0, to=200, increment=10, textvariable=self.dither_pct, width=4)
+        self._dpct_box.pack(side=tk.LEFT)
         self._mono_cap = ttk.Label(g, text="", style="Caption.TLabel")
         self._mono_cap.grid(row=3, column=0, columnspan=2, sticky="w")
         self.mirror_fmt.trace_add("write", lambda *_: self._sync_fmt_widgets())
@@ -1186,6 +1191,8 @@ class GateApp:
             w.state(["!disabled"] if mono else ["disabled"])
         self._dither_box.configure(state="readonly" if mono or f in ("Index 16", "Gray 16") else "disabled")
         self._mono_widgets[3].state(["!disabled"] if mono or f in ("Index 16", "Gray 16") else ["disabled"])
+        for w in (self._dpct_lbl, self._dpct_box):  # 強さは 16 色 / 灰色 16 段だけ (白黒はしきい値で調整)
+            w.state(["!disabled"] if f in ("Index 16", "Gray 16") else ["disabled"])
         self._mono_cap.configure(text="白黒のときだけ使います (fw37〜)" if not mono else "8x8 = BadCodec のブロックにそろえたディザ")
         self._mono_cap.state(["!disabled"] if mono else ["disabled"])
 
@@ -1207,7 +1214,7 @@ class GateApp:
 
     # ---- 試験の設定を覚えておく (models/gate_ui.json。起動し直しても残す) -----------------------
     def _ui_vars(self) -> dict:
-        return {"arm_runs": self.arm_runs, "mirror_fmt": self.mirror_fmt, "mirror_ent": self.mirror_ent, "skip_diff": self.skip_diff,
+        return {"arm_runs": self.arm_runs, "mirror_fmt": self.mirror_fmt, "mirror_ent": self.mirror_ent, "skip_diff": self.skip_diff, "dither_pct": self.dither_pct,
                 "threshold": self.threshold, "dither": self.dither, "show_other": self.show_other, "fps": self.fps, "shuttle_map": self.shuttle_map, "shuttle_tiles": self.shuttle_tiles,
                 "shuttle_wait": self.shuttle_wait, "shuttle_axis": self.shuttle_axis, "mouse_mode": self.mouse_mode,
                 "explore_radius": self.explore_radius, "explore_step": self.explore_step,
@@ -1737,6 +1744,13 @@ class GateApp:
             self.live.fmt = self.mirror_fmt.get()
             self.live.threshold = int(self.threshold.get())
             self.live.dither = self.dither.get()
+            try:
+                pct = max(0, min(300, int(self.dither_pct.get())))
+            except (tk.TclError, ValueError):
+                pct = 100
+            self.live.dither_strength = pct / 100.0
+            if self.sender is not None:
+                self.sender.dither_strength = pct / 100.0
             self.live.fps_target = float(self.fps.get())
             self.live.mode = self.capture_mode.get()
             if self.sender is not None:

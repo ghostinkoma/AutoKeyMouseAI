@@ -127,6 +127,7 @@ class Mirror:
         self.palette = bool(palette)
         # IndexEncoder への追加の指定: {'colors': 16} / {'mono': True} と {'dither': True} (frame-stream-53 以降)
         self.index_kw = dict(index_kw or {})
+        self.dither_strength = 1.0  # 16 色 / 灰色 16 段のディザの強さ (送信中に変えてよい)
         # BadCodec (インデックス / 16bit): 8x8 ブロックの色の差がすべてこの値以下なら送らない (0 = 可逆)。送信中でも変えてよい
         self.skip_diff = 0
         self._hold = None
@@ -338,6 +339,8 @@ class Mirror:
                 frame = self._hold.apply(frame)
             elif self._hold is not None:
                 self._hold.reset()
+            if hasattr(self._b16, "dither_strength"):
+                self._b16.dither_strength = float(self.dither_strength)
             data = self._b16.encode(frame)
             if self.entropy and data[:2] == b"B6":
                 from .bad16 import entropy_wrap

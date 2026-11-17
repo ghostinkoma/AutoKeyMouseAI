@@ -282,3 +282,21 @@ def test_index16_matches_esp32_decoder(decoder, kw):
     for got, want in zip(run_decoder(decoder, datas), expect):
         assert np.array_equal(got, want)
     assert n16 < n256
+
+
+def test_index16_dither_strength():
+    """ディザの強さ: 0 = ディザなしと同じ。16 色の散らす幅はパレットの色の間隔から決まる"""
+    from akm.bad16 import IndexEncoder
+
+    f = frames_of()[0]
+    plain, d0 = IndexEncoder(mono=True), IndexEncoder(mono=True, dither=True)
+    d0.dither_strength = 0.0
+    plain.encode(f)
+    d0.encode(f)
+    assert np.array_equal(plain.last_display, d0.last_display)
+    c = IndexEncoder(colors=16, dither=True)
+    c.encode(f)
+    assert 8.0 <= c._spread <= 128.0
+    weak, strong = IndexEncoder(colors=16, dither=True), IndexEncoder(colors=16, dither=True)
+    weak.dither_strength, strong.dither_strength = 0.3, 1.5
+    assert len(weak.encode(f)) < len(strong.encode(f))  # 弱いほど模様が少なく小さい
